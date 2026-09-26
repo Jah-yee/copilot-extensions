@@ -1,9 +1,0 @@
-{
-  "comment": "Retire manager-owned monitor-side mux writes and registry shims",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

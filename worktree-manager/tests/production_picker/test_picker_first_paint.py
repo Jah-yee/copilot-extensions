@@ -86,7 +86,7 @@ def test_setup_live_pivots_prewarms_optional_modules(monkeypatch):
 
 
 def test_setup_live_pivots_prewarm_starts_before_the_pivot_scan(monkeypatch):
-    """Same ordering requirement as ``setup()`` (see
+    """Same ordering requirement as ``setup_sync()`` (see
     ``test_setup_prewarm_starts_before_the_pivot_scan``): even though
     ``_setup_live_pivots`` already runs off the render thread, starting the
     prewarm import before the scan (rather than after) maximizes its head
@@ -153,7 +153,7 @@ def test_setup_live_pivots_prewarms_machine_key_map(monkeypatch):
 
 
 def test_prewarm_machine_key_map_does_not_block_the_calling_thread(monkeypatch):
-    """``setup()`` must run ``_prewarm_machine_key_map``'s compute on a
+    """``setup_sync()`` must run ``_prewarm_machine_key_map``'s compute on a
     background thread, not inline -- a slow/cold ``load_config()`` call
     there must never reintroduce the freeze this exists to remove."""
     pytest.importorskip("textual")
@@ -186,7 +186,7 @@ def test_prewarm_machine_key_map_does_not_block_the_calling_thread(monkeypatch):
     monkeypatch.setattr(data_ssh, "machine_key_map", slow_machine_key_map)
     try:
         t0 = time.perf_counter()
-        screen.setup()
+        screen.setup_sync()
         elapsed = time.perf_counter() - t0
     finally:
         release.set()  # let the worker thread's slow call unblock and finish
@@ -300,7 +300,8 @@ def test_prewarm_machine_key_map_does_not_spawn_a_second_thread_while_inflight(
 
 
 def test_setup_prewarms_optional_modules_too(monkeypatch):
-    """``setup()`` -- the shared non-live-mount / manual-reload ('r') path --
+    """``setup_sync()`` -- the synchronous lower-level setup seam exercised by
+    sync baseline tests --
     must warm the same modules as ``_setup_live_pivots``: a registered pivot
     can be *first discovered* here too (e.g. a plugin installed after the
     picker started, picked up on the next 'r' reload), and unlike
@@ -326,20 +327,20 @@ def test_setup_prewarms_optional_modules_too(monkeypatch):
             return []
 
     screen = eng.PickerScreen(Src(), live=False)
-    calls.clear()  # __init__/on_mount may already have called setup() once
-    screen.setup()
+    calls.clear()  # __init__/on_mount may already have kicked setup off once
+    screen.setup_sync()
 
     assert calls == [1]
 
 
 def test_setup_prewarm_starts_before_the_pivot_scan(monkeypatch):
-    """``setup()`` must kick off the ``prewarm_optional_modules`` thread
+    """``setup_sync()`` must kick off the ``prewarm_optional_modules`` thread
     BEFORE running the (potentially slow, synchronous) pivot-registry scan,
     not after it.
 
     The prewarm thread exists purely to give ``data_ssh``'s import a head
     start over the operator's first pivot-switch keypress (see
-    ``prewarm_optional_modules``'s own docstring). If ``setup()`` runs the
+    ``prewarm_optional_modules``'s own docstring). If ``setup_sync()`` runs the
     scan first and only starts the prewarm thread once the scan returns, the
     render thread is blocked for the scan's own duration AND the prewarm
     thread barely has a head start once input resumes -- the operator's very
@@ -374,8 +375,8 @@ def test_setup_prewarm_starts_before_the_pivot_scan(monkeypatch):
         return None
 
     monkeypatch.setattr(screen, "_scan_pivot_payload", recording_scan)
-    order.clear()  # __init__/on_mount may already have called setup() once
-    screen.setup()
+    order.clear()  # __init__/on_mount may already have kicked setup off once
+    screen.setup_sync()
 
     assert order == ["prewarm", "scan"], (
         "prewarm_optional_modules must start before _scan_pivot_payload, not after")
@@ -468,7 +469,7 @@ def test_prewarm_optional_modules_spawns_no_thread_of_its_own(monkeypatch):
     registered pivot while that inner thread is still mid-import (CPython's
     per-module import lock would then block the render thread on the same
     import anyway, only shrinking the freeze window instead of closing it).
-    A caller reachable from the UI thread (``setup()``) is responsible for
+    A caller reachable from the UI thread (``setup_sync()``) is responsible for
     wrapping this call in its own worker thread instead -- see the sibling
     test below."""
     pytest.importorskip("textual")
@@ -483,7 +484,7 @@ def test_prewarm_optional_modules_spawns_no_thread_of_its_own(monkeypatch):
 
 
 def test_setup_prewarm_call_does_not_block_the_calling_thread(monkeypatch):
-    """``setup()`` -- the shared non-live-mount / manual-reload ('r') path,
+    """``setup_sync()`` -- the synchronous lower-level setup seam,
     which runs synchronously on the render/key-handling thread either way --
     must wrap ``tasks.prewarm_optional_modules()`` in its own worker thread,
     so a slow/cold import there cannot reintroduce the exact freeze the fix
@@ -513,7 +514,7 @@ def test_setup_prewarm_call_does_not_block_the_calling_thread(monkeypatch):
     screen = eng.PickerScreen(Src(), live=False)
     try:
         t0 = time.perf_counter()
-        screen.setup()
+        screen.setup_sync()
         elapsed = time.perf_counter() - t0
     finally:
         release.set()  # let the worker thread's slow_prewarm unblock and finish
@@ -569,7 +570,7 @@ def test_first_refresh_callback_is_scheduled_in_every_mode(monkeypatch, live):
     screen = eng.PickerScreen(Src(), live=live)
     deferred = []
     monkeypatch.setattr(screen, "_setup_skeleton", lambda: None)
-    monkeypatch.setattr(screen, "setup", lambda: None)
+    monkeypatch.setattr(screen, "_start_setup_reload_worker", lambda: None)
     monkeypatch.setattr(screen, "_finish_mount", lambda: None)
     monkeypatch.setattr(screen, "call_after_refresh", deferred.append)
 

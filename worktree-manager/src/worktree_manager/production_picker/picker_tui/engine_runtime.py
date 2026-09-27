@@ -109,7 +109,7 @@ class PickerScreenRuntimeMixin:
             pass
         # Reconcile remote tabs' PR state on their own owning machine, once per
         # source, in the background after first paint (#2102). The local tab's
-        # PRs are reconciled separately via the #1423 path in setup().
+        # PRs are reconciled separately via the #1423 path in setup_sync().
         recon = getattr(self.loader, "reconcile_remote_prs", None)
         if callable(recon):
             try:
@@ -601,7 +601,13 @@ class PickerScreenRuntimeMixin:
         ).start()
         return epoch
 
-    def setup(self):
+    def setup_sync(self):
+        """Collect and apply a setup payload synchronously.
+
+        Test/lower-level seam only. Production UI entrypoints must schedule
+        :meth:`_start_setup_reload_worker` so pivot scans and source loads stay
+        off the render thread.
+        """
         self._prime_setup_reload()
         epoch = self._next_setup_epoch()
         try:

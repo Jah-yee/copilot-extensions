@@ -732,6 +732,15 @@ claiming discipline alone.
 
 ## Journal
 
+- **2026-09-27** — Claiming Phase 3c Step 5 (cleanup/rename/document the
+  final non-blocking-I/O shape per
+  [`phase-3c-non-blocking-io.md`](phase-3c-non-blocking-io.md)): remove/rename
+  the now-misleading synchronous `setup()` UI entrypoint, collapse temporary
+  compatibility wrappers from Steps 1-3, update effort/architecture docs, and
+  record the companion cross-repo NDJSON-progress proposal without blocking
+  on it. Working solo per standing operator directive; recorded here per this
+  effort's own Coordination-section claiming discipline since #352 is closed.
+
 - **2026-09-27** — Landed Phase 3c Step 4, PR
   [#4164](https://github.com/ThomasMichon/copilot-extensions/pull/4164).
   Promoted the standing "no blocking I/O on the render thread" contract from

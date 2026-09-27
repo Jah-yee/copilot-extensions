@@ -160,7 +160,7 @@ def prewarm_optional_modules() -> None:
     background thread here instead would only shrink the freeze window
     rather than close it: CPython's per-module import lock would still make
     a render-thread caller block on the same import if a keypress landed
-    mid-warm-up. A caller reachable from the UI thread (``setup()``, the
+    mid-warm-up. A caller reachable from the UI thread (``setup_sync()``, the
     shared non-live-mount / manual-reload ('r') path) must wrap this call in
     its own worker thread itself instead."""
     try:

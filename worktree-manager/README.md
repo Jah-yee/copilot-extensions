@@ -150,6 +150,15 @@ The established production Picker source now lives under
 as a wholesale copy of the still-shipping agent-worktrees implementation.
 `worktree-manager picker <project>` runs that transplanted UI.
 
+The Picker's setup/reload lifecycle is now explicitly split between an async UI
+entrypoint and a synchronous lower-level test seam: production mount, manual
+reload, and post-action rescans all flow through
+`PickerScreen._start_setup_reload_worker()`, which epoch-guards the background
+collect/apply cycle around `_collect_setup_payload()` and
+`_apply_setup_payload()`. The old ambiguous `setup()` UI entrypoint was retired;
+the remaining synchronous helper is `PickerScreen.setup_sync()`, used only by
+lower-level tests that intentionally exercise the blocking seam directly.
+
 The production validation and preview surfaces live with it:
 
 ```bash

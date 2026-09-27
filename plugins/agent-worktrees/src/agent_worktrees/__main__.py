@@ -4889,33 +4889,29 @@ def reap_orphan_mux_sessions(
     **Conservative by design** -- a session is never reaped when:
 
     - a terminal client is **attached** (a human is using it),
+    - Worktree Manager already owns the mux session via ``mux-mapping.json``,
     - its worktree record is ``kind: system`` (daemon-owned), or
     - its worktree is still **active** (tracked, dir present), or
-    - it has been **active within the grace window** (fresh pane activity => the
-      Copilot inside is busy), or the activity signal is **unknown** (never risk
-      killing a session we can't prove is idle).
+    - it has been **active within the grace window** (fresh pane activity => the Copilot inside is busy), or the activity signal is **unknown** (never risk killing a session we can't prove is idle).
 
     Returns a JSON-ready dict::
 
         {"available": bool,                  # False when no mux is installed
          "reaped": ["<id>", ...],
-         "skipped": [{"id": "<id>",
-                      "reason": "attached|system|active|busy|activity-unknown"}, ...],
+         "skipped": [{"id": "<id>", "reason": "attached|system|active|busy|activity-unknown|manager-owned"}, ...],
          "errors":  [{"id": "<id>", "reason": "..."}, ...]}
     """
     all_sessions = sessions._list_mux_sessions()
     if all_sessions is None:
         return {"available": False, "reaped": [], "skipped": [], "errors": []}
-
+    from . import managed_mux_registry
     now = time.time() if now is None else now
     activity_by_name = sessions._mux_session_activity()
     tracking_path = cfg.tracking_dir()
     by_id: dict[str, tracking.WorktreeRecord] = {
         rec.worktree_id: rec for rec in tracking.list_records(tracking_path)
     }
-
-    # One reverse map, not a scan per session: the sweep is O(sessions x
-    # records) otherwise.
+    # One reverse map, not a scan per session: the sweep is O(sessions x records) otherwise.
     by_session = sessions.mux_session_index(by_id)
 
     reaped: list[str] = []
@@ -4929,6 +4925,9 @@ def reap_orphan_mux_sessions(
         # "untracked" below -- which reaps a live, tracked session.
         wt_id = sessions.worktree_id_from_mux_session(name, index=by_session)
         if only_id is not None and wt_id != only_id:
+            continue
+        if managed_mux_registry.live_mapping_for_session(name):
+            skipped.append({"id": wt_id, "reason": "manager-owned"})
             continue
         if attached and attached > 0:
             skipped.append({"id": wt_id, "reason": "attached"})

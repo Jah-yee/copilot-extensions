@@ -222,13 +222,70 @@ find the noisiest and blocking issues, and fix them"
   `FORBIDDEN_IDS_FACILITY`/`FORBIDDEN_IDS_WORK` secret setup.
 - [ ] Work down the Phase 2 ranking, opening one PR per fix (or a small
   batch when fixes are trivially related), closing/updating aperture-labs
-  issues as each lands. Next candidates from the live Phase 2 ranking:
+  issues as each lands.
+  **Important refinement found 2026-09-27 (must inform how the rest of
+  this Plan item proceeds):** most of the Phase 2 ranking's high-frequency/
+  high-blocking-impact entries are **not standing code bugs** the way
+  #7715 was. Directly verified live against current `dev` HEAD:
   `tools/test_check_marketplace_isolation.py::
   test_payload_catalog_adopter_capabilities_avoid_bare_global_commands`
-  (noisiest by frequency) and
-  `tests/test_install_signed_python_probe.py::
-  test_missing_newest_candidate_does_not_abort_probe[pwsh]` (highest
-  blocking impact).
+  (23 occurrences, 0% recovery) and
+  `plugins/copilot-extensions-harness/tests/test_session_context_declarations.py::
+  test_static_projection_plugins_register_no_session_start_hook` (9
+  occurrences) both **pass cleanly right now** -- there is no current
+  failure to fix. These are cross-cutting content-governance guards that
+  scan skill/agent docs (or session-hook wiring) across MANY plugins at
+  once; a failure means a *specific, different* PR's own in-progress doc
+  edit tripped it that day, and that PR's author fixed their own content
+  before merge (0% recovery makes sense: a genuine content mistake never
+  clears via a mere rerun, and it was never actually stuck on `dev` -- each
+  historical occurrence was a different PR's own pre-merge iteration, not
+  a persisting regression). **This is the check working as intended, not
+  noise to eliminate or a bug to fix.** Do not "fix" these by editing the
+  checks or the test suite; there is nothing broken. This is a real
+  limitation of the Phase 2 ranking worth being explicit about (it can't
+  currently distinguish "one persisting bug recurring" from "many
+  different authors independently tripping the same working guardrail")
+  -- a future refinement could correlate each occurrence's run against
+  that PR's own eventual merge state, but that's out of scope for this
+  pass.
+  **Former candidate, now believed historical (pending post-#4239
+  confirmation) -- not currently actionable:**
+  `plugins/agent-logger/tests/test_install_signed_python_probe.py::
+  test_missing_newest_candidate_does_not_abort_probe[pwsh]` (19
+  occurrences, 122 blocked `dev`-push runs in the original 7-day-lookback
+  ranking -- the highest blocking impact in that ranking) looked like a
+  genuine Windows-runner probe-script bug, unrelated to any PR's own doc
+  content.
+  **2026-09-27 investigation, corrected after review:** 20/20 local runs
+  via `tools/run-plugin-tests.py agent-logger` (Windows dev box) stayed
+  green. A first pass here cited a historical failure excerpt from
+  PR-triggered `ci.yml` run 36302713272 (commit `60a62be1`) as open
+  evidence -- **that was wrong, caught by review**: `60a62be1` is the
+  commit *immediately before* PR #4239 (`e305b70c3`, merged 9 minutes
+  later the same day, 2026-09-27), which added exactly the
+  `os.name != "nt"` skip guard this test now carries. The cited failure
+  (a POSIX `/tmp/...` path, an Ubuntu job) is simply the original,
+  already-fixed bug #4239 fixed -- not new evidence of a still-open
+  problem. Searched failed PR-triggered `ci.yml` runs created after
+  #4239's merge timestamp (12 found in the available run-history window)
+  for any matching `agent-logger` job failure: **none found.** This
+  signature's Phase 2 ranking occurrences are very likely entirely
+  historical noise predating its own fix (#4239), not a currently-open
+  Phase 3 item -- **not confirmed conclusively**, since the check only
+  covered the runs available via the API at the time, not a fresh
+  telemetry `refresh` scoped by date. Note: `tools/ci_telemetry.py`
+  currently only supports a *relative* `--lookback-days` window, not an
+  absolute since-date/since-commit filter, so "start strictly after
+  2026-09-27" isn't directly expressible with today's CLI. The concretely
+  actionable next step, if this is picked up again: once several days have
+  passed (so that `--lookback-days` set smaller than the day-count since
+  2026-09-27 naturally excludes `60a62be1`/`e305b70c3` from the window),
+  re-run `refresh` and confirm the signature's occurrence count is zero.
+  Adding an absolute `--since` filter to the CLI would make this cleaner
+  and is a reasonable small follow-up, not yet done. If the signature
+  recurs even once on a run created after the guard existed, that would be
+  genuinely new evidence worth investigating from scratch.
 
 ## Validation Plan
 
@@ -256,6 +313,41 @@ _Pending — Phase 3 findings (which fixes land, and in what order) will
 determine whether this section needs anything beyond the Plan above._
 
 ## Journal
+
+### 2026-09-27 — Signed-python-probe investigation corrected after review
+- A Copilot review on the PR carrying the prior entry (below) correctly
+  caught that the "investigation evidence" cited there was stale: the
+  failing run's commit (`60a62be1`) is the one immediately *before* PR
+  #4239 (`e305b70c3`, merged 9 minutes later the same day) added the
+  `os.name != "nt"` skip guard this test now carries -- the cited POSIX
+  `/tmp/...` path and empty-probe-result failure is simply the original
+  bug #4239 already fixed, not new evidence of a still-open problem.
+- Searched failed PR-triggered `ci.yml` runs created after #4239's merge
+  timestamp for a matching `agent-logger` job failure: none found among
+  the runs available via the API at check time. Not a conclusive proof of
+  zero recurrence (the check didn't cover the full historical window a
+  fresh telemetry `refresh` would), but no evidence found of the bug
+  recurring since its own fix landed.
+- Net effect: this signature is very likely NOT a currently-open Phase 3
+  item at all -- its Phase 2 ranking occurrences were most likely entirely
+  historical, predating and then resolved by #4239. The effort's own
+  Journal/Plan sections above and below have been corrected to stop
+  pointing at it as an active next step. See the Phase 3 Plan item above
+  for the concrete (CLI-capability-aware) next step if this is picked up
+  again -- `tools/ci_telemetry.py` only supports a relative
+  `--lookback-days` window today, not an absolute since-date filter.
+
+### 2026-09-27 — Phase 2 ranking refinement: content-governance noise vs. real bugs
+- Directly verified two of the Phase 2 ranking's top entries
+  (marketplace-isolation bare-command check, session-context-declarations
+  hook-wiring check) against current `dev` HEAD: both pass cleanly right
+  now. Concluded these are cross-cutting content-governance guards that
+  many *different* PR authors independently trip during their own
+  in-progress doc edits, always fixed before merge -- not standing code
+  bugs, and not this effort's to fix. See the Phase 3 Plan item above for
+  the full reasoning; the `test_install_signed_python_probe.py` signature
+  was investigated separately (see the later dated entry above) and is
+  very likely historical, not a confirmed open Phase 3 item.
 
 ### 2026-09-27 — Phase 3 first item: aperture-labs#7715 fixed
 - Reproduced the flake directly (read-only diagnostic sub-agents, WSL,

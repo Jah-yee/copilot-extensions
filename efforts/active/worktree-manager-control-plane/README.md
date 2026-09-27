@@ -353,8 +353,8 @@ launch/monitor ownership has moved out of `agent-worktrees`, the Picker treats
 backend vs. presentation as independent axes, and legacy `session_backend`
 bindings still resolve correctly through the compatibility view.
 
-### Phase 3c — Picker non-blocking I/O (In progress — Steps 1-4 landed, Step 5 open)
-- [ ] Make every I/O-touching Picker surface — pivot loads (built-in and
+### Phase 3c — Picker non-blocking I/O (Done — Steps 1-5 landed)
+- [x] Make every I/O-touching Picker surface — pivot loads (built-in and
       plugin-contributed), menu opens, and action execution with progress
       reporting — consistently non-blocking, closing the gap found while
       investigating a "menus feel slow" report after
@@ -389,7 +389,33 @@ bindings still resolve correctly through the compatibility view.
       epoch-guarded setup worker instead of calling synchronous `setup()`,
       and new Step 3 race coverage proves rapid repeated reloads plus both
       config-section/worktree-action rescan vs manual reload orderings always
-      resolve to the newer epoch.
+      resolve to the newer epoch. **Step 4 landed in PR
+      [#4164](https://github.com/ThomasMichon/copilot-extensions/pull/4164)**:
+      explicit blocking-gate tests now fail if mount, manual reload, or either
+      post-action rescan regresses to direct `_collect_setup_payload()` /
+      synchronous-setup work on the UI thread, while the existing Actions-menu
+      liveness and steer-submit offload tests are called out as part of the
+      same standing boundary. **Step 5 lands in PR
+      [#4277](https://github.com/ThomasMichon/copilot-extensions/pull/4277)**:
+      investigation confirmed no production `self.setup(` caller or temporary
+      Step 1-3 compatibility wrapper remained, so the final cleanup renamed the
+      last synchronous lower-level seam to `setup_sync()`, refreshed the
+      architecture/effort docs to name `_start_setup_reload_worker()` /
+      `_collect_setup_payload()` / `_apply_setup_payload()` as the settled
+      boundary, and linked the cross-repo built-in-verb NDJSON progress
+      follow-up issue [#4274](https://github.com/ThomasMichon/copilot-extensions/issues/4274).
+      Validation: the targeted rename/boundary suites are green; the broad
+      `tests/production_picker/` run held the same pre-existing Windows
+      provider-source baseline twice back-to-back at `775 passed, 3 skipped,
+      3 failed`; and the full `worktree-manager` suite matched the standing
+      Windows baseline at `1500 passed, 7 skipped, 13 failed`
+      (the same 3 provider-source failures plus 10 symlink-privilege failures).
+
+Phase 3c is complete: every production setup/reload entrypoint now offloads
+through the same epoch-guarded worker, the remaining synchronous seam is named
+as test-only lower-level setup (`setup_sync()`), the UI-thread regression
+boundary is explicit in tests, and the richer built-in lifecycle progress idea
+is durably tracked as a follow-up rather than blocking this cutover.
 
 ### Phase 3d — Retire the Picker's in-process engine-module boundary (Planned — #3359, #3360)
 
@@ -740,6 +766,30 @@ claiming discipline alone.
   record the companion cross-repo NDJSON-progress proposal without blocking
   on it. Working solo per standing operator directive; recorded here per this
   effort's own Coordination-section claiming discipline since #352 is closed.
+
+- **2026-09-27** — Landed Phase 3c Step 5, PR
+  [#4277](https://github.com/ThomasMichon/copilot-extensions/pull/4277).
+  Investigation first re-verified the cleanup scope instead of assuming it:
+  every production render-thread setup/reload caller was already on
+  `_start_setup_reload_worker()`, and no temporary Step 1-3 compatibility
+  wrapper remained to collapse. The real final cutover work was therefore to
+  retire the misleading synchronous `setup()` UI-shaped name itself: it is now
+  `setup_sync()`, and only the intentional lower-level synchronous tests call
+  it directly. Refreshed the surrounding comments/tests/docs so the settled
+  helper names are explicit (`_start_setup_reload_worker()` for production
+  mount/reload/rescan; `_collect_setup_payload()` / `_apply_setup_payload()`
+  for the atomic payload seam), updated the Worktree Manager README and this
+  effort's Phase 3c records, and linked the already-open cross-repo follow-up
+  [#4274](https://github.com/ThomasMichon/copilot-extensions/issues/4274)
+  instead of filing a duplicate. Validation: targeted rename/boundary suites
+  green; repeated broad `tests/production_picker/` runs held the unchanged
+  Windows provider-source baseline at `775 passed, 3 skipped, 3 failed`; full
+  `worktree-manager` suite matched the standing Windows baseline at
+  `1500 passed, 7 skipped, 13 failed` (the same 3 provider-source failures
+  plus 10 symlink-privilege failures); `ruff check --select F,E9`,
+  `check-version-bump.py --base origin/dev`,
+  `check-changefile-presence.py --base origin/dev`,
+  `check-install-contract.py`, and `git diff --check` all passed.
 
 - **2026-09-27** — Landed Phase 3c Step 4, PR
   [#4164](https://github.com/ThomasMichon/copilot-extensions/pull/4164).

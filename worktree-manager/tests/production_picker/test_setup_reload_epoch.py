@@ -443,6 +443,37 @@ def test_sync_setup_disposes_payload_when_apply_raises():
     assert disposed.is_set()
 
 
+def test_setup_sync_runs_one_local_reconcile_batch_per_epoch():
+    pytest.importorskip("textual")
+    from worktree_manager.production_picker.picker_tui import engine as eng
+    from worktree_manager.production_picker.picker_tui import data_local
+
+    calls = {"batch": 0}
+
+    screen = eng.PickerScreen(data_local, live=False)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(data_local.context, "project", lambda: "example")
+    monkeypatch.setattr(
+        data_local.engine_client,
+        "list_worktree_rows",
+        lambda *_args, **_kwargs: [{"id": "wt-a", "state": "wip"}],
+    )
+    monkeypatch.setattr(
+        data_local.engine_group_c,
+        "picker_reconcile_local",
+        lambda *_args, **_kwargs: calls.__setitem__("batch", calls["batch"] + 1)
+        or type("Batch", (), {"rows": [{"id": "wt-a"}], "summary": {"mux_scan_ok": True}})(),
+    )
+
+    try:
+        screen.setup_sync_for_tests()
+        screen.setup_sync_for_tests()
+    finally:
+        monkeypatch.undo()
+
+    assert calls == {"batch": 2}
+
+
 def test_apply_setup_payload_cancels_replaced_loader():
     disposed = threading.Event()
 

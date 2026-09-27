@@ -318,12 +318,62 @@ once every remaining caller is already off the import boundary.
      `plugins/agent-worktrees/docs/engine-picker-contract.md` and added
      contract/regression coverage on both sides of the seam.
 
-2. [ ] **Promote Group B's project/config/ssh decisions to a narrow public CLI
-   seam, additive only.** This should be public `--json` CLI surface, not a
+2. [x] **Promote Group B's project/config/ssh decisions to a narrow public CLI
+   seam, additive only.** **Done in PR [#4322](https://github.com/ThomasMichon/copilot-extensions/pull/4322).**
+   This is public `--json` CLI surface, not a
    stable importable Python API: the governing contract for the control plane is
    still "Picker reaches agent-worktrees only through CLI verbs," and replacing
    `_engine_runtime.py` with another import surface would preserve the coupling
    this phase exists to remove.
+   - **Concrete Step 2 seam design (decided before implementation):**
+     - Add `<project> picker-bootstrap --json` as a new versioned bootstrap read
+       returning
+       `{"version":1,"project":"<resolved-project>","should_switch_cwd":<bool>,"cwd":"<normalized-abs-path>|null","default_live":<bool>}`.
+       This deliberately exposes the **decision** `runner._prepare()` needs
+       (authoritative project id + cwd-switch + default live/local mode), not
+       the private helper names or intermediate config objects.
+     - **No `resolve --json` payload/version change is planned for Step 2.**
+       The existing remote-launch envelope already carries the production
+       Picker's needed machine/environment answer
+       (`action`/`ssh_alias`/`remote_command`/`machine`/`display_name`) for
+       `--machine` / `--environment` / `--target-no-mux`; Step 2 reuses that
+       seam as-is rather than widening it speculatively.
+     - Add `<project> repair-stale-anchor --json` as a targeted, one-shot repair
+       action returning
+       `{"version":1,"project":"<resolved-project>","status":"unchanged|repaired|still-missing","self_present_before":<bool>,"self_present_after":<bool>}`.
+       This replaces the effect of `_heal_stale_anchor_if_self_missing` without
+       making the Picker depend on the helper's private import path.
+     - On the Manager side, extend the existing
+       `production_picker.context` binding surface with a versioned project
+       bootstrap record (resolved project + cwd-switch + default_live) so
+       downstream Picker/data helpers can consume the parent-owned binding once
+       Step 4 cuts `runner.py` over, without introducing a new global context
+       mechanism.
+   - Landing details:
+     - Added/pinned `picker-bootstrap --json` + `repair-stale-anchor --json` in
+       `agent-worktrees`, documented both in
+       `plugins/agent-worktrees/docs/engine-picker-contract.md`, and confirmed
+       Step 2 needed **no** `resolve --json` payload change beyond reusing the
+       already-pinned remote launch plan.
+     - Added `worktree_manager.production_picker.engine_group_b` plus a
+       parent-owned `production_picker.context.ProjectBootstrap` record so the
+       eventual cutover can bind the authoritative engine answer once and reuse
+       it across downstream Picker/data consumers.
+     - Kept this PR additive-only: no `runner.py` call site moved yet, and the
+       old in-process path remains the live production route until Step 4.
+     - Validation: targeted Group B seam tests green on both sides; full
+       `worktree-manager` suite (excluding the two standing hangs) matched the
+       current unrelated baseline at `1274 passed, 2 skipped, 13 failed`; full
+       `agent-worktrees` suite on this machine remained red only in unrelated
+       baseline families (`5733 passed, 50 skipped, 7 failed`:
+       `test_launch_cmd`, `test_lazy_dispatch`, `test_module_invocation`,
+       `test_mux_status_link`, `test_profile_assignment`,
+       `test_session_conduct`); `ruff check --select F,E9`,
+       `tools/check-install-contract.py`, and
+       `tools/check-version-consistency.py` passed, while
+       `tools/check-version-bump.py` still reports the pre-existing unrelated
+       unbumped-plugin drift on `delegation-guidance`, `efforts`,
+       `harness-knowledge`, and `wsl-setup`.
    - Add one runner-scoped bootstrap verb (for example
      `<project> picker-bootstrap --json`) that returns the high-level decisions
      `runner._prepare()` actually needs: resolved project identity, whether the

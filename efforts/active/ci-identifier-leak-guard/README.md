@@ -19,7 +19,9 @@ contributors who do not have the private denylist configured on their machine.
 | Participant | Role in this effort | Reached via |
 |-------------|---------------------|-------------|
 | effort host | Owns the reviewed plan PR and follow-on implementation slices | isolated worktree |
-| repository operator | Provisions the secret-backed denylist values without routing the raw values through an agent | GitHub repository settings / `gh secret set` |
+| aperture-labs agent | Assembles the facility-context denylist (`FORBIDDEN_IDS_FACILITY`) -- not secret from within aperture-labs, only from the public repo -- and pushes it to the repository secret via `gh secret set` | aperture-labs facility session |
+| operator's work-context harness agent | Assembles the separate work-context denylist (`FORBIDDEN_IDS_WORK`) from a list the operator keeps on their work OneDrive, and pushes it to the repository secret via `gh secret set` | cross-repo/cross-harness collaboration (private-context harness; not named here) |
+| repository operator | Confirmed (2026-09-27) the denylists are not secret *from* either agent -- only from the public repo -- so both are agent-assembled/pushed rather than operator-typed; keeps the source lists in personal OneDrive locations (facility list does not need Vault, no credential material) | — |
 
 ## Coordination
 
@@ -152,10 +154,19 @@ an untrusted findings artifact at all.
 
 ### Phase 4 - Provision the secret-backed denylists
 
-- [ ] Operator only: add `FORBIDDEN_IDS_FACILITY` and the separate work-context
-  secret (for example `FORBIDDEN_IDS_WORK`) through the GitHub UI or
-  `gh secret set`; the raw values must not be originated, transited, or stored
-  by an agent.
+_(Revised 2026-09-27: the operator will not personally type these secrets --
+see the Journal entry below. Both are agent-assembled/pushed instead of
+"operator only.")_
+
+- [ ] An **aperture-labs agent** assembles the `FORBIDDEN_IDS_FACILITY` list
+  (facility-context identifiers -- machine names, internal hosts, personal
+  names, etc.; not secret from within aperture-labs, only from the public
+  repo) and pushes it to the `ThomasMichon/copilot-extensions` repository
+  secret via `gh secret set`.
+- [ ] Collaborate with the operator's **private-context work harness agent** to
+  assemble the separate `FORBIDDEN_IDS_WORK` list from a source list the
+  operator keeps on their work OneDrive, and push it to the repository secret
+  via `gh secret set`.
 - [ ] Document the expected secret format and repository-administration step
   near the workflow/tooling docs touched by the implementation.
 
@@ -256,3 +267,27 @@ _Pending._
   this neutral branch never fires again; the check should still not be added
   to required status checks until Phase 3's validation-with-a-real-secret step
   is complete.
+
+### 2026-09-27 - Phase 4 revised: secret provisioning delegated to agents, not the operator
+
+- A separate consuming-repo session independently raised the same
+  "misconfigured -> failure" concern above and asked to disable it; that
+  conversation converged on the same neutral-conclusion fix (landed just
+  earlier the same day in #4343/PR-of-record above), then surfaced the actual
+  remaining blocker: the operator has no way to originate the raw denylist
+  values themselves and won't be doing so.
+- Operator correction to the original Phase 4 "operator only" plan: they will
+  not personally type these secrets. Both are **agent-assembled and
+  agent-pushed** instead, because the content is not secret from within either
+  source context -- only from the public repo:
+  - `FORBIDDEN_IDS_FACILITY` -- an aperture-labs agent assembles this list and
+    pushes it via `gh secret set`. Storage doesn't need Vault (no credential
+    material, just names/identifiers), and can live in the operator's
+    personal OneDrive.
+  - `FORBIDDEN_IDS_WORK` -- needs collaboration with the operator's
+    private-context work harness agent, sourced from a separate list the
+    operator keeps on their **work** OneDrive, then pushed the same way.
+  See Participants and the revised Phase 4 above. Exact list contents,
+  OneDrive paths, and which agent actually runs `gh secret set` are not yet
+  settled -- this entry captures the operator's stated approach, not a
+  completed plan.

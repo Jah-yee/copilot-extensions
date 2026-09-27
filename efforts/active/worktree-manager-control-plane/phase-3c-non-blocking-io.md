@@ -9,9 +9,10 @@
   [#4007](https://github.com/ThomasMichon/copilot-extensions/pull/4007);
   Step 3 landed in
   [#4144](https://github.com/ThomasMichon/copilot-extensions/pull/4144);
-  Step 4 lands in
+  Step 4 landed in
   [#4164](https://github.com/ThomasMichon/copilot-extensions/pull/4164);
-  Step 5 remains open.
+  Step 5 lands in
+  [#4277](https://github.com/ThomasMichon/copilot-extensions/pull/4277).
 - **Governing visions:**
   - [`visions/picker`](../../../visions/picker/README.md):
     §Features/`decision-support-before-cost`, `programmatic-parity`;
@@ -285,14 +286,44 @@ then tightens regression coverage and cleanup.
      exercise synchronous helper seams, so a suite-wide guard would destabilize
      unrelated coverage instead of protecting just the UI-thread boundary.
 
-5. **Cleanup, rename, and document the final shape.**
-   - Remove or rename the now-misleading synchronous `setup()` UI entrypoint so
-     future edits do not accidentally call it inline again.
-   - Collapse any temporary compatibility wrappers added in Steps 1-3.
+[x] **Step 5 — cleanup, rename, and document the final shape.** Lands in
+      [#4277](https://github.com/ThomasMichon/copilot-extensions/pull/4277):
+      investigation confirmed Steps 1-4 had already removed every production
+      render-thread `self.setup(` caller and left no Step 1-3 compatibility
+      wrapper behind to collapse, so the real cleanup was tightening the
+      remaining synchronous seam and documenting the settled helper names.
+      `PickerScreen.setup()` is now `setup_sync()`, with production mount,
+      manual reload, and post-action rescans all continuing to route through
+      `_start_setup_reload_worker()` around `_collect_setup_payload()` /
+      `_apply_setup_payload()`. The intentional lower-level synchronous tests
+      (`test_picker_first_paint.py`, `test_picker_tui.py`,
+      `test_setup_reload_epoch.py`) were updated to call `setup_sync()`
+      explicitly, and the Worktree Manager README now names the final async vs
+      sync setup boundary. The cross-repo built-in-verb progress follow-up was
+      already recorded as
+      [#4274](https://github.com/ThomasMichon/copilot-extensions/issues/4274),
+      so this step links that durable issue instead of creating a duplicate.
+      Validation: targeted rename/boundary suites green; the broad
+      `tests/production_picker/` run was repeated twice back-to-back and both
+      runs held the same pre-existing Windows baseline at `775 passed,
+      3 skipped, 3 failed` (the unchanged provider-source absolute-path
+      failures in `test_data_ssh_sources.py`), while the full
+      `worktree-manager` suite matched the standing Windows baseline at
+      `1500 passed, 7 skipped, 13 failed` (the same 3 provider-source failures
+      plus 10 symlink-privilege failures). `ruff check --select F,E9`,
+      `check-version-bump.py --base origin/dev`,
+      `check-changefile-presence.py --base origin/dev`,
+      `check-install-contract.py`, and `git diff --check` all passed.
+   - Rename the synchronous lower-level seam (`setup()` -> `setup_sync()`) so
+     future edits cannot accidentally reintroduce an inline UI-thread caller by
+     following the old entrypoint name.
+   - Keep the final production path singular: mount/reload/rescan call
+     `_start_setup_reload_worker()`, not a second compatibility wrapper.
    - Update the effort/architecture docs and link the final helper names the
      way the Phase 3b/3e docs do after cutover.
    - Record the companion cross-repo proposal for built-in-verb progress
-     percentages (below) without blocking the in-repo cutover on it.
+     percentages as ThomasMichon/copilot-extensions#4274 without blocking the
+     in-repo cutover on it.
 
 ## Validation
 
@@ -374,7 +405,8 @@ The proposal is therefore a separate `agent-worktrees` follow-up: let the
 built-in lifecycle verbs optionally emit the same NDJSON progress contract that
 `tasks.run_action_stream(...)` already consumes. Worktree Manager can then wire
 those verbs into the existing `ProgressScreen` streaming mode incrementally.
-This proposal must not block the in-repo setup/reload cutover above.
+This proposal must not block the in-repo setup/reload cutover above. Tracked as
+[ThomasMichon/copilot-extensions#4274](https://github.com/ThomasMichon/copilot-extensions/issues/4274).
 
 ## Non-Goals of this slice
 

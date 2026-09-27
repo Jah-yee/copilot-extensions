@@ -5,15 +5,27 @@
 - **Branch(es):** independent per-slice worktrees
 - **Created:** 2026-09-25
 - **Status:** Active — Phase 1 live-validated (Phase 1.5 Done); Phase 2
-  in progress: vision-reconciliation gate resolved, a draft `gh-aw`
+  in progress: vision-reconciliation gate resolved, a `gh-aw`
   workflow authored (`.github/workflows/ci-failure-fix-attempt.md`) --
   two review passes (PR #3893) found 6 real blocking issues (trigger
   can't fire, no edit tool, auth signal gap, protected-files gap,
   prompt-injection gap, no changefile path); a successor session
-  resolved all 6 through a 9-round iterative real-review cycle (PR
-  #3916), converging on a materially hardened design (still **not
-  compile-verified** -- `gh aw compile` remains blocked by the same
-  SAML-SSO wall, not re-attempted); see the 2026-09-26 Journal entry
+  resolved all 6 (plus 3 more found along the way) through an 11-round
+  iterative real-review cycle (PR #3916, merged) — **and this session
+  finally got `gh aw compile` running** (the "SSO wall" only ever gated
+  metadata lookups, not asset downloads or `copilot-extensions` itself;
+  worked around by registering a manually-downloaded binary as a local
+  `gh` extension) and used it to find and fix 3 more genuine issues a
+  real compiler catches that doc-research alone couldn't: frontmatter
+  must be the file's literal first bytes, a step output referenced in
+  the prompt before it exists (fixed via a file-based handoff), and
+  direct `github.event.*`/`github.repository` interpolation in shell
+  (CTR-006 template-injection). **`.github/workflows/
+  ci-failure-fix-attempt.lock.yml` now exists, compiled and committed**
+  — Phase 2's mechanism is compile-verified for the first time. Still
+  not wired live: the Copilot engine auth path is undecided, and the
+  main-branch bootstrap gotcha is unaddressed; see the 2026-09-26
+  Journal entry
 - **Vision:** [`visions/ci-failure-remediation`](../../../visions/ci-failure-remediation/README.md)
   (authored 2026-09-26 to resolve the reconciliation gate below). **Gate
   resolved:** the vision states the standing intent (detection+dedup,
@@ -1716,3 +1728,301 @@ _Pending._
   rearchitecture (or accepting that "auto-fix a failing test" inherently
   requires reading untrusted test output). Still outstanding regardless:
   `gh aw compile` verification (SSO-blocked, unresolved this session).
+
+### 2026-09-26 — `gh aw compile` finally unblocked, and it found 3 more real issues doc-research couldn't
+- Operator pushed back directly on the prior handoff's own premise:
+  "I shouldn't need an SAML-SSO for this; this repo isn't part of an
+  org." Correct, and the literal error had always said so: the SSO wall
+  is specifically for the `github` org (owner of `github/gh-aw`, the
+  extension's SOURCE repo) — nothing to do with `copilot-extensions`,
+  which isn't in an SSO-enforcing org at all. Retried the literal `gh
+  extension install github/gh-aw` command directly (per error-response
+  discipline, rather than trusting the prior session's diagnosis) and
+  confirmed this precisely.
+- **Root-caused further, then worked around entirely:** the SSO
+  enforcement gates only `api.github.com`'s release-metadata lookup
+  (confirmed: an anonymous `curl` to that exact endpoint returns HTTP
+  200) — it does NOT gate the actual `github.com/.../releases/
+  download/...` asset URLs (confirmed anonymously downloadable too, no
+  auth at all). `gh extension install`'s own binary-extension flow
+  insists on the gated metadata call first, but nothing requires using
+  that flow: fetched the release JSON and the correct platform binary
+  directly, then registered it as a LOCAL `gh` extension (`gh extension
+  install <local-dir-containing-gh-aw.exe>`) — no SSO authorization
+  needed at all, and no interactive browser step for the operator
+  either. `gh aw` now works permanently on this machine.
+- **Real compilation surfaced 3 more genuine issues** no amount of
+  doc-research could have caught, all fixed (numbered #10/#11/#12 in the
+  draft's own leading comment block, alongside #1-#9):
+  1. **Frontmatter must be the file's literal first bytes** — `gh aw
+     compile` rejected the file outright ("no frontmatter found")
+     because the leading HTML comment (documenting the file's own
+     history) preceded the opening `---`. Moved the whole comment block
+     to immediately after the closing `---` instead.
+  2. **A step output referenced in the prompt before it exists** — the
+     markdown prompt referenced `steps.decode.outputs.body`, but gh-aw's
+     own `steps-output-in-prompt` validation caught a genuinely wrong
+     design assumption: the prompt is rendered by the ACTIVATION job,
+     which runs BEFORE the agent job — and therefore before
+     `pre-agent-steps`, which only runs inside the agent job — ever
+     executes. The referenced output was simply never going to be
+     populated. Fixed per the compiler's own suggested remedy: decode
+     straight to a workspace FILE (`.verify-issue/body.txt`, added to
+     `excluded-files`) instead of a step output, and have the prompt
+     instruct the agent to read that file. This also let the round-7
+     collision-checked `$GITHUB_OUTPUT` delimiter dance be deleted
+     entirely — a plain file write has no delimiter to collide with.
+  3. **Direct `github.event.*`/`github.repository` interpolation inside
+     `run:` shell text** — gh-aw's own CTR-006 scanner flags this
+     unconditionally as a template-injection risk, regardless of
+     whether that specific field is attacker-controlled. Routed every
+     occurrence through `env:` instead (`verify-issue`'s `check` step,
+     the `post-steps` scope gate).
+- **A genuinely funny meta-finding:** fixing issue #2 above (moving
+  prose into an HTML comment) initially broke compilation AGAIN — gh-aw's
+  expression-safety scanner validates the ENTIRE markdown body text for
+  `${{ ... }}`-shaped tokens, comments included, so illustrative prose
+  quoting example expressions (`${{ steps.decode.outputs.* }}`,
+  `${{ github.event.* }}`) tripped the exact same "unauthorized
+  expression" validator as real code. Fixed by stripping the `${{`/`}}`
+  wrapper from every prose mention, keeping just the dotted path text.
+- **`.github/workflows/ci-failure-fix-attempt.lock.yml` now exists,
+  committed alongside the source** — Phase 2's mechanism is
+  compile-verified for the first time, not merely doc-researched. One
+  non-blocking warning remains (a `workflow_dispatch` concurrency-
+  discriminator note on a gh-aw-generated "conclusion" job, not
+  something this file's own content controls) — left as-is; it doesn't
+  block compilation or `--strict` mode.
+- **Not yet done:** the Copilot engine auth path decision (org-billing
+  vs. `COPILOT_GITHUB_TOKEN` PAT) is still an open `TODO(successor)` in
+  the draft — ask the operator before wiring this live. The main-branch
+  bootstrap companion PR (same gotcha Phase 1's `report-failure` already
+  hit) is still unaddressed. Phase 2's remaining security-hardening
+  checklist (pin the `gh-aw` extension version, verify job-level
+  `permissions:` don't inherit anything broader) is still open. Phase
+  3's Validation Plan trials haven't started.
+- **A fourth genuine issue surfaced one level up: this repo's own CI,
+  not `gh aw compile` or a review pass.** `tools/check-trusted-ci.py` (a
+  cross-cutting guard, unrelated to `gh-aw`, that rejects any workflow
+  job routed to an unrecognized runner label) failed the PR opened for
+  this work: gh-aw's own generated infra jobs
+  (`activation`/`conclusion`/`pre_activation`/`safe_outputs`) default to
+  `runs-on: ubuntu-slim`, a label this guard's static allowlist didn't
+  recognize, so it failed closed treating it as an unauthorized
+  self-hosted route. First tried overriding `runs-on` per-job in
+  frontmatter — `pre_activation`/`activation` reject the field outright
+  (only `steps`/`outputs`/`pre-steps` allowed there), and
+  `conclusion`/`safe_outputs` silently accept but ignore it (no error,
+  no effect) — a dead end either way. Verified via GitHub's own official
+  "GitHub-hosted runners reference" docs that `ubuntu-slim` is a real,
+  standard, GitHub-hosted single-CPU runner label (not self-hosted, not
+  a custom runner group) — the guard's allowlist simply predates this
+  repo's `gh-aw` adoption. Added it to `GITHUB_HOSTED_LABELS` with a
+  citing comment, plus a regression test confirming both `ubuntu-latest`
+  and `ubuntu-slim` are accepted for a sibling workflow. This fix is
+  repo-wide, not specific to this one draft — it unblocks every future
+  `gh-aw` workflow this repo might compile.
+- **First real Copilot review pass on PR #4155 found 4 more issues, all
+  fixed and recompile-verified:**
+  - **HIGH — mutable action tag.** `--action-tag` compiled
+    `github/gh-aw-actions/setup@v0.89.21`, a mutable tag, not a SHA
+    pin. Resolving the SHA hit the same SSO wall (`--gh-aw-ref` and an
+    unresolved `--action-tag <tag>` both do a live API call); worked
+    around with an anonymous `curl` of the tag ref. Caught a subtler
+    bug in the process: `--action-tag` pins against `github/gh-aw` (the
+    monorepo), not `github/gh-aw-actions` (a different, similarly-named
+    repo) — the first SHA obtained was resolved from the wrong repo and
+    doesn't exist in `github/gh-aw` (confirmed 404/422) — would have
+    been a silently broken pin. Re-resolved the correct SHA
+    (`c35393777e5604a63721d09512263b1383301d4f`) from `github/gh-aw`
+    itself, verified `200` via anonymous curl, recompiled with
+    `--action-tag <sha>` (a raw SHA is used as-is, no API call).
+  - **HIGH — scope-check gap.** The post-steps contribution-surface
+    gate (from PR #3916) only diffed `$BASE` vs. `HEAD` — committed
+    history only — missing any uncommitted or untracked changes the
+    agent might leave behind. Rewrote the diff to combine
+    `git diff --name-only "$BASE" -- .` (tracked, working-tree
+    inclusive) with `git ls-files --others --exclude-standard`
+    (untracked new files), and explicitly exempted `.verify-issue/*`
+    (the file-based prompt handoff added this session) from the
+    violation check.
+  - **MEDIUM — dispatch fallback unreachable.** `label_command`'s
+    auto-generated `workflow_dispatch` trigger (documented as "for
+    manual testing") never actually activates a run: the generated
+    `pre_activation`/`activation` jobs' `if:` only checks for the
+    primary event type (`issues`), not `workflow_dispatch` — silently
+    breaking the entire Issue #1 dispatch-fallback fix from PR #3916.
+    Fixed by declaring an explicit `workflow_dispatch:` trigger (with
+    `item_number: required: false`, since label_command's own dispatch
+    forbids required inputs) alongside `label_command:` in `on:` —
+    compile-verified the generated `if:` conditions are now a real OR
+    across both trigger paths.
+  - **LOW — stale text.** The draft's comment block still claimed the
+    `item_number` input-naming convention was unconfirmed, contradicting
+    the now-successful compile. Rewrote issue #1's narrative to
+    document both the original fix and this round's dispatch-unreachable
+    bug, and added issues #13 (dispatch fallback), #14 (scope-gate
+    uncommitted changes), and #15 (mutable action tag) to the numbered
+    findings list.
+  - Recompiled clean after all four fixes (same single non-blocking
+    concurrency-discriminator warning); `check-trusted-ci.py`,
+    `check-docs-consistency.py`, and the full
+    `test_ci_failure_watchdog.py` + `test_check_trusted_ci.py` suite
+    (63 tests) all pass.
+- **Open follow-up, not yet tracked as a separate TODO:** the
+  `--action-tag <sha>` pin is a CLI flag passed to `gh aw compile`, not
+  persistent config — it must be re-supplied on every future recompile
+  of this file, or the pin silently reverts to a mutable tag. This
+  generalizes the already-open "pin the `gh-aw` extension version"
+  hardening item from Phase 2's checklist.
+- **Second real Copilot review pass found 2 recurrences + 3 new issues, all
+  fixed and recompile-verified:**
+  - **Recurrences (both restated as still-open until the FIRST review's fix
+    landed against the correct head):** the scope-check gap and the
+    stale/dispatch-fallback text were confirmed resolved once the review ran
+    against this session's actual pushed head rather than a stale
+    intermediate commit a race between push and review-trigger had caught
+    (see below).
+  - **HIGH — new — reproducibility of the SHA pin.** #15's SHA pin only
+    existed because that one `gh aw compile` invocation happened to pass an
+    out-of-band `--action-tag <sha>`; nothing in the committed source
+    remembered or enforced it, so a future plain `gh aw compile` would
+    silently regress to the mutable tag. Added
+    `tools/check-gh-aw-action-pins.py` (+ regression tests, wired into
+    `ci.yml` next to the trusted-CI guard) — fails CI outright if any
+    committed `*.lock.yml` ever references a `github/gh-aw/actions/...`
+    action by anything other than a full 40-character commit SHA.
+  - **Third real review pass (against the correct current head this time,
+    no staleness) found a genuine bypass in that same guard:** its regex
+    only matched a bare unquoted `uses:` value with a single path segment
+    — a single- or double-quoted YAML string (`uses: 'github/gh-aw/
+    actions/setup@v0.89.21'`), or a nested action subdirectory path, would
+    silently bypass the guard entirely. Fixed the pattern to accept
+    optional surrounding quotes and multi-segment action paths, added 6
+    regression cases (quoted mutable tag rejected, quoted SHA accepted,
+    nested-path mutable tag rejected, nested-path SHA accepted, for both
+    quote styles) — 10 tests total in that file now, 73 across the full
+    relevant suite. This same review pass also re-cited the prior round's
+    4 fixes as still "Open" with byte-identical wording to the already-
+    replied-to comment threads and no new inline evidence — a repeat of
+    the earlier stale-recap pattern (see below), not a real regression;
+    verified all 4 remain fixed against the current head before moving on.
+  - **Fourth real review pass found the SAME class of gap again, a level
+    deeper: a multiline YAML block scalar (`uses: >-` folded onto the next
+    line) also bypassed the regex matcher.** Two regex patches in a row
+    losing to a new YAML scalar form was the signal to stop patching
+    regex and actually parse the YAML, as the reviewer itself suggested
+    both times: rewrote the guard to `yaml.safe_load` each lock file and
+    walk every `jobs.<job>.steps[].uses` value directly (PyYAML resolves
+    whatever scalar style it was written in, so there is no remaining
+    form left to miss). Added 2 more regression cases (multiline folded
+    scalar, both mutable and SHA-pinned) — 12 tests in that file, 75
+    across the full relevant suite. **This same review pass also
+    reconfirmed, via GitHub's own GraphQL thread-resolution API, that the
+    reviewer's own recap consistently marks already-fixed items "Open"
+    with no new evidence and no re-verification against the diff** — a
+    now clearly-established pattern across 3 separate passes (this round,
+    the mutable-tag/dispatch-fallback round, and the original stale-head
+    race) — treated as a known limitation of this automated review's
+    "Lite effort" recap mode, not further evidence of an unfixed defect,
+    for every item this session has independently re-verified against
+    the actual current head with direct evidence (exact line content,
+    passing tests, successful recompiles).
+  - **HIGH — new — membership gate still blocks the automated dispatch.**
+    The explicit `workflow_dispatch:` trigger (issue #13's fix) made the
+    activation *gate* reachable, but `label_command` unconditionally
+    requires every activation path to also pass gh-aw's own
+    `check_membership` step, which by default only recognizes human actors
+    holding admin/maintainer/write repo roles.
+    `validate-and-promote.yml`'s automated dispatch authenticates with the
+    default `GITHUB_TOKEN`, so GitHub records the dispatching actor as the
+    `github-actions[bot]` App identity — never a repository collaborator,
+    so it could never satisfy a roles: check no matter how configured.
+    Fixed with gh-aw's own documented `on.bots:` mechanism (exactly for an
+    App sender, not a human) — `bots: ["github-actions"]` — without
+    loosening the human label-apply path's own roles: check.
+  - **MEDIUM — new — compiled step silently dropped hand-declared env
+    vars.** The `verify-issue` job's `check` step declared `GH_TOKEN`/`REPO`
+    in its own `env:` block but also referenced
+    `steps.resolve.outputs.number` inline in `run:` text — gh-aw's compiler
+    auto-generates an env var for that reference but REPLACES the step's
+    entire `env:` block with its own generated one rather than merging,
+    silently dropping `GH_TOKEN`/`REPO`. Under `set -u` this left `$REPO`
+    unbound, so every dispatch would have failed closed before
+    `authorized` was ever emitted. A first attempted fix (declaring the
+    step-output reference as our own `env:` entry instead) hit the SAME
+    expression-safety scanner from a different angle — it also rejects
+    `steps.*.outputs.*` references inside a custom job step's `env:`
+    block. The actual fix: have the `resolve` step export the value via
+    `$GITHUB_ENV` (a plain shell append, no expression syntax at all), so
+    `$NUM` becomes a normal process env var for later steps in the job.
+  - **LOW — new — dropped grammar clause.** The prompt's description of
+    `.verify-issue/body.txt` had a dropped clause ("the failing [...] one
+    was parseable)" missing "test node id (when"). Restored.
+  - Recompiled clean after all fixes (same single non-blocking
+    concurrency-discriminator warning); `check-gh-aw-action-pins.py`,
+    `check-trusted-ci.py`, `check-docs-consistency.py`, and the full
+    `test_ci_failure_watchdog.py` + `test_check_trusted_ci.py` +
+    `test_check_gh_aw_action_pins.py` suite (68 tests) all pass.
+- **A race between push and review-trigger surfaced this round:** two
+  review passes initially reported all four of the first round's fixes as
+  still-unresolved. Root cause: the reviewer had run against a stale
+  intermediate commit (an earlier, already-force-pushed-over version of
+  the trusted-ci fix) rather than the actual current head — a timing race
+  between the push webhook firing and this session's own subsequent
+  force-push completing, not a real regression. Confirmed by checking the
+  review's own recorded `commit_id` against `git log --all`, and by
+  waiting for the next review pass to land against the correct,
+  already-pushed head, which showed all four fixes as genuinely resolved.
+- **Fifth real review pass found a genuine safe-outputs bypass, its own
+  1 recap-repeat item resolved, 5 others still recap-repeated:** the new
+  finding -- **HIGH, issue #20** -- the compiler's own generated
+  `safe_outputs` job `if:` only required `needs.agent.result !=
+  'skipped'`, NOT `== 'success'`. The `post-steps` scope gate (issue
+  #8/#14) runs INSIDE the `agent` job and fails it on a violation, but
+  that alone did not stop `safe_outputs` from still applying the agent's
+  patch, as long as the separate `detection` (threat-detection) job
+  happened to find nothing -- a real, if narrow, path for a scope
+  violation to reach a merged PR undetected. Fixed with
+  `jobs.safe_outputs.if: needs.agent.result == 'success'` in frontmatter
+  -- gh-aw's own documented additive-gating mechanism (already used for
+  `jobs.agent.if`) ANDs this into the compiler's own generated condition;
+  compile-verified the generated `if:` now reads `(<original condition>)
+  && (needs.agent.result == 'success')`. Recompiled clean; guard scripts
+  and the full 75-test suite still pass. This same review pass again
+  re-cited the round-3/4 action-tag-guard fixes and the round-1/2
+  membership-gate/dispatch-fallback/env-drop fixes as still "Open" with
+  byte-identical wording and, per GitHub's own GraphQL thread-resolution
+  API, `isResolved: false` on every one of those 5 threads DESPITE each
+  one carrying an author "Fixed" reply describing concrete, independently
+  verified evidence -- confirming this is a structural limitation of this
+  review bot's "Lite effort" recap mode (it re-lists prior threads by
+  their thread-open/closed state rather than re-diffing content against
+  the current head) and not a genuine unresolved defect for any of those
+  5. Continuing to treat each NEW inline comment on its own merits while
+  not chasing the recap's own stale "Open" count to zero, since nothing
+  in this repo's `pr-self-merge` flow or branch protection is actually
+  gated on that count -- only genuinely failing required checks and an
+  unaddressed `CHANGES_REQUESTED`/unresolved thread would be.
+- **Sixth real review pass found a genuine documentation-accuracy gap, plus a
+  fresh stale-PR-description finding also resolved this round:** the
+  workflow's own "Read-only baseline" comment claimed "only safe-outputs
+  holds a write credential," but gh-aw's generated `activation` job needed
+  `issues: write` for the `label_command`-default reaction/status-comment
+  feature (avoidable -- disabled with `reaction: none`/`status-comment:
+  false`, compile-verified `activation`'s permissions dropped to
+  `actions: read`/`contents: read` only), and the generated `conclusion`
+  job unconditionally holds `contents: write`/`issues: write`/
+  `pull-requests: write` (confirmed NOT overridable via frontmatter,
+  an inherent consequence of `create-pull-request`/`fallback-as-issue:
+  true` being configured at all). Since the un-overridable part couldn't
+  be narrowed, corrected the comment's claim instead: the real, still-
+  meaningful guarantee is that the AGENT job itself (the one processing
+  attacker-reachable content) never holds a write credential, and
+  `conclusion` posts only compiler-authored status text, never the
+  agent's own patch. Also this round: a review comment flagged the PR
+  description's own "no changefile needed" scope claim as stale (it
+  didn't mention the new `tools/check-gh-aw-action-pins.py` guard) --
+  fixed by updating the PR description's Changes and Validation sections
+  to match the actual diff. Recompiled clean; all guards and the full
+  75-test suite still pass.

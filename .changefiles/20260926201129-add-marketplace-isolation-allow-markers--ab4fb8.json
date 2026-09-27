@@ -1,0 +1,9 @@
+{
+  "comment": "Add marketplace-isolation allow markers to two historical-context references to agent-mcp materialize/agent-mcp call in defining-subagents/SKILL.md, unblocking the guard test that was failing on dev's tip.",
+  "changes": [
+    {
+      "plugin": "customizing-copilot",
+      "type": "patch"
+    }
+  ]
+}

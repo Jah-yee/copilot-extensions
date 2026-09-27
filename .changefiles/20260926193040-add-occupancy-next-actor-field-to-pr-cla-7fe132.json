@@ -1,9 +1,0 @@
-{
-  "comment": "Add occupancy next-actor field to PR classification (stale APPROVED is needs-review, not consent-ready).",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

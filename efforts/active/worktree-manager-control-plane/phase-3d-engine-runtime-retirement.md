@@ -514,11 +514,34 @@ once every remaining caller is already off the import boundary.
      still reports the same pre-existing unrelated unbumped-plugin drift on
      `delegation-guidance`, `efforts`, `harness-knowledge`, and `wsl-setup`.
 
-5. [ ] **Add Group C's batched reconcile-and-stamp verb in agent-worktrees,
-   unused at first.** Operator direction resolved the ownership question here:
+5. [x] **Add Group C's batched reconcile-and-stamp verb in agent-worktrees,
+   unused at first.** **Landed in PR [#4327](https://github.com/ThomasMichon/copilot-extensions/pull/4327).**
+   Operator direction resolved the ownership question here:
    the batch verb belongs in `agent_worktrees`, because `tracking.yaml`'s
    format and file-lock semantics are already engine-owned and the correctness
    of this slice depends on keeping that lock scope with the format owner.
+   - **Concrete Step 5 contract design (decided before implementation):**
+     - Add `<project> picker-reconcile-local --json` as the coarse-grained
+       Group C verb. Request shape: no stdin/body payload, explicit project
+       scope as usual, and an optional repeated `--worktree-id <id>` filter for
+       future per-row refresh / targeted reload reuse; omitting the filter means
+       "all current-platform local tracking records," matching today's
+       `data_local.py` sweep.
+     - Response shape: `{"version":1,"rows":[...],"summary":{...}}`, where
+       each row intentionally reuses the Picker's existing list-row field names
+       for the **Group C-owned subset only** (`id`, `pr`, `prs`, `pr_count`,
+       `session_bound_live`, `session_lock_live`, `session_lock_stale`,
+       `stale_lock_pids`, `mux_session`, `mux_clients`, `mux_attached`) so Step
+       6 can layer this payload onto today's downstream consumers without
+       inventing a second translation vocabulary. `summary` carries the batch
+       counters / scope facts Step 6 needs to preserve today's reload decisions:
+       `platform`, `requested_worktree_ids`, `record_count`,
+       `pr_terminal_count`, `bound_visible_change_count`,
+       `had_unresolved_bound`, and `mux_scan_ok`.
+     - Versioning: this is an additive **contract v1** verb under
+       `docs/engine-picker-contract.md`'s existing pinning discipline. Future
+       rows/summary fields may be added, but the verb name and existing field
+       meanings stay stable within contract version 1.
    - Add one batched `--json` verb that performs the current
      `data_local.py` loop inside agent-worktrees: list records, reconcile
      active PR state, read bound/mux/session-lock liveness, stamp the resulting
@@ -539,6 +562,37 @@ once every remaining caller is already off the import boundary.
      `tracking.stamp_*` as a long series of per-record subprocess calls.
    - Add the matching Worktree Manager client wrapper and any payload parser
      tests, but do not cut `data_local.py` over in this step.
+   - **Landing details:** implemented the engine-owned
+     `picker-reconcile-local --json` verb in a dedicated
+     `agent_worktrees.picker_reconcile_cli` module, documented it in
+     `plugins/agent-worktrees/docs/engine-picker-contract.md`, and added the
+     unused-at-first Manager wrapper in
+     `worktree_manager.production_picker.engine_group_c`. The server-side verb
+     calls the existing `tracking.list_records`, `tracking._pr_is_terminal`,
+     `pr_ops._reconcile_active_pr(best_effort=True)`,
+     `reclaim.resolve_bound_copilots`, `sessions.mux_status_many`,
+     `sessions.worktree_session_lock_state`, `tracking.stamp_bound_live`, and
+     `tracking.stamp_mux_live(..., sync=True)` helpers directly rather than
+     re-expressing their logic in the client. Lock semantics are unchanged:
+     record enumeration stays lock-free, provider/network work happens outside
+     any new batch-wide lock, and the only writes are the helpers' existing
+     short-lived stamp windows. `data_local.py` is intentionally untouched in
+     this PR; Step 6 remains the cutover.
+   - Validation: targeted new contract tests passed
+     (`plugins/agent-worktrees/tests/test_picker_reconcile_local.py`,
+     `worktree-manager/tests/production_picker/test_engine_group_c.py`);
+     full `worktree-manager` suite (excluding the two standing hangs
+     `test_data_ssh_sources.py` / `test_launch_trace.py`) finished at
+     `1294 passed, 2 skipped, 10 failed` on this machine, staying within the
+     effort's established unrelated-failure envelope; full `agent-worktrees`
+     suite finished at `5738 passed, 50 skipped, 6 failed`, likewise with only
+     unrelated pre-existing/environmental families red on this machine
+     (`test_launch_cmd`, `test_lazy_dispatch`, `test_module_invocation`,
+     `test_mux_status_link`, `test_session_conduct`). `ruff check --select
+     F,E9`, `tools/check-install-contract.py`, and
+     `tools/check-version-consistency.py` passed; `tools/check-version-bump.py`
+     still reports the same pre-existing unrelated plugin-version drift on
+     `delegation-guidance`, `efforts`, `harness-knowledge`, and `wsl-setup`.
 
 6. [ ] **Cut `data_local.py` over to the Group C batched verb, using Phase 3c's
    now-landed worker path.** This is the Group C cutover PR.

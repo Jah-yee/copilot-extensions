@@ -1,9 +1,0 @@
-{
-  "comment": "Scrub stale build/egg-info before installer uv/pip attempts, including vendored local-source dirs.",
-  "changes": [
-    {
-      "plugin": "agent-bridge",
-      "type": "patch"
-    }
-  ]
-}

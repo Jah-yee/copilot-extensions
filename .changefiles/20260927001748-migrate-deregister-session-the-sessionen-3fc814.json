@@ -1,9 +1,0 @@
-{
-  "comment": "Migrate deregister_session (the sessionEnd hook's own transaction) onto the tracking_write daemon verb",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

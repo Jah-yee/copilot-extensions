@@ -1,5 +1,19 @@
 # Phase 3d — Retire the Picker's in-process engine-module boundary (`_engine_runtime.py`)
 
+- **Parent effort:** [`README.md`](README.md) § Phase 3d
+- **Tracks:** [#3359](https://github.com/ThomasMichon/copilot-extensions/issues/3359),
+  [#3360](https://github.com/ThomasMichon/copilot-extensions/issues/3360)
+- **Scope of this doc:** the ordered implementation plan for removing the
+  Picker's last in-process `agent_worktrees.*` import boundary, building on the
+  evidence-gathering inventory already recorded here.
+- **Status:** Planned — #3359's vendored-lib prework is done via PR
+  [#3368](https://github.com/ThomasMichon/copilot-extensions/pull/3368),
+  Group D's `profiles` dependency is closed via Phase 3e / PR
+  [#3626](https://github.com/ThomasMichon/copilot-extensions/pull/3626), and
+  the remaining Group A/B/C work is now sequenced below as independently
+  landable PRs. Phase 3c's prerequisite for Group C is satisfied by PR
+  [#4278](https://github.com/ThomasMichon/copilot-extensions/pull/4278).
+
 ## Why this phase exists
 
 `worktree-manager/src/worktree_manager/production_picker/_engine_runtime.py`
@@ -8,9 +22,11 @@ compatibility boundary to the active agent-worktrees runtime."** It resolves
 the active agent-worktrees install (namespaced-then-legacy slot, or a local
 checkout fallback), injects its `src/` plus several of its vendored
 `libs/*/src` onto `sys.path`, and lets the Picker `importlib.import_module()`
-9 `agent_worktrees.*` submodules directly, in-process — a different plugin's
-own private CLI implementation, not a shared library. This already caused two
-live production bugs this session (#3319, #3327): a lazily-populated
+historically 9 `agent_worktrees.*` submodules directly, in-process — now down
+to 8 live runtime/root consumers after Phase 3e retired the `profiles` proxy,
+but still a different plugin's own private CLI implementation rather than a
+shared library. This already caused two live production bugs this session
+(#3319, #3327): a lazily-populated
 `agent_worktrees.__main__` attribute silently missing because importing the
 module directly bypasses agent-worktrees' own CLI dispatch that would
 normally populate it.
@@ -27,7 +43,8 @@ Two GitHub issues track the fix, split by risk:
   — the harder half: the 9 `agent_worktrees.*` CLI-root modules themselves.
   Explicitly filed "for discussion, not prescriptive" because it needs a real
   design tradeoff for the Picker's interactive/high-frequency reads. This doc
-  is that discussion's evidence base.
+  preserves that evidence base and now turns it into the ordered implementation
+  plan for the remaining work.
 
 This is a **design/planning** artifact first, matching Phase 3c's own
 pattern: record the full current-state call-site inventory (evidence, not
@@ -211,23 +228,286 @@ verb exists for "is an update available."
 converted, been reclassified, or (Group D) moved out from under
 agent-worktrees entirely.
 
+One cleanup wrinkle the table above does not spell out: the generic
+`production_picker.config` proxy is still imported by
+`picker_tui/data_local.py`, `data_ssh.py`, `engine_loading.py`,
+`profiles_io.py`, `roster.py`, `picker_tui/__init__.py`, and
+`engine_worktree_actions.py`'s authoritative liveness check (which also still
+imports the `sessions` and `tracking` proxies). Those do **not** form a fourth
+design group with a new disposition question, but they **do** mean Step 7
+cannot delete the `config` shim — or the remaining `sessions` / `tracking`
+shims — merely because `runner.py`, `pivot_manifest.py`, and `update_stage.py`
+are done. The ordered steps below therefore treat those remaining proxy
+consumers as part of the Group C / final-cleanup work that must be drained
+before the last shim deletion lands.
+
+## Ordered implementation steps
+
+Group D needs no further work here: the `profiles` branch of this inventory
+was split into Phase 3e and is now fully done, so this phase's ordered plan
+only has to retire the remaining Group A/B/C call sites. The sequence below
+keeps the same discipline as Phase 3b / 3c / 3e: additive seam first, one
+crisp cutover once the seam is proven, cleanup last.
+
+Group A and both Group B clusters are independent of Phase 3c's loader work
+and can proceed immediately. Group C's only hard prerequisite was the
+epoch-guarded non-blocking setup/reload path from Phase 3c, and that is now
+landed (PR #4278), so Group C is no longer blocked — it is merely sequenced
+after its additive verb work so the final `_engine_runtime.py` deletion happens
+once every remaining caller is already off the import boundary.
+
+1. [ ] **Pin the low-frequency public read surface for Group A, additive only.**
+   `pivot_manifest.py` and `update_stage.py` should stop depending on
+   in-process module imports, but the first PR should add the public seam
+   without changing either caller yet.
+   - Extend/pin the engine-facing contract for the exact one-shot reads the
+     Picker still needs: `config.install_dir()` / `config._home()` via the
+     existing scalar `get <key>` surface (new picker-supported keys rather than
+     a new import seam), `state_root_module.resolve_state_root(...)` via the
+     existing `state-root --json` family (pin the subset the Picker consumes, or
+     add a thin JSON wrapper if the current output shape is too broad), and a
+     new tiny **read-only** `update-indicator --json` verb for the glyph. Keep
+     it explicitly distinct from the existing `stage-update --json` command,
+     which performs the marketplace staging work rather than merely reporting
+     the cheap status `indicator_state()` reads.
+   - Pin the **explicit project scope** for those reads. In particular, any
+     `state-root --json` reuse must go through `<project> state-root --json` (or
+     an equivalent explicit `--project`/repo-scoped wrapper), not a child
+     process inheriting whatever cwd happens to exist when the Picker asks.
+     Record the fallback/error behavior for "no active project" and
+     adopted-anchor cases at the same time.
+   - Move the update-indicator polling path off the Textual UI thread before it
+     shells out. The current `_poll_update_state()` runs from `_tick()`; once it
+     becomes a subprocess read, Step 1 must route it through the existing
+     background-worker/callback path so a slow/hung engine cannot freeze render.
+   - Add Worktree Manager-side `engine_client` wrappers for those reads, but
+     leave `pivot_manifest.py` / `update_stage.py` on the compatibility shim in
+     this step.
+   - Update `plugins/agent-worktrees/docs/engine-picker-contract.md` so these
+     reads are documented as part of the pinned process-boundary contract rather
+     than merely existing as implementation detail.
+
+2. [ ] **Promote Group B's project/config/ssh decisions to a narrow public CLI
+   seam, additive only.** This should be public `--json` CLI surface, not a
+   stable importable Python API: the governing contract for the control plane is
+   still "Picker reaches agent-worktrees only through CLI verbs," and replacing
+   `_engine_runtime.py` with another import surface would preserve the coupling
+   this phase exists to remove.
+   - Add one runner-scoped bootstrap verb (for example
+     `<project> picker-bootstrap --json`) that returns the high-level decisions
+     `runner._prepare()` actually needs: resolved project identity, whether the
+     caller should switch cwd, the normalized cwd to switch to when needed, and
+     the default live-vs-local mode. This replaces the *effect* of
+     `_resolve_active_project`, `_cwd_is_inside_project`, `_in_ssh_session`, and
+     `set_active_project` without exporting those private helpers one-by-one.
+   - Pair that verb with a **parent-side binding step** in worktree-manager:
+     once bootstrap resolves the authoritative project identity, the parent
+     process records it in Manager-owned context and subsequent Picker/data
+     helpers consume that bound identity instead of ambient cwd or a one-off
+     child-process answer. The cutover is not complete until those downstream
+     consumers are migrated to the parent-owned binding.
+   - Reuse the already-pinned `<project> resolve --json ...` remote-launch seam
+     as the public answer for machine/environment resolution. If a small gap
+     remains for production Picker parity, close it there instead of teaching
+     worktree-manager to call `load_config`, `load_machines_yaml`,
+     `_machine_key_for_display`, or `_resolve_ssh_alias` directly.
+   - Add a one-shot public verb for the stale-anchor repair hook (for example a
+     picker-specific `repair-stale-anchor --json`, or an equivalent targeted
+     `repair` subcommand) so `_heal_stale_anchor_if_self_missing` no longer
+     rides a private in-process import either.
+
+3. [ ] **Reimplement Group B's Picker-owned lifecycle sweeps directly in
+   worktree-manager, additive first.** Operator direction resolved this cluster:
+   `reap_orphan_mux_sessions`, `_sweep_managed_on_exit`,
+   `_sweep_launcher_shells_on_exit`, `_sweep_finished_sessions_on_cadence`, and
+   `_start_picker_monitor_root` become Worktree Manager-owned logic because they
+   govern the Picker's own process lifetime, not agent-worktrees' state model.
+   - Introduce a manager-owned housekeeping/runtime module that ports the
+     current behavior into worktree-manager under its own tests. Recent
+     2026-09-26 promotion-pipeline fixes remove the earlier "cross-repo porting
+     is too painful" pressure, so a one-time code port is now acceptable where
+     ownership is genuinely moving.
+   - Define the coordination boundary up front: once the Manager-owned sweeper
+     lane is enabled for production Picker sessions, agent-worktrees' generic
+     lifecycle sweepers must either skip those Manager-owned rows/session names
+     entirely or consume the Manager-produced view rather than mutating the same
+     tracking/worktree/session state in parallel. This step is not "copy the
+     code and hope"; it is "establish one owner for these sessions, then port."
+   - Keep this step additive: the new local implementation exists and is tested,
+     but `runner.py` still uses the current compatibility path until the next
+     step performs the actual cutover.
+   - Preserve behavior, not private names: this step should carry over the
+     sweep/monitor semantics that matter to the Picker, while leaving
+     agent-worktrees' remaining internal helpers free to evolve independently.
+
+4. [ ] **Perform the Group A + Group B cutover in one crisp PR.** Once Steps 1-3
+   are landed, switch the three remaining non-hot-path call sites off the
+   compatibility boundary together.
+   - `pivot_manifest.py` and `update_stage.py` move to the new Group A public
+     surface.
+   - `runner.py` switches to the Step 2 public verbs for bootstrap,
+     stale-anchor repair, and remote planning, while its housekeeping/monitor
+     lifecycle moves to the Step 3 manager-owned implementation.
+   - Include the old-engine remote fallback in `worktree_manager.__main__`:
+     either `runner.compatibility_remote_plan()` is cut over to the same public
+     seam in this step, or the fallback is explicitly version-gated/retired
+     here so an older engine cannot silently keep exercising the private import
+     path after the main runner flow is clean.
+   - At the end of this step, Groups A and B's **runner/pivot/update** paths no
+     longer rely on
+     `engine_module(...)`, underscore-prefixed `agent_worktrees` helpers, or
+     any in-process `agent_worktrees` import for production Picker behavior.
+
+5. [ ] **Add Group C's batched reconcile-and-stamp verb in agent-worktrees,
+   unused at first.** Operator direction resolved the ownership question here:
+   the batch verb belongs in `agent_worktrees`, because `tracking.yaml`'s
+   format and file-lock semantics are already engine-owned and the correctness
+   of this slice depends on keeping that lock scope with the format owner.
+   - Add one batched `--json` verb that performs the current
+     `data_local.py` loop inside agent-worktrees: list records, reconcile
+     active PR state, read bound/mux/session-lock liveness, stamp the resulting
+     cached state back through engine-owned helpers, and return the normalized
+     payload the Picker needs.
+   - Preserve today's **best-effort lock semantics** rather than inventing a new
+     "hold one global lock across the whole refresh" behavior. The record
+     enumeration remains lock-free, provider/network reconciliation continues to
+     happen outside exclusive tracking writes, and the new verb uses only the
+     same short-lived per-record or minimal-batch tracking lock windows the
+     existing reconcile/stamp helpers already rely on. "Atomic" here means one
+     process-boundary call and one engine-owned reconciliation authority, not a
+     cross-record transaction that can pin tracking while a provider call runs.
+   - Keep the verb coarse-grained. The point is specifically to avoid
+     re-expressing `tracking.list_records`, `tracking._pr_is_terminal`,
+     `pr_ops._reconcile_active_pr`, `reclaim.resolve_bound_copilots`,
+     `sessions.mux_status_many`, `sessions.worktree_session_lock_state`, and
+     `tracking.stamp_*` as a long series of per-record subprocess calls.
+   - Add the matching Worktree Manager client wrapper and any payload parser
+     tests, but do not cut `data_local.py` over in this step.
+
+6. [ ] **Cut `data_local.py` over to the Group C batched verb, using Phase 3c's
+   now-landed worker path.** This is the Group C cutover PR.
+   - Route the refresh-time reconciliation path through the new batched verb
+     instead of the current direct imports, including the `reconcile_prs()`,
+     `reconcile_bound_live()`, `_overlay_cached_state()`, and
+     `_stamp_from_raw()` behavior that today depends on in-process access to
+     `tracking` / `pr_ops` / `reclaim` / `sessions`.
+   - Drain the remaining `production_picker.config` proxy consumers that are
+     coupled to the same local-data/config-cache flow (`data_local.py`,
+     `data_ssh.py`, `engine_loading.py`, `profiles_io.py`, `roster.py`,
+     `picker_tui/__init__.py`) plus `engine_worktree_actions.py`'s last
+     authoritative liveness check over the `config` / `sessions` / `tracking`
+     shims, by moving each one onto its final direct file reader or explicit
+     engine-client call, so Step 7 can delete those proxies for real instead of
+     leaving a hidden tail.
+   - Replace or coalesce the existing post-load reconcile hooks
+     (`_start_pr_reconcile()` / `_start_bound_live_reconcile()`) rather than
+     letting them survive beside the new batch path. One setup/reload epoch
+     should schedule at most one reconciliation batch for this surface; no
+     duplicate subprocesses or competing tracking writes after the cutover.
+   - Keep the subprocess invocation off the render thread by reusing the
+     epoch-guarded setup/reload infrastructure landed in Phase 3c. The
+     dependency here is now **satisfied**, not speculative: Step 6 should build
+     on that primitive instead of inventing a second ad hoc loader.
+   - Confirm this step does not regress the cache-first first-paint shape or
+     reintroduce per-row subprocess churn.
+
+7. [ ] **Delete `_engine_runtime.py` and the remaining proxy shims, then lock in
+   the regression guard.** This is the cleanup PR after every live call site is
+   already off the import boundary.
+   - Remove `_engine_runtime.py` and any leftover `production_picker/*.py`
+     proxy modules whose only job was `engine_module(...)` pass-through.
+   - Add a focused regression guard that fails if the production Picker grows a
+     new in-process `agent_worktrees` dependency for Groups A/B/C (for example
+     a small source-level test/scan keyed specifically to
+     `worktree_manager.production_picker`, not a repo-wide style rule).
+   - Reconcile the phase doc / README wording to the final post-cutover state
+     so future work does not treat `_engine_runtime.py` as a still-valid seam.
+
+## Validation
+
+### Contract-level validation
+
+- `plugins/agent-worktrees/docs/engine-picker-contract.md` matches the final
+  public surface the Picker now depends on; no Group A/B/C boundary remains
+  "real but undocumented."
+- Production Picker tests keep proving the process boundary, not just the happy
+  path: once cleanup lands, no production code under
+  `worktree_manager.production_picker` should require `engine_module(...)` or a
+  direct `agent_worktrees.*` import.
+- Existing Phase 3c non-blocking guarantees remain intact: a blocked engine verb
+  may delay one background worker result, but it must not block first paint or
+  the Textual event loop.
+
+### Group-specific validation
+
+1. **Group A**
+   - Contract tests for the new scalar/path reads and `update-indicator --json`
+     response shape.
+   - Boundary tests prove the `state-root` wrapper is invoked with explicit
+     project scope and that the update-indicator poll runs off the UI thread.
+   - Targeted `pivot_manifest.py` / update-indicator tests prove the Picker
+     still degrades cleanly when those verbs are unavailable or return empty
+     state.
+
+2. **Group B — public resolution seam**
+   - Targeted CLI tests prove the new bootstrap verb and the reused
+     `resolve --json` remote path return the same decisions the production
+     Picker needs today, without exposing private helper names as contract.
+   - Parent-context tests prove the resolved project identity is bound once in
+     worktree-manager and reused consistently by later Picker/data consumers,
+     rather than drifting with ambient cwd after `_engine_runtime.py` is gone.
+   - Targeted runner tests prove remote launch planning, cwd switching, and the
+     best-effort stale-anchor repair still behave correctly after cutover.
+
+3. **Group B — manager-owned lifecycle sweeps**
+   - Worktree Manager tests cover the local housekeeping thread, monitor-root
+     setup/teardown, and the exit-time sweep behavior now that this logic lives
+     under the Manager's ownership.
+   - Coordination coverage proves Manager-owned sessions are swept by exactly
+     one owner at a time: once cut over, agent-worktrees' generic sweepers no
+     longer mutate the same rows/session state in parallel.
+   - No Group B call site reaches underscore-prefixed `agent_worktrees` helpers
+     after Step 4.
+
+4. **Group C**
+   - The new batch verb has engine-side tests for lock ownership, timeout, and
+     stale-vs-fresh reconciliation behavior, including the guarantee that
+     provider/network work does **not** hold tracking locks across the whole
+     batch.
+   - Setup/reload tests prove the batch replaces the old post-load reconcile
+     hooks instead of running beside them; one epoch yields one reconciliation
+     batch.
+   - Picker tests prove refresh/setup still stay off-thread with a deliberately
+     blocked batch verb, matching Phase 3c's standing non-blocking contract.
+   - A focused regression test proves the cutover did **not** become "one
+     subprocess per record/helper"; the hot path stays one batched engine call
+     per refresh cycle.
+
+5. **Final cleanup**
+   - A narrow source-level guard (or equivalent targeted test) proves
+     `_engine_runtime.py` and its last proxy shims are gone and do not return.
+   - The README phase checklist and this doc agree on the final step breakdown
+     so the effort remains resumable without re-reading old issue comments.
+
 ## Open questions for the operator / design review
 
-1. **Group B ownership split.** For each private `cli.*`/`config_module.*`
-   call in `runner.py`, is the underlying decision genuinely
-   agent-worktrees' to own (→ promote a narrow public API) or is it really
-   worktree-manager's own process concern that should never have reached
-   into agent-worktrees' internals (→ reimplement locally)? This needs a
-   per-call-site answer, not a blanket policy.
-2. **Group C verb shape.** Should the new batched reconcile-and-stamp verb
-   live in `agent_worktrees` (since it owns `tracking.yaml`'s format and
-   lock), or should worktree-manager keep doing the reconciliation itself
-   but through smaller, already-existing verbs plus a lock-safe
-   read-modify-write contract agent-worktrees exposes for exactly this case
-   (e.g. an optimistic-concurrency stamp verb)? Affects both correctness
-   (lock semantics across a process boundary) and performance (verb count
-   per refresh).
-3. **Sequencing against Phase 3c.** Confirm Group C conversion work should
-   wait for Phase 3c's non-blocking I/O primitive, since both touch
-   `data_local.py`'s exact call site and stacking them independently risks
-   the same kind of data race Phase 3c's own history already surfaced once.
+1. ~~**Group B ownership split.**~~ **Resolved by operator direction
+   (2026-09-27):** split the cluster exactly at the ownership boundary. The
+   process-lifecycle sweeps (`reap_orphan_mux_sessions`,
+   `_sweep_managed_on_exit`, `_sweep_launcher_shells_on_exit`,
+   `_sweep_finished_sessions_on_cadence`, `_start_picker_monitor_root`) are
+   reimplemented directly in worktree-manager, while the project/config/ssh
+   decisions stay engine-owned behind a new narrow public CLI seam in
+   agent-worktrees.
+2. ~~**Group C verb shape.**~~ **Resolved by operator direction
+   (2026-09-27):** the batched read-reconcile-stamp verb lives in
+   `agent_worktrees`, not in worktree-manager. `agent_worktrees` already owns
+   `tracking.yaml`'s on-disk format and file-lock semantics, so correctness here
+   depends on keeping the lock-scoped mutation with the format owner rather than
+   recreating it via optimistic concurrency from the Picker side.
+3. ~~**Sequencing against Phase 3c.**~~ **Resolved by landed state
+   (2026-09-27):** Phase 3c is complete (PR #4278), so Group C may now build on
+   the epoch-guarded non-blocking worker path instead of waiting for it. Group A
+   and Group B remain independently landable ahead of Group C, and the final
+   `_engine_runtime.py` retirement still waits until all remaining groups are
+   cut over.

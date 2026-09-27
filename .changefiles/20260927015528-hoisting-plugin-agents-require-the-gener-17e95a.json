@@ -1,0 +1,9 @@
+{
+  "comment": "hoisting-plugin-agents: require the GENERATED banner before sync/scan treat a file as stale, so a hand-authored .github/agents file is never deleted or misreported (fixes #2861)",
+  "changes": [
+    {
+      "plugin": "customizing-copilot",
+      "type": "dev"
+    }
+  ]
+}

@@ -385,17 +385,23 @@ def rewrite_uv_source_to_editable(pyproject_path: Path, lib: str, relpath: str) 
 def _file_hashes(root: Path) -> dict[str, str]:
     """Relative-path -> sha256 for every real file anywhere under ``root``
     (recursively), ignoring only generated/ephemeral artifacts
-    (``__pycache__``, ``.pyc``/``.pyo``) -- never a fixed allowlist of
-    expected subpaths, so an unexpected extra file (a root-level LICENSE,
-    package metadata, or anything else) is never silently invisible to a
-    caller that compares two trees for equality."""
+    (``__pycache__``, ``.pyc``/``.pyo``, plus the same build/tool-cache
+    directory names ``materialize_main.py``'s own copytree ``ignore``
+    callback excludes -- ``.git``, ``.pytest_cache``, ``.ruff_cache``,
+    ``build``, ``dist`` -- so a fresh copytree that already omits these is
+    never falsely reported as "not matching" a canonical tree that still
+    carries them as ordinary local dev artifacts) -- never a fixed
+    allowlist of expected subpaths, so an unexpected extra file (a
+    root-level LICENSE, package metadata, or anything else) is never
+    silently invisible to a caller that compares two trees for equality."""
+    ignored_dirs = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
     out: dict[str, str] = {}
     if not root.is_dir():
         return out
     for f in root.rglob("*"):
         if not f.is_file():
             continue
-        if "__pycache__" in f.parts or f.suffix in (".pyc", ".pyo"):
+        if ignored_dirs & set(f.parts) or f.suffix in (".pyc", ".pyo"):
             continue
         out[f.relative_to(root).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
     return out

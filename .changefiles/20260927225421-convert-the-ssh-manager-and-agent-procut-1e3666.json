@@ -1,0 +1,9 @@
+{
+  "comment": "Convert the ssh-manager and agent-procutil vendored libs to uv-editable canonical references (vendor-pointer-generalization Phase 1).",
+  "changes": [
+    {
+      "plugin": "agent-codespaces",
+      "type": "patch"
+    }
+  ]
+}

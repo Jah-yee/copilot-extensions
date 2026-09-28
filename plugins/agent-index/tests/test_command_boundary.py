@@ -111,6 +111,12 @@ def test_installers_are_base_only_and_never_implicitly_start_engine():
 
 
 def test_installers_preserve_two_step_cuda_engine_swap():
+    """`agent-index-engine` (the separate embedding-server package, effort
+    agent-index-server-package-split) is installed in TWO steps into the
+    durable engine venv: the light `agent-index` base package first, then
+    `agent-index-engine` itself (which depends on it) -- mirroring the same
+    zdd/agent-procutil pre-install pattern the main service venv already
+    uses for its own vendored deps."""
     ps = (PLUGIN / "scripts" / "install.ps1").read_text(encoding="utf-8")
     sh = (PLUGIN / "scripts" / "install.sh").read_text(encoding="utf-8")
 
@@ -136,9 +142,9 @@ def test_versioned_activate_legacy_stop_guard_never_fires_on_the_build_target():
     each time (the "kill the detached child" / "guard on the real link path,
     not the built slot" gotchas in service-lifecycle-supervision.md; this
     exact class of bug previously regressed agent-dispatch). Caught live on
-    tmichon-cloud1: a routine `install.ps1 update` stopped the already-warm,
-    healthy durable engine daemon even though nothing about the engine or its
-    torch/model stack had changed.
+    a client-mode machine: a routine `install.ps1 update` stopped the
+    already-warm, healthy durable engine daemon even though nothing about the
+    engine or its torch/model stack had changed.
     """
     ps = (PLUGIN / "scripts" / "install.ps1").read_text(encoding="utf-8")
     assert "$LegacyVenvDir = $VenvDir" in ps

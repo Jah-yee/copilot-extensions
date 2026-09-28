@@ -136,6 +136,18 @@ def materialize_nested_uv_editable_refs(
     ``editable = true`` (its ``path`` needs no change -- see
     ``rewrite_nested_uv_editable_entry``).
 
+    Mirrors ``materialize_main.py``'s own outer top-level containment
+    checks exactly (found in review, PR #4372): (1) the UNRESOLVED
+    canonical path is checked for a symlinked ancestor BEFORE ever calling
+    ``.resolve()`` on it -- resolving first would silently follow (and
+    erase) a symlink along the way; (2) ``raw_path`` must resolve to
+    EXACTLY ``<consumer>/libs/<nested_lib>`` (derived independently of
+    ``raw_path`` itself), not merely "somewhere inside the snapshot root"
+    -- a looser check would accept an escaping entry such as
+    ``../../plugins/other`` and copy canonical's `<nested_lib>` content
+    into that OTHER project's directory while leaving the nested manifest
+    pointing at the wrong path, silently shipping the wrong project.
+
     Returns ``(log, materialized_libs)`` -- ``materialized_libs`` names
     every ``nested_lib`` this call successfully handled (copied and/or
     rewrote), so the caller can fold it into its own alias-tracking: a
@@ -155,7 +167,14 @@ def materialize_nested_uv_editable_refs(
         nested_refs = uer.find_uv_editable_refs(dest_lib_dir)
     except uer.ManifestUnreadable as exc:
         return ([f"SKIP {dest_lib_dir}: {exc}"], materialized)
+    canonical_root_r = canonical_root.resolve()
     dest_root_r = dest_root.resolve()
+    # dest_lib_dir was placed at <dest_consumer_dir>/libs/<lib> by the
+    # caller (materialize_main.py's own materialize_uv_editable_ref_into) --
+    # the expected sibling location for a nested dependency is
+    # <dest_consumer_dir>/libs/<nested_lib>, computed independently of
+    # nested_raw_path so a crafted raw_path can never redirect the copy.
+    dest_consumer_dir = dest_lib_dir.parent.parent.resolve()
     for nested_name, nested_raw_path, nested_lib, nested_editable in nested_refs:
         if not nested_editable:
             log.append(
@@ -171,22 +190,39 @@ def materialize_nested_uv_editable_refs(
                 f"{nested_lib!r} is not a safe lib name -- refusing"
             )
             continue
-        nested_canonical = (canonical_root / "libs" / nested_lib).resolve()
-        bad_ancestor = _find_symlinked_ancestor(nested_canonical, canonical_root.resolve())
+        # Check the UNRESOLVED canonical path for a symlinked ancestor
+        # BEFORE ever calling .resolve() on anything derived from it --
+        # resolving first would silently follow (and erase) a symlink
+        # along the way.
+        canonical_unresolved = canonical_root_r / "libs" / nested_lib
+        bad_ancestor = _find_symlinked_ancestor(canonical_unresolved, canonical_root_r)
         if bad_ancestor is not None:
             log.append(f"SKIP {dest_pyproject}: {bad_ancestor} is a symlink -- refusing")
             continue
+        nested_canonical = canonical_unresolved.resolve()
+
+        # Independently derive the EXPECTED sibling location (never from
+        # nested_raw_path itself) before resolving anything -- also check
+        # its own ancestors for a symlink up front, same as the canonical
+        # side above.
+        nested_dest_expected = dest_consumer_dir / "libs" / nested_lib
+        bad_ancestor = _find_symlinked_ancestor(nested_dest_expected, dest_root_r)
+        if bad_ancestor is not None:
+            log.append(f"SKIP {nested_dest_expected}: {bad_ancestor} is a symlink -- refusing")
+            continue
         nested_dest = (dest_lib_dir / nested_raw_path).resolve()
-        if _escapes_root(nested_dest, dest_root_r):
+        # Require the resolved path to be EXACTLY the expected sibling --
+        # not merely "somewhere inside dest_root". A looser containment
+        # check would accept an escaping raw_path (e.g.
+        # ../../plugins/other) and copy canonical's <nested_lib> content
+        # into that OTHER location while the manifest still points at the
+        # wrong path.
+        if nested_dest != nested_dest_expected.resolve():
             log.append(
                 f"SKIP {dest_pyproject}: {nested_name} references "
-                f"{nested_raw_path} (resolved {nested_dest}) which escapes "
-                "the snapshot root -- refusing"
+                f"{nested_raw_path} (resolved {nested_dest}) which is not "
+                f"<consumer>/libs/{nested_lib} -- refusing"
             )
-            continue
-        bad_ancestor = _find_symlinked_ancestor(nested_dest, dest_root_r)
-        if bad_ancestor is not None:
-            log.append(f"SKIP {nested_dest}: {bad_ancestor} is a symlink -- refusing")
             continue
         if not nested_canonical.is_dir():
             log.append(

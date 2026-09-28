@@ -1698,6 +1698,37 @@ _Pending._
     `check-module-size.py` confirmed green; re-verified the whole test
     suite (70 passed) and the real-repo materialize round-trip still
     produce identical output after the move.
+  - **Second review round found 2 more real hardening findings** in the
+    new nested-fixup code, both symlink/traversal-class issues this
+    effort's own established pattern already guards against on the
+    OUTER (top-level) path -- the nested path had missed both:
+    - **Path-traversal**: `materialize_nested_uv_editable_refs` only
+      checked the resolved nested destination didn't ESCAPE the whole
+      snapshot root, not that it equalled the EXACT expected sibling
+      (`<consumer>/libs/<nested_lib>`, derived independently of
+      `raw_path`). A crafted nested `raw_path` such as
+      `../../plugins/other` would still be "inside" the snapshot yet
+      copy canonical content into an unrelated project's directory while
+      the manifest kept pointing at the wrong path. Fixed by comparing
+      the resolved destination against the independently-derived
+      expected sibling exactly, mirroring the outer function's own
+      `canonical != canonical_unresolved.resolve()` pattern.
+    - **Symlink resolved-before-checked**: the canonical path was
+      `.resolve()`-d BEFORE its ancestor symlink check ran, so a
+      symlinked canonical lib would resolve to its external target
+      first and the subsequent check would see no symlink at all. Fixed
+      by checking the UNRESOLVED path's ancestors first, then resolving
+      only after confirming no symlink -- same ordering the outer
+      function already used.
+    - Added 2 regression tests (`test_materialize_nested_uv_editable_refs_
+      refuses_a_path_traversal_raw_path`,
+      `test_materialize_nested_uv_editable_refs_refuses_a_symlinked_
+      canonical`) to `test_materialize_main.py`; mirrored the identical
+      hardening into the trusted `_trusted_pointer_materializer.py` copy.
+      Re-validated: `test_materialize_main.py` 72 passed;
+      `test_trusted_materializer_parity.py` 10 passed; worktree-manager's
+      own full suite 1548 passed, 4 skipped; real-repo materialize
+      round-trip and all other guards still green.
 - **Next up**: `single-instance-lease` (5 consumers) -- check its own
   `pyproject.toml` dependencies FIRST this time, per the ordering lesson
   above, before assuming the effort's original Plan ordering is still

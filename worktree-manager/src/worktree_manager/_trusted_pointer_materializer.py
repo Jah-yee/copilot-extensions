@@ -430,7 +430,13 @@ def _materialize_nested_uv_editable_refs(
     ``ssh-manager`` can itself depend on another canonical lib such as
     ``agent-procutil`` via its own escaping `uv`-editable entry; the outer
     rewrite only fixes the CONSUMER's top-level entry, leaving the
-    just-copied lib's own nested entry still ``editable = true``)."""
+    just-copied lib's own nested entry still ``editable = true``).
+
+    Hardened per PR #4372's second review round: (1) the UNRESOLVED
+    canonical path is checked for a symlinked ancestor BEFORE ever calling
+    ``.resolve()`` on it; (2) ``raw_path`` must resolve to EXACTLY
+    ``<consumer>/libs/<nested_lib>`` (derived independently of
+    ``raw_path``), not merely "somewhere inside the snapshot root"."""
     log: list[str] = []
     materialized: set[str] = set()
     dest_pyproject = dest_lib_dir / "pyproject.toml"
@@ -443,7 +449,13 @@ def _materialize_nested_uv_editable_refs(
         nested_refs = find_uv_editable_refs(dest_lib_dir)
     except ManifestUnreadable as exc:
         return ([f"SKIP {dest_lib_dir}: {exc}"], materialized)
+    canonical_root_r = canonical_root.resolve()
     dest_root_r = dest_root.resolve()
+    # dest_lib_dir was placed at <dest_consumer_dir>/libs/<lib> by the
+    # caller -- the expected sibling location for a nested dependency is
+    # <dest_consumer_dir>/libs/<nested_lib>, computed independently of
+    # nested_raw_path so a crafted raw_path can never redirect the copy.
+    dest_consumer_dir = dest_lib_dir.parent.parent.resolve()
     for nested_name, nested_raw_path, nested_lib, nested_editable in nested_refs:
         if not nested_editable:
             log.append(
@@ -459,22 +471,35 @@ def _materialize_nested_uv_editable_refs(
                 f"{nested_lib!r} is not a safe lib name -- refusing"
             )
             continue
-        nested_canonical = (canonical_root / "libs" / nested_lib).resolve()
-        bad_ancestor = _find_symlinked_ancestor(nested_canonical, canonical_root.resolve())
+        # Check the UNRESOLVED canonical path for a symlinked ancestor
+        # BEFORE ever calling .resolve() on anything derived from it --
+        # resolving first would silently follow (and erase) a symlink
+        # along the way.
+        canonical_unresolved = canonical_root_r / "libs" / nested_lib
+        bad_ancestor = _find_symlinked_ancestor(canonical_unresolved, canonical_root_r)
         if bad_ancestor is not None:
             log.append(f"SKIP {dest_pyproject}: {bad_ancestor} is a symlink -- refusing")
             continue
+        nested_canonical = canonical_unresolved.resolve()
+
+        nested_dest_expected = dest_consumer_dir / "libs" / nested_lib
+        bad_ancestor = _find_symlinked_ancestor(nested_dest_expected, dest_root_r)
+        if bad_ancestor is not None:
+            log.append(f"SKIP {nested_dest_expected}: {bad_ancestor} is a symlink -- refusing")
+            continue
         nested_dest = (dest_lib_dir / nested_raw_path).resolve()
-        if _escapes_root(nested_dest, dest_root_r):
+        # Require the resolved path to be EXACTLY the expected sibling --
+        # not merely "somewhere inside dest_root". A looser containment
+        # check would accept an escaping raw_path (e.g.
+        # ../../plugins/other) and copy canonical's <nested_lib> content
+        # into that OTHER location while the manifest still points at the
+        # wrong path.
+        if nested_dest != nested_dest_expected.resolve():
             log.append(
                 f"SKIP {dest_pyproject}: {nested_name} references "
-                f"{nested_raw_path} (resolved {nested_dest}) which escapes "
-                "the snapshot root -- refusing"
+                f"{nested_raw_path} (resolved {nested_dest}) which is not "
+                f"<consumer>/libs/{nested_lib} -- refusing"
             )
-            continue
-        bad_ancestor = _find_symlinked_ancestor(nested_dest, dest_root_r)
-        if bad_ancestor is not None:
-            log.append(f"SKIP {nested_dest}: {bad_ancestor} is a symlink -- refusing")
             continue
         if not nested_canonical.is_dir():
             log.append(

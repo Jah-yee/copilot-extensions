@@ -1534,3 +1534,74 @@ def test_materialize_nested_uv_editable_refs_refuses_a_missing_editable_true(tmp
     assert any(
         "missing editable = true" in line for line in log
     ), log
+
+
+def test_materialize_nested_uv_editable_refs_refuses_a_path_traversal_raw_path(
+    tmp_path: Path,
+):
+    """Review finding (PR #4372): a nested entry whose ``raw_path`` does
+    NOT resolve to the expected sibling ``<consumer>/libs/<nested_lib>``
+    (e.g. ``../../plugins/other``, escaping into an unrelated project)
+    must be refused outright -- accepting it would copy canonical's
+    `<nested_lib>` content into that OTHER location while the manifest
+    still points at the wrong path, silently shipping the wrong project."""
+    root = tmp_path / "repo"
+    _canonical_lib(root, "other-project", version="0.1.0-dev1", content="unrelated\n")
+    _canonical_lib_with_dependency(
+        root, "ssh-manager", dep_lib="other-project",
+        dep_raw_path="../../plugins/other",  # escapes the expected sibling shape
+    )
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["ssh-manager"]\n'
+        "\n[tool.uv.sources]\n"
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("which is not" in line for line in log), log
+    assert not (root / "plugins" / "other").exists()
+
+
+def test_materialize_nested_uv_editable_refs_refuses_a_symlinked_canonical(tmp_path: Path):
+    """Review finding (PR #4372): the nested materializer must check the
+    UNRESOLVED canonical path for a symlinked ancestor BEFORE ever calling
+    ``.resolve()`` on it -- resolving first would silently follow (and
+    erase) the symlink, letting `copytree` import files from outside the
+    trusted canonical tree during release materialization."""
+    root = tmp_path / "repo"
+    outside = root.parent / "outside-target"
+    (outside / "agent-procutil").mkdir(parents=True)
+    (outside / "agent-procutil" / "src").mkdir()
+    (outside / "agent-procutil" / "src" / "smuggled.py").write_text(
+        "smuggled = True\n", encoding="utf-8"
+    )
+    (root / "libs").mkdir(parents=True)
+    (root / "libs" / "agent-procutil").symlink_to(
+        outside / "agent-procutil", target_is_directory=True
+    )
+    _canonical_lib_with_dependency(
+        root, "ssh-manager", dep_lib="agent-procutil", dep_raw_path="../agent-procutil",
+    )
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["ssh-manager"]\n'
+        "\n[tool.uv.sources]\n"
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("is a symlink" in line for line in log), log
+    assert not (consumer / "libs" / "agent-procutil").exists()

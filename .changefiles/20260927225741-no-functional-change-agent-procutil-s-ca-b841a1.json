@@ -1,9 +1,0 @@
-{
-  "comment": "No functional change: agent-procutil's canonical libs/agent-procutil/tests/ gained a conftest.py (vendor-pointer-generalization Phase 1's CI canonical-lib test coverage); this plugin's own vendored copy of agent-procutil is unaffected (still the real, non-editable form).",
-  "changes": [
-    {
-      "plugin": "agent-vault",
-      "type": "patch"
-    }
-  ]
-}

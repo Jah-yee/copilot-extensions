@@ -1,9 +1,0 @@
-{
-  "comment": "Fix the sessionStart hook's agent-procutil src path resolution to fall back to canonical when no local payload copy exists (vendor-pointer-generalization Phase 1).",
-  "changes": [
-    {
-      "plugin": "agent-codespaces",
-      "type": "patch"
-    }
-  ]
-}

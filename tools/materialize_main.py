@@ -70,6 +70,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nested_uv_editable_ref as nuer  # noqa: E402
 import uv_editable_ref as uer  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -503,7 +504,7 @@ def materialize_uv_editable_ref_into(
             # "alias" (rewrite-only) path below, not the hard "already
             # exists" refusal, since the nested step already placed it at
             # the exact same sibling location a top-level entry would.
-            nested_log, nested_materialized = _materialize_nested_uv_editable_refs(
+            nested_log, nested_materialized = nuer.materialize_nested_uv_editable_refs(
                 dest_lib_dir, canonical_root=canonical_root_r, dest_root=dest_root_r,
             )
             log.extend(nested_log)
@@ -631,145 +632,6 @@ def _materialize_one_uv_editable_ref(
     if error is not None:
         return error
     return f"OK   {dest_lib_dir} <- {raw_path}"
-
-
-def _rewrite_nested_uv_editable_entry(
-    *, pyproject: Path, name: str, raw_path: str
-) -> str | None:
-    """Rewrite a NESTED `uv`-editable entry -- one belonging to a
-    just-copied canonical lib's OWN manifest (e.g. `ssh-manager` depending
-    on `agent-procutil`), not a top-level consumer's -- to drop
-    ``editable = true`` while keeping its ``path`` UNCHANGED. Unlike
-    ``_rewrite_uv_editable_source_entry`` (which rewrites a top-level
-    consumer's entry to the different ``libs/<lib>`` form, since that
-    consumer's own directory structure doesn't otherwise have a
-    ``libs/<lib>`` at all), a nested reference's relative path already
-    correctly resolves once its target lib is materialized at the
-    matching relative depth -- see
-    ``_materialize_nested_uv_editable_refs``'s own docstring for why."""
-    text = pyproject.read_text(encoding="utf-8")
-    span = uer.uv_sources_table_span(text)
-    if span is None:
-        return f"SKIP {pyproject}: no [tool.uv.sources] table found"
-    start, end = span
-    pattern = _uv_source_entry_pattern(name, raw_path)
-    if pattern.search(text[start:end]) is None:
-        return f"SKIP {pyproject}: could not find {name}'s uv-editable entry to rewrite"
-    new_table_text, count = pattern.subn(
-        lambda m: f'{m.group(1)}{{ path = "{raw_path}" }}', text[start:end], count=1
-    )
-    assert count == 1  # already confirmed via the preflight search() above
-    pyproject.write_text(text[:start] + new_table_text + text[end:], encoding="utf-8")
-    return None
-
-
-def _materialize_nested_uv_editable_refs(
-    dest_lib_dir: Path, *, canonical_root: Path, dest_root: Path,
-) -> tuple[list[str], set[str]]:
-    """After copying a canonical lib's own tree into ``dest_lib_dir``, fix
-    up any `uv`-editable canonical-reference entry THAT LIB ITSELF
-    declares (found in review, PR #4372: `ssh-manager` depends on
-    `agent-procutil`, both real canonical libs). The outer rewrite in
-    ``_materialize_one_uv_editable_ref`` only touches the CONSUMER's own
-    top-level entry -- a copied canonical lib's own nested entry is left
-    untouched, still ``editable = true``. A real `main` release would then
-    require the SAME path both editable (the nested entry) and
-    non-editable (the consumer's rewritten entry) at once, which `uv`
-    refuses to resolve.
-
-    The nested entry's ``raw_path`` (e.g. ``../agent-procutil``) is
-    authored relative to the canonical lib's OWN directory (a sibling
-    under ``libs/``). Since ``dest_lib_dir`` was copied to the exact same
-    relative depth under its consumer (``<consumer>/libs/<lib>``,
-    mirroring ``canonical_root/libs/<lib>``), that identical relative path
-    resolves correctly to ``<consumer>/libs/<nested_lib>`` -- the SAME
-    location a consumer's own direct dependency on that lib (if any) would
-    also materialize to. If nothing has materialized it there yet, this
-    copies it in; either way, the nested entry is rewritten to drop
-    ``editable = true`` (its ``path`` needs no change -- see
-    ``_rewrite_nested_uv_editable_entry``).
-
-    Returns ``(log, materialized_libs)`` -- ``materialized_libs`` names
-    every ``nested_lib`` this call successfully handled (copied and/or
-    rewrote), so the caller can fold it into its own alias-tracking: a
-    LATER top-level entry for that same lib must take the rewrite-only
-    "alias" path, not the hard "already exists" refusal, since this
-    function already placed it at the exact sibling location a top-level
-    entry would."""
-    log: list[str] = []
-    materialized: set[str] = set()
-    dest_pyproject = dest_lib_dir / "pyproject.toml"
-    if dest_pyproject.is_symlink():
-        return ([
-            f"SKIP {dest_pyproject}: is a symlink -- refusing to trust it "
-            "for nested uv-editable canonical-reference expansion"
-        ], materialized)
-    try:
-        nested_refs = uer.find_uv_editable_refs(dest_lib_dir)
-    except uer.ManifestUnreadable as exc:
-        return ([f"SKIP {dest_lib_dir}: {exc}"], materialized)
-    dest_root_r = dest_root.resolve()
-    for nested_name, nested_raw_path, nested_lib, nested_editable in nested_refs:
-        if not nested_editable:
-            log.append(
-                f"SKIP {dest_pyproject}: {nested_name} references {nested_raw_path} "
-                "outside its own root but is missing editable = true -- "
-                "refusing to ship an unresolved external reference"
-            )
-            continue
-        if not uer.is_safe_lib_name(nested_lib):
-            log.append(
-                f"SKIP {dest_pyproject}: {nested_name} references "
-                f"{nested_raw_path}, whose final path component "
-                f"{nested_lib!r} is not a safe lib name -- refusing"
-            )
-            continue
-        nested_canonical = (canonical_root / "libs" / nested_lib).resolve()
-        bad_ancestor = _find_symlinked_ancestor(nested_canonical, canonical_root.resolve())
-        if bad_ancestor is not None:
-            log.append(f"SKIP {dest_pyproject}: {bad_ancestor} is a symlink -- refusing")
-            continue
-        nested_dest = (dest_lib_dir / nested_raw_path).resolve()
-        if _escapes_root(nested_dest, dest_root_r):
-            log.append(
-                f"SKIP {dest_pyproject}: {nested_name} references "
-                f"{nested_raw_path} (resolved {nested_dest}) which escapes "
-                "the snapshot root -- refusing"
-            )
-            continue
-        bad_ancestor = _find_symlinked_ancestor(nested_dest, dest_root_r)
-        if bad_ancestor is not None:
-            log.append(f"SKIP {nested_dest}: {bad_ancestor} is a symlink -- refusing")
-            continue
-        if not nested_canonical.is_dir():
-            log.append(
-                f"SKIP {dest_pyproject}: {nested_name} references "
-                f"{nested_raw_path} (resolved canonical {nested_canonical}) "
-                "which does not exist"
-            )
-            continue
-        if not nested_dest.exists():
-            if not (nested_canonical / "src").is_dir():
-                log.append(
-                    f"SKIP {nested_dest}: {nested_canonical}/src not found "
-                    "-- refusing (canonical lib source must exist)"
-                )
-                continue
-            stray = _find_symlink(nested_canonical)
-            if stray is not None:
-                where = str(nested_canonical) if stray == "." else f"{nested_canonical}/{stray}"
-                log.append(f"SKIP {nested_dest}: {where} is a symlink -- refusing")
-                continue
-            shutil.copytree(nested_canonical, nested_dest, ignore=_ignore)
-        error = _rewrite_nested_uv_editable_entry(
-            pyproject=dest_pyproject, name=nested_name, raw_path=nested_raw_path,
-        )
-        if error is not None:
-            log.append(error)
-            continue
-        log.append(f"OK   {nested_dest} <- {nested_raw_path} (nested in {dest_lib_dir})")
-        materialized.add(nested_lib)
-    return log, materialized
 
 
 def materialize_uv_editable_refs(dest: Path, *, canonical_root: Path) -> list[str]:

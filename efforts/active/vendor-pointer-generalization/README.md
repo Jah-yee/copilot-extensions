@@ -1688,6 +1688,16 @@ _Pending._
     passed, 4 skipped; all guards
     (`sync-vendored-libs.py --check`/`check-vendored-libs-sync.py`/
     `check-install-contract.py`/`check-version-consistency.py`) green.
+  - **`tools/materialize_main.py` crossed the repo's 1000-line module-size
+    cap** once the nested-fixup landed (1011 lines) -- split the two new
+    functions (`materialize_nested_uv_editable_refs`/
+    `rewrite_nested_uv_editable_entry`, plus their own small private
+    helpers) into a new `tools/nested_uv_editable_ref.py`, matching this
+    same session's earlier PR #4245 precedent for handling this exact
+    cap. `materialize_main.py` now 873 lines, the new module 219;
+    `check-module-size.py` confirmed green; re-verified the whole test
+    suite (70 passed) and the real-repo materialize round-trip still
+    produce identical output after the move.
 - **Next up**: `single-instance-lease` (5 consumers) -- check its own
   `pyproject.toml` dependencies FIRST this time, per the ordering lesson
   above, before assuming the effort's original Plan ordering is still

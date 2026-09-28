@@ -447,6 +447,22 @@ shape before committing to a design)_
             re-conversion also closes out its own instance of issue #3905
             (the non-editable-install gap no longer applies once that lib
             is back on the `uv`-editable form).
+            - [x] **Ordering caveat found during `ssh-manager`'s
+                  conversion (2026-09-28)**: a lib with its OWN dependency
+                  on another vendored lib (per its `pyproject.toml`
+                  `dependencies`/`[tool.uv.sources]`) cannot be converted
+                  ahead of that dependency for any consumer that ALSO
+                  directly vendors the same dependency -- `uv` sees
+                  conflicting resolutions (a local copy path vs.
+                  canonical) for the same distribution name and refuses to
+                  resolve. Check every remaining lib's own `pyproject.toml`
+                  `dependencies` FIRST, before assuming this list's
+                  original ordering is still safe as written; convert the
+                  dependency early (bundled into the same PR, for the
+                  affected consumers only) if it isn't already done. Any
+                  canonical lib's OWN internal `[tool.uv.sources]` entry
+                  for another vendored lib must ALSO carry
+                  `editable = true` -- not just consumer-facing entries.
             - [ ] **`plugin-activation`'s re-conversion needs an explicit
                   consumer-side follow-up, not just a pointer-directory
                   swap** (found in review): `plugins/customizing-copilot/
@@ -466,7 +482,9 @@ shape before committing to a design)_
                   TOML, find the `agent-plugin-activation` entry's `path`,
                   resolve `state.py` under it) — still never importing the
                   `plugin_activation` package itself, preserving the
-                  original PyYAML-avoidance design.
+                  original PyYAML-avoidance design. **This same lib also
+                  depends on `agent-dropin-registry`/`agent-plugin-resolve`
+                  -- apply the ordering caveat above too.**
       - [ ] Remaining real lib copies never yet converted at all
             (`agent-procutil`, `dropin-registry`, `plugin-resolve`,
             `session-liveness-probe`, `venue-copilot`, `zdd`) — convert
@@ -1523,3 +1541,100 @@ _Pending._
   smallest-blast-radius-first ordering. **Remember the Documentation
   impact PR-description statement going forward** -- missed on both this
   PR and #4331 (which already merged without it).
+
+### 2026-09-28 — Phase 1: converted `ssh-manager` (4 consumers) + `agent-procutil` (early, same 4 consumers)
+
+- Applied the standard recipe to `ssh-manager`'s 4 consumers (`agent-ssh`,
+  `agent-containers`, `agent-bridge`, `agent-codespaces`):
+  `tools/sync-vendored-libs.py --uv-editable` per consumer, hand-updated
+  each `[tool.uv.sources]` prose comment.
+- **Real, previously-undocumented structural finding**: `uv pip install
+  --reinstall` for `agent-ssh` failed outright with `Requirements contain
+  conflicting URLs for package agent-procutil` -- `libs/ssh-manager`'s OWN
+  `pyproject.toml` declares a dependency on `agent-procutil` (unlike every
+  lib converted so far, which had zero dependencies), resolved via its own
+  `[tool.uv.sources]` entry pointing at canonical `libs/agent-procutil`.
+  Every one of `ssh-manager`'s 4 consumers ALSO directly depends on
+  `agent-procutil` -- but still via each consumer's own OLD local vendored
+  copy. `uv` sees two different resolutions (a copy path vs. canonical)
+  for the same distribution name and refuses to resolve at all. **This
+  changes the effort's understood safe ordering**: a lib with its own
+  vendored-lib dependencies (also true of `plugin-activation`, which
+  depends on `agent-dropin-registry`/`agent-plugin-resolve`) cannot be
+  converted ahead of that dependency for any shared consumer -- the
+  dependency must be converted first (or bundled into the same PR) for
+  every affected consumer. Resolved here by converting `agent-procutil`
+  to `uv`-editable early, for these same 4 consumers only (7 of its other
+  11 consumers remain real copies for now, untouched, since they don't
+  share this conflict) -- confirmed `sync-vendored-libs.py --check` treats
+  this mixed per-consumer state as valid (same DRY-pointer-copy-exclusion
+  pattern already established for other partially-converted libs).
+- **Second real finding, caught only after fixing the first**: even with
+  matching file paths, `uv` STILL refused to resolve --
+  `libs/ssh-manager/pyproject.toml`'s own `agent-procutil` source entry
+  lacked `editable = true`, conflicting with the now-editable entry from
+  each consumer's own direct dependency on the same path. **General rule
+  surfaced**: any canonical lib's OWN internal dependency on another
+  vendored lib must ALSO declare `editable = true`, not just the
+  consumer-facing entries -- fixed in `libs/ssh-manager/pyproject.toml`
+  directly.
+- **Third real finding**: `agent-bridge`'s own
+  `test_install_ssh_manager_selectors.py` read
+  `PLUGIN/libs/ssh-manager/pyproject.toml` directly to cross-check its
+  Windows installer's hardcoded distribution-name selectors -- broke once
+  the local copy was deleted. `install.ps1`'s own `Resolve-VendoredLib`
+  already had a two-tier fallback (local copy, then the `../../libs/<lib>`
+  git-checkout-layout canonical path) so the REAL installer was never at
+  risk -- only the test's own path resolution needed the same fallback.
+  Fixed by adding an equivalent two-tier resolver to the test.
+- **Fourth finding, a genuine (dormant) pre-existing bug surfaced for the
+  first time**: extending the CI canonical-lib test step to
+  `libs/ssh-manager/tests` (per the by-now-standard practice) uncovered
+  `test_force_evicts_live_holder` failing 100% reproducibly, unrelated to
+  this conversion -- these tests were NEVER actually collected by any
+  consumer's own plugin suite before (confirmed: `agent-bridge`'s test
+  count was identical, 225, both before and after this whole effort's
+  conversions), so this bug had never been exercised in CI at all. Root
+  cause: the test spawns a child via bare `subprocess.Popen` and discards
+  the handle without ever reaping it; `_terminate()` (production code)
+  sends `SIGTERM` then polls `pid_alive()` (`os.kill(pid, 0)`) waiting for
+  it to report "gone" -- but an un-reaped terminated child becomes a
+  zombie, which `os.kill(pid, 0)` reports as alive indefinitely. Real
+  production usage never hits this (a lock holder is typically an
+  unrelated process already reparented to init, which reaps it for free)
+  -- purely a test-harness artifact. Fixed by having the test spawn a
+  daemon thread blocked in `Popen.wait()` to reap the child the moment it
+  actually exits; confirmed stable across 3 repeated runs.
+- Added `libs/ssh-manager/tests/conftest.py` and
+  `libs/agent-procutil/tests/conftest.py`; extended the CI canonical-lib
+  test step to run both (`agent-procutil`'s canonical suite is included
+  even though only 4 of 11 consumers are converted so far, since the step
+  is meant to test the canonical copy directly, independent of any
+  particular consumer's pointer form).
+- Validated end-to-end: all 4 consumers' full plugin suites green except
+  each one's own single already-confirmed-pre-existing failure
+  (`agent-ssh`: `test_host_restore.py`; `agent-containers`:
+  `test_worktrees_peer.py`; both re-confirmed via `git stash` against
+  unmodified `dev`); `agent-bridge`/`agent-codespaces` fully green.
+  Non-editable install probe (fresh venv, `uv pip install
+  plugins/agent-ssh`, no `-e`) -- both `ssh_manager.__file__` and
+  `agent_procutil.__file__` resolved live to canonical, confirming the
+  nested-dependency case works too. `materialize_main.py --dest`
+  round-tripped all 8 pointers (4 `ssh-manager` + 4 `agent-procutil`)
+  byte-for-byte.
+- **Repeated the same stray-build-artifact false alarm** from the
+  `work-coalescing-singleton` conversion, twice more this round (once in
+  a consumer's `libs/agent-procutil`, once in canonical
+  `libs/agent-procutil/src`, once in a leftover empty
+  `plugins/agent-ssh/libs/ssh-manager` directory) -- all self-inflicted by
+  this session's own non-editable-install probes and `--reinstall` test
+  runs. Cleaning stray `build/`/`*.egg-info`/empty directories before
+  trusting any `--refuses to discard local changes`/`SKIP ... already
+  exists` message is now this effort's standing practice for every
+  remaining lib.
+- Added a changefile per touched plugin (`agent-ssh`, `agent-containers`,
+  `agent-bridge`, `agent-codespaces`).
+- **Next up**: `single-instance-lease` (5 consumers) -- check its own
+  `pyproject.toml` dependencies FIRST this time, per the ordering lesson
+  above, before assuming the effort's original Plan ordering is still
+  safe as written.

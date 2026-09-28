@@ -22,13 +22,24 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-# Shared Windows-headless / detached process-spawn kwargs, vendored per plugin
-# (byte-identical src across copies; see tools/check-vendored-libs-sync.py).
-agent-procutil = { path = "libs/agent-procutil" }
+# Shared Windows-headless / detached process-spawn kwargs. This is a
+# `uv`-editable canonical reference (vendor-pointer-generalization effort,
+# Phase 1 -- converted early as a prerequisite for `ssh-manager`'s own
+# conversion, which depends on it): `path` escapes this plugin's own root
+# and resolves live to `libs/agent-procutil`, so this `dev`-branch
+# checkout has nothing to keep manually in sync -- only a real
+# `main`-branch release (tools/materialize_main.py) ever gets a real
+# local copy.
+agent-procutil = { path = "../../libs/agent-procutil", editable = true }
 # Tri-state managed-fragment scans and bounded operational warnings.
 agent-dropin-registry = { path = "libs/dropin-registry" }
-# Shared OpenSSH process/config primitives.
-agent-ssh-manager = { path = "libs/ssh-manager" }
+# Shared OpenSSH process/config primitives. This is a `uv`-editable
+# canonical reference (vendor-pointer-generalization effort, Phase 1):
+# `path` escapes this plugin's own root and resolves live to
+# `libs/ssh-manager`, so this `dev`-branch checkout has nothing to keep
+# manually in sync -- only a real `main`-branch release
+# (tools/materialize_main.py) ever gets a real local copy.
+agent-ssh-manager = { path = "../../libs/ssh-manager", editable = true }
 # Provider-agnostic detached CLI-mode reservation/launch helpers.
 agent-venue-copilot = { path = "libs/venue-copilot" }
 # Routing-table reader used by venue-copilot for host bridge discovery.

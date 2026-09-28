@@ -809,42 +809,11 @@ async def lifespan(app: FastAPI):
 
     live_reap_task = asyncio.create_task(_live_reap_loop())
 
-    # UI worker supervisor -- notice a venue worker whose connection to this
-    # machine dropped (its heartbeat lapsed; it has lost the credential relay)
-    # and reconnect it, resuming the same conversation. Acts only while the
-    # routing table names this daemon, so a cutover pair never both reconnect.
-    # Opt out with AGENT_BRIDGE_UI_WORKER_SUPERVISOR=0.
-    workers_task = None
-    import os as _os
-
-    if _os.environ.get("AGENT_BRIDGE_UI_WORKER_SUPERVISOR", "1").strip().lower() not in (
-        "0", "false", "no", "off",
-    ):
-        from .config import config_dir as _config_dir
-        from .routes import ui_workers
-
-        def _routing_active() -> bool:
-            from zdd import routing
-
-            data = routing.read_table(_config_dir())
-            raw = data.get("active") if isinstance(data, dict) else None
-            if not isinstance(raw, dict):
-                return False
-            # A cutover records the launcher's pid, which on Windows is a venv
-            # shim in front of this interpreter; the listening port is exact.
-            bound = getattr(app.state, "bound_port", None)
-            if bound is not None and raw.get("port") == bound:
-                return True
-            return raw.get("pid") in (_os.getpid(), _os.getppid())
-
-        async def _workers_backoff() -> bool:
-            return await _governance_backoff(
-                governance, "pre-mutation:ui-workers", loop_name="ui worker supervisor",
-            )
-
-        workers_task = asyncio.create_task(
-            ui_workers.supervise(app, is_active=_routing_active, backoff=_workers_backoff)
-        )
+    # UI worker supervisor: reconnect a venue worker that lost its connection
+    # (routes/ui_workers.py). Acts only while the routing table names this daemon.
+    from .routes.ui_workers import start_supervisor as _start_ui_workers
+    workers_task = _start_ui_workers(app, lambda: _governance_backoff(
+        governance, "pre-mutation:ui-workers", loop_name="ui worker supervisor"))
 
     # The route was published before slow startup work. Record the durable START
     # event only after uvicorn confirms that it is accepting connections.
@@ -1019,49 +988,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.debug("Routing-table clear-on-shutdown skipped", exc_info=True)
 
-    # Shutdown: stop the idle-shutdown monitor
-    if idle_task is not None:
-        idle_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await idle_task
-
-    # Shutdown: stop the liveness heartbeat (#145)
-    heartbeat_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await heartbeat_task
-
-    # Shutdown: stop the background Session-Host reattach if still in flight
-    reattach_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await reattach_task
-
-    # Shutdown: stop the periodic GC sweep
-    if gc_task is not None:
-        gc_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await gc_task
-
-    # Shutdown: stop the version-mux stranded-host sweep
-    if host_sweep_task is not None:
-        host_sweep_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await host_sweep_task
-
-    # Shutdown: stop the idle-session reaper (#1826)
-    if idle_reap_task is not None:
-        idle_reap_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await idle_reap_task
-
-    # Shutdown: stop the live-session lease reaper (#2880/#2906)
-    live_reap_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await live_reap_task
-
-    if workers_task is not None:
-        workers_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await workers_task
+    # Shutdown: stop the background loops, in start order -- the idle-shutdown
+    # monitor, liveness heartbeat (#145), in-flight Session-Host reattach,
+    # periodic GC sweep, version-mux stranded-host sweep, idle-session reaper
+    # (#1826), live-session lease reaper (#2880/#2906), UI worker supervisor.
+    for _bg in (idle_task, heartbeat_task, reattach_task, gc_task, host_sweep_task,
+                idle_reap_task, live_reap_task, workers_task):
+        if _bg is not None:
+            _bg.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _bg
 
     # Shutdown: stop credential relay
     if relay_server and relay_server.running:

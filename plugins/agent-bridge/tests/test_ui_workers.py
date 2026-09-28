@@ -195,3 +195,28 @@ def test_the_supervisor_loop_only_acts_while_this_daemon_is_active(env, monkeypa
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(ui_workers.supervise(env.app, is_active=lambda: next(active)))
     assert sweeps == [False, True]
+
+
+@pytest.mark.parametrize(("active", "bound", "expected"), [
+    ({"port": 10756, "pid": 1}, 10756, True),          # the port is exact
+    ({"port": 34149, "pid": 1}, 10756, False),         # a cutover successor on another port
+    ({"port": 1, "pid": "parent"}, None, True),        # the venv launcher's pid (Windows)
+    ({"port": 1, "pid": 999999}, None, False),
+])
+def test_only_the_daemon_the_routing_table_names_reconnects(monkeypatch, active, bound, expected) -> None:
+    import os
+
+    from zdd import routing
+
+    if active.get("pid") == "parent":
+        active = {**active, "pid": os.getppid()}
+    monkeypatch.setattr(routing, "read_table", lambda _dir: {"active": active})
+    app = FastAPI()
+    if bound is not None:
+        app.state.bound_port = bound
+    assert ui_workers.routing_names(app) is expected
+
+
+def test_the_supervisor_can_be_turned_off(monkeypatch) -> None:
+    monkeypatch.setenv(ui_workers.SUPERVISOR_ENV, "0")
+    assert ui_workers.start_supervisor(FastAPI()) is None

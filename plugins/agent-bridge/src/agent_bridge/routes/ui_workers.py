@@ -322,6 +322,39 @@ async def supervise(app: Any, *, is_active: Any = None, backoff: Any = None) -> 
             log.warning("UI workers: sweep failed", exc_info=True)
 
 
+SUPERVISOR_ENV = "AGENT_BRIDGE_UI_WORKER_SUPERVISOR"
+
+
+def routing_names(app: Any) -> bool:
+    """Whether the zero-downtime routing table's active entry is this daemon.
+
+    Matched by the listening port, which is exact; a cutover records the
+    launcher's pid, which on Windows is a venv shim in front of this
+    interpreter, so the pid is only a fallback (ours or our parent's)."""
+    from zdd import routing
+
+    from ..config import config_dir
+
+    data = routing.read_table(config_dir())
+    raw = data.get("active") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return False
+    bound = getattr(app.state, "bound_port", None)
+    if bound is not None and raw.get("port") == bound:
+        return True
+    return raw.get("pid") in (os.getpid(), os.getppid())
+
+
+def start_supervisor(app: Any, backoff: Any = None) -> asyncio.Task | None:
+    """Start :func:`supervise` for the daemon, unless ``AGENT_BRIDGE_UI_WORKER_SUPERVISOR``
+    is off. It acts only while :func:`routing_names` this daemon, so a cutover
+    pair never both reconnect."""
+    if os.environ.get(SUPERVISOR_ENV, "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    return asyncio.create_task(supervise(app, is_active=lambda: routing_names(app), backoff=backoff),
+                               name="ui-worker-supervisor")
+
+
 @router.get("/api/v1/ui/workers", include_in_schema=False)
 async def list_workers(request: Request) -> dict[str, Any]:
     ws = workers_for(request.app)

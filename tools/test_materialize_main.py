@@ -1605,3 +1605,73 @@ def test_materialize_nested_uv_editable_refs_refuses_a_symlinked_canonical(tmp_p
 
     assert any("is a symlink" in line for line in log), log
     assert not (consumer / "libs" / "agent-procutil").exists()
+
+
+def test_materialize_nested_uv_editable_refs_refuses_a_non_directory_sibling(tmp_path: Path):
+    """Review finding (PR #4372): a pre-existing REGULAR FILE at the
+    expected sibling path must never be silently accepted as
+    "already materialized" -- rewriting the manifest over it would ship a
+    dependency the promoted package can't actually import."""
+    root = tmp_path / "repo"
+    _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+    _canonical_lib_with_dependency(
+        root, "ssh-manager", dep_lib="agent-procutil", dep_raw_path="../agent-procutil",
+    )
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["ssh-manager"]\n'
+        "\n[tool.uv.sources]\n"
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n',
+        encoding="utf-8",
+    )
+    # A stray regular file already sits where agent-procutil should land.
+    (consumer / "libs").mkdir(parents=True)
+    (consumer / "libs" / "agent-procutil").write_text("not a directory\n", encoding="utf-8")
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("is not a directory" in line for line in log), log
+    ssh_manager_pp = (consumer / "libs/ssh-manager/pyproject.toml").read_text()
+    assert "editable = true" in ssh_manager_pp
+
+
+def test_materialize_nested_uv_editable_refs_refuses_stale_mismatched_content(tmp_path: Path):
+    """Review finding (PR #4372): a pre-existing directory at the expected
+    sibling path whose content does NOT match canonical (stale from an
+    earlier release) must never be silently accepted as "already
+    materialized" -- only a byte-identical directory may be treated as
+    equivalent to a fresh copy."""
+    root = tmp_path / "repo"
+    _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+    _canonical_lib_with_dependency(
+        root, "ssh-manager", dep_lib="agent-procutil", dep_raw_path="../agent-procutil",
+    )
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["ssh-manager"]\n'
+        "\n[tool.uv.sources]\n"
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n',
+        encoding="utf-8",
+    )
+    # A stale prior copy of agent-procutil already sits at the sibling
+    # location, with content that no longer matches canonical.
+    stale_dir = consumer / "libs" / "agent-procutil" / "src" / "agent_procutil"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "__init__.py").write_text("stale = True\n", encoding="utf-8")
+    (consumer / "libs/agent-procutil/pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0-dev-stale"\n', encoding="utf-8"
+    )
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("does not match canonical" in line for line in log), log
+    # The stale content is untouched, not silently overwritten.
+    assert (stale_dir / "__init__.py").read_text() == "stale = True\n"

@@ -1729,6 +1729,41 @@ _Pending._
       `test_trusted_materializer_parity.py` 10 passed; worktree-manager's
       own full suite 1548 passed, 4 skipped; real-repo materialize
       round-trip and all other guards still green.
+  - **Third review round found 2 more real hardening findings + 1 new
+    finding from itself**: `materialize_nested_uv_editable_refs` treated
+    ANY pre-existing path at the expected sibling location as "already
+    materialized" without verifying it -- accepting a non-directory
+    artifact (a regular file) or a stale/mismatched prior copy, either of
+    which would rewrite the manifest over content the promoted package
+    couldn't actually import correctly. Fixed by requiring the existing
+    path be a real directory AND byte-identical to canonical (reusing
+    `uv_editable_ref.py`'s own `lib_tree_matches`, already built for
+    exactly this "does this copy match canonical" comparison) before
+    treating it as equivalent to a fresh copy; refuse a symlink,
+    non-directory, or mismatched directory outright instead. Mirrored
+    into the trusted copy (which needed its own local `_file_hashes`/
+    `_lib_tree_matches`, since it can't import `uv_editable_ref.py`).
+  - **Caught and fixed a self-inflicted false alarm while validating this
+    same fix**: `lib_tree_matches`'s own `_file_hashes` excluded only
+    `__pycache__`/`.pyc`/`.pyo`, not the FULL set of build/cache
+    directory names a copytree's own `ignore` callback excludes
+    (`.git`, `.pytest_cache`, `.ruff_cache`, `build`, `dist`) -- so
+    comparing a canonical tree that still carries a local `.ruff_cache`
+    (an ordinary dev artifact) against its own freshly-copied sibling
+    (which correctly omits it) reported a false mismatch on the REAL
+    repo tree, even though every earlier synthetic test passed (none of
+    them had a real `.ruff_cache` present). Fixed `_file_hashes` (both
+    copies) to exclude the same ignore-list, confirmed against the real
+    repo tree afterward with no false SKIP.
+  - Added 2 regression tests (`test_materialize_nested_uv_editable_refs_
+    refuses_a_non_directory_sibling`,
+    `test_materialize_nested_uv_editable_refs_refuses_stale_mismatched_
+    content`) to `test_materialize_main.py`. Re-validated: `test_
+    materialize_main.py` 74 passed; `test_sync_vendored_libs.py` (uses
+    the same `lib_tree_matches`) unaffected, still passing;
+    `test_trusted_materializer_parity.py` 10 passed; worktree-manager's
+    own full suite 1548 passed, 4 skipped; real-repo materialize
+    round-trip and all guards green.
 - **Next up**: `single-instance-lease` (5 consumers) -- check its own
   `pyproject.toml` dependencies FIRST this time, per the ordering lesson
   above, before assuming the effort's original Plan ordering is still

@@ -231,7 +231,32 @@ def materialize_nested_uv_editable_refs(
                 "which does not exist"
             )
             continue
-        if not nested_dest.exists():
+        if nested_dest.exists() or nested_dest.is_symlink():
+            # A pre-existing sibling at this path (from an earlier alias,
+            # a stale prior release, or -- found in review -- a
+            # non-directory artifact entirely) must never be silently
+            # trusted as "already materialized": accept it only when it's
+            # a real directory whose COMPLETE tree is byte-identical to
+            # canonical, exactly the same guarantee a fresh copy would
+            # provide. Anything else (a file, a symlink, or a directory
+            # with mismatched/stale content) is refused outright rather
+            # than rewriting the manifest over unverified content.
+            if nested_dest.is_symlink():
+                log.append(f"SKIP {nested_dest}: is a symlink -- refusing")
+                continue
+            if not nested_dest.is_dir():
+                log.append(
+                    f"SKIP {nested_dest}: already exists but is not a "
+                    "directory -- refusing"
+                )
+                continue
+            if not uer.lib_tree_matches(nested_canonical, nested_dest):
+                log.append(
+                    f"SKIP {nested_dest}: already exists but does not "
+                    "match canonical -- refusing"
+                )
+                continue
+        else:
             if not (nested_canonical / "src").is_dir():
                 log.append(
                     f"SKIP {nested_dest}: {nested_canonical}/src not found "

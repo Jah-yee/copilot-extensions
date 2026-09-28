@@ -35,6 +35,7 @@ still run it after any hand-applied sync.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -367,6 +368,32 @@ def _uv_editable_ignore(_dir: str, names: list[str]) -> set[str]:
     } or n.endswith((".pyc", ".pyo"))}
 
 
+def _file_hashes(root: Path) -> dict[str, str]:
+    """Mirrors ``uv_editable_ref.py``'s identically-named helper --
+    relative-path -> sha256 for every real file anywhere under ``root``,
+    ignoring the same build/tool-cache directory names a copytree's own
+    ``ignore`` callback excludes (so a fresh copy is never falsely
+    reported as "not matching" a canonical tree that still carries them
+    as ordinary local dev artifacts)."""
+    ignored_dirs = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
+    out: dict[str, str] = {}
+    if not root.is_dir():
+        return out
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        if ignored_dirs & set(f.parts) or f.suffix in (".pyc", ".pyo"):
+            continue
+        out[f.relative_to(root).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def _lib_tree_matches(canonical: Path, copy_dir: Path) -> bool:
+    """Mirrors ``uv_editable_ref.py``'s ``lib_tree_matches`` -- True when
+    ``copy_dir``'s complete tree is byte-identical to ``canonical``'s."""
+    return _file_hashes(canonical) == _file_hashes(copy_dir)
+
+
 def _materialize_one_uv_editable_ref(
     *, canonical: Path, dest_lib_dir: Path, pyproject: Path, name: str, raw_path: str, lib: str,
 ) -> str:
@@ -508,7 +535,27 @@ def _materialize_nested_uv_editable_refs(
                 "which does not exist"
             )
             continue
-        if not nested_dest.exists():
+        if nested_dest.exists() or nested_dest.is_symlink():
+            # A pre-existing sibling at this path must never be silently
+            # trusted as "already materialized" -- accept it only when
+            # it's a real directory whose COMPLETE tree is byte-identical
+            # to canonical.
+            if nested_dest.is_symlink():
+                log.append(f"SKIP {nested_dest}: is a symlink -- refusing")
+                continue
+            if not nested_dest.is_dir():
+                log.append(
+                    f"SKIP {nested_dest}: already exists but is not a "
+                    "directory -- refusing"
+                )
+                continue
+            if not _lib_tree_matches(nested_canonical, nested_dest):
+                log.append(
+                    f"SKIP {nested_dest}: already exists but does not "
+                    "match canonical -- refusing"
+                )
+                continue
+        else:
             if not (nested_canonical / "src").is_dir():
                 log.append(
                     f"SKIP {nested_dest}: {nested_canonical}/src not found "

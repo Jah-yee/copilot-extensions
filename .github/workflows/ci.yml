@@ -500,8 +500,14 @@ jobs:
         run: python tools/run-plugin-tests.py ${{ matrix.plugin }}
       - name: Test shared SSH proxy contracts
         if: matrix.plugin == 'agent-bridge'
+        # ssh-manager is now consumed as a `uv`-editable canonical
+        # reference (vendor-pointer-generalization, Phase 1), so
+        # agent-bridge no longer carries a local libs/ssh-manager/src
+        # copy -- point PYTHONPATH at canonical instead. ssh-manager
+        # itself depends on agent-procutil, so that canonical src/ must
+        # be on the path too.
         env:
-          PYTHONPATH: plugins/agent-bridge/libs/ssh-manager/src
+          PYTHONPATH: libs/ssh-manager/src:libs/agent-procutil/src
         run: >-
           .test-venvs/linux/agent-bridge/bin/python -m pytest -q
           libs/ssh-manager/tests/test_process.py

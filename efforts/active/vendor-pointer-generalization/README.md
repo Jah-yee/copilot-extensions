@@ -1764,7 +1764,45 @@ _Pending._
     `test_trusted_materializer_parity.py` 10 passed; worktree-manager's
     own full suite 1548 passed, 4 skipped; real-repo materialize
     round-trip and all guards green.
+  - **Fourth review round found 4 more real findings** -- all fallout
+    from CI/tooling/hooks that still hardcoded the removed local
+    `plugins/agent-bridge/libs/ssh-manager`/`plugins/agent-codespaces/
+    libs/agent-procutil` paths, missed because those surfaces sit
+    outside the plugin test suites and the tooling's own unit tests:
+    - CI's "Test shared SSH proxy contracts" smoke step (in the `full`
+      per-plugin matrix job, distinct from the "checks" job's canonical-
+      lib step) still set `PYTHONPATH=plugins/agent-bridge/libs/
+      ssh-manager/src` -- updated to the canonical `libs/ssh-manager/src`
+      + `libs/agent-procutil/src` (ssh-manager's own dependency).
+    - `tools/nested_uv_editable_ref.py` (this session's own new module)
+      was missing from `test_promote_release.py`/`test_rollback_
+      release.py`'s `_REQUIRED_TOOLS` isolated-bundle lists -- their
+      synthetic scratch repos only worked because the real repo's
+      `tools/` directory leaked onto `sys.path` via this test module's
+      own import-time `sys.path.insert`. Added it to both lists, and
+      added a genuinely isolated subprocess-based test
+      (`test_required_tools_bundle_is_self_contained`) with an explicit
+      minimal `PYTHONPATH` that would have caught this bundle gap
+      directly (verified: reproduced the exact `ModuleNotFoundError`
+      manually before the fix).
+    - `agent-codespaces`'s `emit_codespace_map.py` sessionStart hook
+      hardcoded `payload/libs/agent-procutil/src` with no fallback --
+      broken in a dev checkout (no local copy there anymore), though
+      still correct for a real materialized release (which DOES get a
+      local copy at promotion time). Added `_agent_procutil_src()`, a
+      two-tier resolver (materialized payload copy, else canonical
+      repo-root `libs/agent-procutil/src`) mirroring the same pattern
+      used everywhere else in this effort; covered both layouts with new
+      tests.
+  - Re-validated: `test_materialize_main.py` 74 passed;
+    `test_promote_release.py`/`test_rollback_release.py` 25 passed;
+    `agent-codespaces`'s full suite (including 2 new tests) fully green;
+    all guards still green.
 - **Next up**: `single-instance-lease` (5 consumers) -- check its own
   `pyproject.toml` dependencies FIRST this time, per the ordering lesson
   above, before assuming the effort's original Plan ordering is still
-  safe as written.
+  safe as written. **Also sweep for hardcoded plugin-local paths to the
+  just-converted lib(s) across CI workflows, tooling test bundles, and
+  session hooks/scripts** -- this round's 4 findings were ALL this same
+  class of gap, missed because they sit outside the plugin test suites
+  the earlier recipe steps already cover.

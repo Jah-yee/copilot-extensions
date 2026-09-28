@@ -413,5 +413,11 @@ def test_import_fails_with_unknown_location_when_init_missing(tmp_path):
     )
     out = result.stdout.strip()
     assert out != "NO-ERROR", "torn package unexpectedly imported cleanly"
-    assert "MARKETPLACE_MANIFEST_RELS" in out
-    assert "unknown location" in out.lower()
+    # Assert the complete message, not a substring -- a substring match would
+    # also pass for an unrelated message that merely mentions these two
+    # phrases, silently accepting a shape change in the failure this test
+    # exists to pin.
+    assert out == (
+        "cannot import name 'MARKETPLACE_MANIFEST_RELS' "
+        "from 'plugin_resolve' (unknown location)"
+    )

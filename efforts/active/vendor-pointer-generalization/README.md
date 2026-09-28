@@ -1314,3 +1314,157 @@ _Pending._
   rewriter) is now proven end-to-end and ready to apply directly to each
   remaining lib with no further tooling work expected -- only the
   re-conversion + validation cycle per lib.
+
+### 2026-09-27 — Phase 1: converted `work-coalescing-singleton` (2 consumers)
+
+- Applied the proven recipe from the `lazy-cli-dispatch` conversion (PR
+  #4245) to the next-smallest-blast-radius `src-passthrough` lib:
+  `tools/sync-vendored-libs.py --uv-editable` for both consumers
+  (`plugins/agent-worktrees`, `worktree-manager`), hand-updated each
+  consumer's `[tool.uv.sources]` prose comment to describe the new
+  `uv`-editable mechanism, then validated end-to-end: `sync-vendored-
+  libs.py --check`/`check-vendored-libs-sync.py`/`check-install-
+  contract.py` all green; `run-plugin-tests.py agent-worktrees
+  --reinstall`'s full suite completed with 433 passed, 8 skipped, and 2
+  pre-existing failures (`test_lazy_dispatch.py`'s dispatch-table/cluster-
+  free-modules drift checks, confirmed pre-existing and unrelated by
+  re-running the identical suite against the unmodified `dev` tip via
+  `git stash`);
+  `worktree-manager` has no `run-plugin-tests.py` suite of its own, so ran
+  its real test suite directly via `uv run --extra dev` (1532 passed, 4
+  skipped, before the review-round additions below); a **non-editable**
+  `uv pip install plugins/agent-worktrees` in
+  a fresh venv (no `-e`) still resolved `agent-work-coalescing-singleton`
+  live from canonical (`__file__` pointed at `libs/work-coalescing-
+  singleton`, not a copy); `materialize_main.py --dest` round-tripped
+  both consumers' pointers byte-for-byte (only `.ruff_cache`/`__pycache__`
+  diffs, both non-source cache artifacts).
+- **Caught and fixed a self-inflicted false alarm mid-validation**: the
+  non-editable-install probe's `uv pip install` build step left stray
+  `build/`/`*.egg-info` directories under `plugins/agent-worktrees/libs/
+  work-coalescing-singleton/` (untracked build cruft from building the
+  path-dependency sdist), which made the directory reappear on disk and
+  caused `materialize_main.py` to report a false `SKIP ... already exists
+  -- refusing to overwrite` for that one pointer. Removed the untracked
+  cruft and re-ran; the pointer materialized cleanly (`OK`) on the next
+  pass. Worth remembering for the remaining libs: re-check for stray
+  build artifacts after any non-editable-install probe, before trusting a
+  `materialize_main.py` `SKIP`/warning as a real regression.
+- Added a changefile per touched plugin (`agent-worktrees`,
+  `worktree-manager`) -- later reduced to just `agent-worktrees` (see
+  below): the `worktree-manager` changefiles were removed once identified
+  as dead weight for a standalone-versioned, non-marketplace payload.
+- **Filed as PR #4331**, targeting `dev`. The GitHub-native automated
+  reviewer's first pass surfaced a real, previously-unrecognized gap in
+  this conversion recipe (2 High findings), fixed in the same PR:
+  - **`worktree-manager`'s own standalone self-install/self-update path
+    had no way to expand a `uv`-editable canonical reference.**
+    `worktree_manager/self_install.py`'s `_materialize_payload_pointers()`
+    (and its hand-maintained, statically-shipped
+    `_trusted_pointer_materializer.py` -- kept separate from
+    `tools/materialize_main.py` on purpose; see that module's own
+    docstring for the trusted-vs-untrusted-fetch rationale) only ever knew
+    how to expand the OLDER `VENDOR_POINTER.json` directory-pointer form.
+    A `uv`-editable consumer manifest entry (this conversion's own output)
+    was invisible to it -- a self-installed or self-updated Manager slot
+    would ship an escaping `path = "../libs/work-coalescing-singleton"`
+    reference that can never resolve outside a monorepo checkout, breaking
+    every deployed Manager on next self-update. Ported
+    `materialize_uv_editable_ref_into()` and the `find_uv_editable_refs()`/
+    `uv_sources_table_span()` helpers it depends on (mirroring
+    `tools/materialize_main.py`/`tools/uv_editable_ref.py`) into the
+    trusted module, wired `_materialize_payload_pointers()` to discover
+    and expand escaping `[tool.uv.sources]` entries alongside the existing
+    directory-pointer discovery (failing closed the same way: no canonical
+    `libs/` reachable from the fetched payload is a hard error, not a
+    silent skip), and added 3 new parity tests to
+    `test_trusted_materializer_parity.py` (clean expansion, missing
+    `editable = true` refusal, symlinked-canonical refusal) alongside the
+    existing 6 directory-pointer scenarios.
+  - **`worktree-manager` is a standalone-versioned payload, not a
+    marketplace plugin** -- a plugin changefile alone never bumps
+    `worktree_manager/__init__.py`'s own `__version__`
+    (`self_install()`'s actual publication gate), so an already-installed
+    machine would never pick up this fix. Bumped `__version__` (and the
+    matching `worktree-manager/pyproject.toml` `version`)
+    `0.1.0-dev93` -> `0.1.0-dev94`, confirmed via
+    `tools/check-version-consistency.py`, per this repo's own established
+    per-fix version-bump convention (see the `self_install.py` git history
+    cited in this same review round).
+  - Also tightened this journal's own wording per a Low finding: the
+    validation bullet above previously read as an unqualified "passes"
+    despite reporting 2 failures in the same sentence -- reworded to state
+    the pass/skip/pre-existing-failure counts unambiguously.
+  - Re-ran the full validation battery after these fixes:
+    `run-plugin-tests.py agent-worktrees --reinstall` still 433 passed, 8
+    skipped, the same 2 pre-existing failures; `worktree-manager`'s own
+    suite now 1535 passed (+3 new parity tests), 4 skipped;
+    `sync-vendored-libs.py --check`/`check-vendored-libs-sync.py`/`check-
+    install-contract.py`/`check-version-consistency.py` all green.
+  - **Second review round found 2 more real findings** (the two High
+    findings above also reappeared as still-"Open" in the reviewer's own
+    round-over-round summary -- confirmed against the current file state
+    that both were already fixed by the prior commit; this is the same
+    "stale carry-over" behavior this effort's own handoff notes already
+    document, not a re-regression):
+    - **Medium: the two `worktree-manager`-targeted changefiles were dead
+      weight.** `accumulate_bumps.compute()` resolves a changefile's
+      `plugin` entry via `plugins/<name>/plugin.json`; `worktree-manager`
+      has no such path (it's a standalone-versioned payload, not a
+      marketplace plugin), so both changefiles would be silently skipped
+      by the release bump pipeline -- and the version was already bumped
+      by hand in the prior commit, so they added nothing. Removed both
+      (`git rm`); the `agent-worktrees`-targeted changefile (a real
+      marketplace plugin) stays.
+    - **Medium: the new parity tests only called
+      `materialize_uv_editable_ref_into()` directly**, never exercising
+      `_materialize_payload_pointers()`'s own control flow (discovery,
+      canonical-root selection, failure normalization, slot-publication)
+      through the real `self_install()` entry point. Added 2 tests to
+      `test_self_install.py` mirroring the existing directory-pointer
+      pair (`test_self_install_materializes_a_vendor_pointer_from_a_live_
+      monorepo` / `test_self_install_raises_when_pointer_present_
+      without_monorepo_ancestor`): one confirms a full `self_install()`
+      run expands an escaping `uv`-editable reference into a real local
+      copy and rewrites the manifest before publishing; the other
+      confirms `self_install()` reports `action="error"` and publishes no
+      slot when no monorepo ancestor is reachable to resolve the
+      reference from.
+    - Re-validated after these fixes: `worktree-manager`'s own suite now
+      1537 passed (+2 more), 4 skipped; `check-changefile-presence.py
+      --base <pre-PR dev tip>` OK (every touched plugin has a pending
+      changefile); all other guards (`sync-vendored-libs.py --check`/
+      `check-vendored-libs-sync.py`/`check-install-contract.py`/`check-
+      version-consistency.py`) still green.
+  - **Third review round**: the reviewer's own "Resolved since last
+    review" list confirmed both Medium findings above (the dead
+    changefiles, the missing self-install-level tests) as fixed. It also
+    re-listed the two prior High findings (self-install materializer,
+    self-install parity tests) as still "Open" despite both already
+    being addressed by the prior commit -- re-verified against the
+    current file state (`self_install.py`'s `_materialize_payload_
+    pointers` still calls `materializer.find_uv_editable_refs`/
+    `materialize_uv_editable_ref_into`; both new tests still present and
+    passing in `test_self_install.py`) and treated as the SAME documented
+    reviewer lag (stale round-over-round carry-over), not a real
+    regression -- no code change made for those two. One genuinely NEW
+    finding: this journal's own "Added a changefile per touched plugin
+    (agent-worktrees, worktree-manager)" bullet (and the PR description's
+    matching claim) were left stale after the `worktree-manager`
+    changefiles were removed two commits later. Reworded the journal
+    bullet in place; updated the PR description on GitHub to match.
+  - **Fourth review round**: one genuinely new finding -- deleting a
+    consumer's pointer copy also deletes the lib tests that consumer's
+    own root-level `pytest` run used to collect (`worktree-manager`
+    declares no `testpaths`, so `uv run pytest` walked `libs/*/tests`),
+    leaving `work-coalescing-singleton`'s wire/server coverage
+    unenforced. Added a `checks`-job CI step that runs the CANONICAL
+    suites directly (`libs/work-coalescing-singleton/tests` plus
+    `libs/lazy-cli-dispatch/tests`, whose coverage the earlier PR #4245
+    conversion dropped the same way), mirroring the existing
+    `peer-launch`/`installer-readiness` canonical-lib steps. Verified
+    locally: 42 passed.
+- **Next up**: `credential-relay` (4 consumers), per the effort's own
+  smallest-blast-radius-first ordering. Its conversion (and every later
+  one) must extend that canonical-lib CI step with the newly converted
+  lib, so no lib loses its suite the same way.

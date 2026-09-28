@@ -1,9 +1,0 @@
-{
-  "comment": "worktree_status_audit: count due-and-demanded rows, not merely demanded (PR #3348 review round 5 follow-up)",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

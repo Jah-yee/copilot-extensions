@@ -1,9 +1,0 @@
-{
-  "comment": "marketplace-scoped-installations guard triage: annotate agent-codespaces's SKILL.md doc-shaped mentions of its own and agent-bridge's runtime paths with the established allow deployed-runtime-diagnostics marker.",
-  "changes": [
-    {
-      "plugin": "agent-codespaces",
-      "type": "minor"
-    }
-  ]
-}

@@ -1634,6 +1634,60 @@ _Pending._
   remaining lib.
 - Added a changefile per touched plugin (`agent-ssh`, `agent-containers`,
   `agent-bridge`, `agent-codespaces`).
+- **Filed as PR #4372**, targeting `dev`. First review round found 2 real
+  findings (1 critical, 1 moderate), fixed in the same PR:
+  - **Critical: promotion left conflicting editability in nested path
+    dependencies.** `materialize_uv_editable_ref_into()`'s outer rewrite
+    only fixed the CONSUMER's own top-level `[tool.uv.sources]` entry --
+    a just-copied canonical lib's OWN nested entry (`ssh-manager`'s own
+    dependency on `agent-procutil`) was left untouched, still
+    `editable = true`. A real `main` release would then require the SAME
+    path both editable (the nested entry) and non-editable (the
+    consumer's rewritten entry) at once, which `uv` refuses to resolve --
+    a genuine promotion-correctness bug, not just a dev-checkout issue.
+    Added `_materialize_nested_uv_editable_refs()` (and its own
+    `_rewrite_nested_uv_editable_entry()`, which drops `editable = true`
+    while keeping the nested entry's `path` UNCHANGED -- unlike the
+    top-level rewrite's different `libs/<lib>` form, a nested reference's
+    relative path already resolves correctly once its target lib is
+    materialized at the matching relative depth) to `tools/
+    materialize_main.py`, mirrored into the trusted
+    `_trusted_pointer_materializer.py` copy for `self_install.py`. Added
+    4 new tests (2 in `test_materialize_main.py`, 2 in
+    `test_trusted_materializer_parity.py`) covering the clean nested-fixup
+    case, the "dependency already materialized by a sibling top-level
+    entry" alias case, and the missing-`editable = true` refusal case.
+    Verified against the REAL repo tree too (not just synthetic tests):
+    `materialize_main.py --dest <tmp>` now correctly produces
+    `agent-procutil = { path = "../agent-procutil" }` (no `editable`) in
+    every promoted `ssh-manager` copy.
+  - **Moderate: the pip-fallback install path in `agent-ssh`'s own
+    `install.sh`/`install.ps1` still hardcoded the removed plugin-local
+    `libs/ssh-manager`/`libs/agent-procutil` paths.** If `uv` is
+    unavailable or fails in a source checkout, the fallback would supply
+    nonexistent directories and installation would fail outright. Ported
+    the `_resolve_vendored_lib`/`Resolve-VendoredLib` two-tier (local
+    copy, then canonical `../../libs/<lib>`) resolver -- already
+    established in `agent-bridge`'s own install scripts for an earlier
+    conversion -- into `agent-ssh`'s scripts too, and updated
+    `_install_agent_ssh_package`/`Install-AgentSshPackage`'s vendored-deps
+    list to use it for these 2 libs. (Checked `agent-containers` --no
+    such fallback exists there at all-- and `agent-codespaces` --already
+    had an equivalent two-tier fallback for `ssh-manager`, and never
+    hardcoded `agent-procutil` at all, resolving it via normal `uv`
+    dependency resolution instead-- neither needed a change.) Updated
+    `test_installer_fallback.py`'s existing test to extract the resolver
+    functions too (not just the install function) and added a new test
+    proving the canonical fallback path resolves correctly when no local
+    copy exists.
+  - Re-validated after both fixes: `test_materialize_main.py` 70 passed;
+    `test_trusted_materializer_parity.py` 10 passed;
+    `test_installer_fallback.py` 2 passed + 1 skipped (Windows-only);
+    `run-plugin-tests.py agent-ssh --reinstall` 172 passed, 7 skipped, the
+    same 1 pre-existing failure; `worktree-manager`'s own full suite 1548
+    passed, 4 skipped; all guards
+    (`sync-vendored-libs.py --check`/`check-vendored-libs-sync.py`/
+    `check-install-contract.py`/`check-version-consistency.py`) green.
 - **Next up**: `single-instance-lease` (5 consumers) -- check its own
   `pyproject.toml` dependencies FIRST this time, per the ordering lesson
   above, before assuming the effort's original Plan ordering is still

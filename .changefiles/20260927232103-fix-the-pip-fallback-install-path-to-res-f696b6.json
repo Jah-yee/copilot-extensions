@@ -1,0 +1,9 @@
+{
+  "comment": "Fix the pip fallback install path to resolve ssh-manager/agent-procutil's canonical location, since both are now uv-editable canonical references (vendor-pointer-generalization Phase 1).",
+  "changes": [
+    {
+      "plugin": "agent-ssh",
+      "type": "patch"
+    }
+  ]
+}

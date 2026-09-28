@@ -1401,3 +1401,136 @@ def test_materialize_one_uv_editable_ref_accepts_a_single_quoted_path(tmp_path: 
     )
     assert result.startswith("OK"), result
     assert 'agent-zdd = { path = "libs/zdd" }' in pyproject.read_text()
+
+
+# ── nested `uv`-editable dependency between two canonical libs (PR #4372) ─
+#
+# A canonical lib (e.g. ssh-manager) can itself depend on another canonical
+# lib (e.g. agent-procutil) via its OWN escaping `uv`-editable entry. When a
+# consumer materializes ssh-manager, the outer rewrite only fixes the
+# CONSUMER's own top-level entry -- the just-copied ssh-manager's own
+# nested entry must be fixed up too, or a real release ends up requiring
+# the same path both editable and non-editable at once.
+
+
+def _canonical_lib_with_dependency(
+    root: Path, lib: str, *, dep_lib: str, dep_raw_path: str, version: str = "0.1.0-dev1",
+) -> Path:
+    """A canonical lib whose own ``pyproject.toml`` declares an escaping
+    `uv`-editable dependency on another canonical lib."""
+    d = _canonical_lib(root, lib, version=version, content="real = True\n")
+    (d / "pyproject.toml").write_text(
+        f'[project]\nname = "x"\nversion = "{version}"\n'
+        f'dependencies = ["{dep_lib}"]\n'
+        "\n[tool.uv.sources]\n"
+        f'{dep_lib} = {{ path = "{dep_raw_path}", editable = true }}\n',
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_materialize_uv_editable_refs_fixes_up_a_nested_canonical_dependency(tmp_path: Path):
+    root = tmp_path / "repo"
+    # agent-procutil: a plain canonical lib, no dependencies of its own.
+    _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+    # ssh-manager: depends on agent-procutil via its own escaping entry.
+    _canonical_lib_with_dependency(
+        root, "ssh-manager", dep_lib="agent-procutil", dep_raw_path="../agent-procutil",
+    )
+    # Consumer directly depends on BOTH -- ssh-manager listed first so its
+    # materialization (and the nested fixup it triggers) runs before the
+    # consumer's own direct agent-procutil entry is processed.
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["ssh-manager", "agent-procutil"]\n'
+        "\n[tool.uv.sources]\n"
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n'
+        'agent-procutil = { path = "../../libs/agent-procutil", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert all(not line.startswith("SKIP") for line in log), log
+
+    consumer_text = (consumer / "pyproject.toml").read_text()
+    assert 'ssh-manager = { path = "libs/ssh-manager" }' in consumer_text
+    assert 'agent-procutil = { path = "libs/agent-procutil" }' in consumer_text
+    assert "editable" not in consumer_text
+
+    nested_ssh_manager_pp = (consumer / "libs/ssh-manager/pyproject.toml").read_text()
+    assert 'agent-procutil = { path = "../agent-procutil" }' in nested_ssh_manager_pp
+    assert "editable" not in nested_ssh_manager_pp
+
+    # The nested dependency materialized to the SAME sibling location the
+    # consumer's own direct entry would also use.
+    assert (consumer / "libs/agent-procutil/src/agent_procutil/__init__.py").read_text() == (
+        "real = True\n"
+    )
+
+
+def test_materialize_uv_editable_refs_nested_dependency_already_materialized(tmp_path: Path):
+    """Same scenario, but the consumer's own direct entry for the nested
+    dependency is listed FIRST -- the top-level entry materializes
+    agent-procutil before ssh-manager's own nested fixup runs, so the
+    nested step must rewrite the entry WITHOUT re-copying (or failing on)
+    an already-materialized sibling."""
+    root = tmp_path / "repo"
+    _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+    _canonical_lib_with_dependency(
+        root, "ssh-manager", dep_lib="agent-procutil", dep_raw_path="../agent-procutil",
+    )
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["agent-procutil", "ssh-manager"]\n'
+        "\n[tool.uv.sources]\n"
+        'agent-procutil = { path = "../../libs/agent-procutil", editable = true }\n'
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert all(not line.startswith("SKIP") for line in log), log
+    nested_ssh_manager_pp = (consumer / "libs/ssh-manager/pyproject.toml").read_text()
+    assert 'agent-procutil = { path = "../agent-procutil" }' in nested_ssh_manager_pp
+    assert "editable" not in nested_ssh_manager_pp
+
+
+def test_materialize_nested_uv_editable_refs_refuses_a_missing_editable_true(tmp_path: Path):
+    root = tmp_path / "repo"
+    _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+    # ssh-manager's own nested entry is missing editable = true.
+    d = _canonical_lib(root, "ssh-manager", version="0.1.0-dev1", content="real = True\n")
+    (d / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0-dev1"\n'
+        'dependencies = ["agent-procutil"]\n'
+        "\n[tool.uv.sources]\n"
+        'agent-procutil = { path = "../agent-procutil" }\n',
+        encoding="utf-8",
+    )
+    consumer = root / "plugins/agent-ssh"
+    consumer.mkdir(parents=True)
+    (consumer / "pyproject.toml").write_text(
+        '[project]\nname = "consumer"\nversion = "1.0.0"\n'
+        'dependencies = ["ssh-manager"]\n'
+        "\n[tool.uv.sources]\n"
+        'ssh-manager = { path = "../../libs/ssh-manager", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_uv_editable_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any(
+        "missing editable = true" in line for line in log
+    ), log

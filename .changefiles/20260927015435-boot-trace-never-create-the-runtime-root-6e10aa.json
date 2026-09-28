@@ -1,9 +1,0 @@
-{
-  "comment": "boot-trace: never create the runtime root purely to log a phase (review round 6)",
-  "changes": [
-    {
-      "plugin": "agent-dispatch",
-      "type": "patch"
-    }
-  ]
-}

@@ -1,9 +1,0 @@
-{
-  "comment": "handoff-cutover-trigger: auto-arm the pending-handoff ledger from the session-state marker when needed",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

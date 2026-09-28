@@ -1,0 +1,9 @@
+{
+  "comment": "Bridge UI: fix cards not opening (a module-level history cache shadowed window.history).",
+  "changes": [
+    {
+      "plugin": "agent-bridge",
+      "type": "dev"
+    }
+  ]
+}

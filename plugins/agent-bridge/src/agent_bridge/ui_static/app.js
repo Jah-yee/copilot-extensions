@@ -436,13 +436,13 @@ function renderBoard() {
 const viewer = new SessionViewer({ api, request });
 // Ended sessions are read back into a second, read-only viewer.
 const archive = new SessionViewer({ api, request });
-const history = new Map();  // session id / "commits:"+task key -> {state, data | detail}
+const historyCache = new Map();  // (not `history`: that would shadow window.history) session id / "commits:"+task key -> {state, data | detail}
 
 async function loadHistory(key, path) {
-  const hit = history.get(key);
+  const hit = historyCache.get(key);
   if (hit && hit.state !== "error") return hit;
   const entry = { state: "loading" };
-  history.set(key, entry);
+  historyCache.set(key, entry);
   try {
     const r = await request(path);
     const d = await r.json().catch(() => ({}));
@@ -572,7 +572,11 @@ function renderDetail() {
     replaceChildren(slot, build());
     if (wasOpen) { const d = slot.querySelector("details"); if (d) d.open = true; }
   }
-  viewer.open(entry.s);
+  const lead = task.sessions.find((x) => x.role === "orchestrator" || x.role === "session");
+  viewer.open(entry.s, { readOnly: entry.role === "previous"
+    ? `A newer session${lead ? " (" + String(lead.s.session_id).slice(0, 8) + ")" : ""} took over this ` +
+      "worktree, so messages go there; this one is shown for its history."
+    : null });
 }
 
 function detailHead(task) {

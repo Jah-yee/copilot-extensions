@@ -527,9 +527,11 @@ export function buildTasks(liveSessions, workspaces = [], pending = {}, now = Da
   const out = [];
   for (const t of tasks.values()) {
     const hasWorker = t.sessions.some((x) => x.role === "worker");
-    // The newest session with a turn state leads; older ones on the same worktree are "previous".
+    // The current incarnation leads, by the bridge's own rule (the newest
+    // registered_at; a heartbeat bumps updated_at on older incarnations too,
+    // so it can't decide). Older ones on the same worktree are "previous".
     const locals = t.sessions.filter((x) => x.role === "local")
-      .sort((a, b) => (b.s.turn_state ? 1 : 0) - (a.s.turn_state ? 1 : 0) ||
+      .sort((a, b) => (b.s.registered_at || 0) - (a.s.registered_at || 0) ||
                       (b.s.updated_at || 0) - (a.s.updated_at || 0));
     locals.forEach((x, i) => { x.role = i === 0 ? (hasWorker ? "orchestrator" : "session") : "previous"; });
     const workers = t.sessions.filter((x) => x.role === "worker")

@@ -46,8 +46,13 @@ def _live(sid, **kw):
 
 def test_worker_joins_its_supervising_worktree_as_one_task(tmp_path) -> None:
     live = [
-        _live("orch", worktree_id="m1-win-20260925-114307-f0c7", repo="harness", turn_state="idle"),
-        _live("old", worktree_id="m1-win-20260925-114307-f0c7", repo="harness"),
+        # The CEO case: the successor registered later but has no turn state yet,
+        # while the superseded session's heartbeat is fresher. The bridge routes
+        # to the newest registration, so the page must lead with it too.
+        _live("orch", worktree_id="m1-win-20260925-114307-f0c7", repo="harness",
+              registered_at=NOW - 600, updated_at=NOW - 30),
+        _live("old", worktree_id="m1-win-20260925-114307-f0c7", repo="harness", turn_state="idle",
+              registered_at=NOW - 30000, updated_at=NOW - 2),
         _live("work", repo="app", worktree_id="anchor-app@cs1",
               venue={"kind": "codespace", "target": "ceo-list-blank-x6pr995j4gwc6vxp",
                      "supervisor_ref": "m1/harness/m1-win-20260925-114307-f0c7"}),
@@ -57,6 +62,7 @@ def test_worker_joins_its_supervising_worktree_as_one_task(tmp_path) -> None:
     task = out[0]
     assert task["key"] == "m1-win-20260925-114307-f0c7"
     assert [x["role"] for x in task["sessions"]] == ["worker", "orchestrator", "previous"]
+    assert [x["s"]["session_id"] for x in task["sessions"]][1:] == ["orch", "old"]
     assert task["title"] == "ceo list blank"
     assert task["repos"] == ["harness", "app"]
     assert task["venues"] == ["codespace"]

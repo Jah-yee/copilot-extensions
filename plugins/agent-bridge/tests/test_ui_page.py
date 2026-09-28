@@ -213,3 +213,25 @@ def test_page_trades_a_login_code_and_never_reads_a_token_from_the_url() -> None
     assert "token=" not in app
     assert "history.replaceState" in app
 
+
+
+#: Browser globals the page relies on. A top-level declaration of one of these
+#: in a module shadows it for that whole module (a `const history = new Map()`
+#: once turned every `history.pushState` into a TypeError, so no card opened).
+_BROWSER_GLOBALS = {
+    "history", "location", "document", "window", "navigator", "localStorage", "sessionStorage",
+    "fetch", "event", "name", "status", "open", "close", "top", "parent", "self", "screen",
+    "crypto", "performance", "requestAnimationFrame", "setTimeout", "setInterval", "alert",
+}
+
+
+def test_ui_scripts_never_shadow_a_browser_global() -> None:
+    static = Path(str(resources.files("agent_bridge").joinpath("ui_static")))
+    decl = re.compile(r"^(?:export\s+)?(?:const|let|var|function|class|async\s+function)\s+([A-Za-z_$][\w$]*)", re.M)
+    shadowed = {
+        f"{js.name}: {name}"
+        for js in static.glob("*.js")
+        for name in decl.findall(js.read_text("utf-8"))
+        if name in _BROWSER_GLOBALS
+    }
+    assert not shadowed, f"top-level declarations shadow browser globals: {sorted(shadowed)}"

@@ -69,13 +69,14 @@ export class SessionViewer {
     for (const b of this.deliveryEls) b.classList.toggle("on", b.dataset.value === value);
   }
 
-  /** Start watching one live session (a LiveSessionInfo row). */
-  open(session) {
-    if (this.watch && this.watch.id === session.session_id) { this.update(session); return; }
+  /** Start watching one live session (a LiveSessionInfo row). `readOnly` is a
+   *  reason the session can't be messaged (e.g. a newer one superseded it). */
+  open(session, { readOnly = null } = {}) {
+    if (this.watch && this.watch.id === session.session_id) { this._setReadOnly(readOnly); this.update(session); return; }
     this.close();
     this._reset();
     this.session = session;
-    this.composerEl.hidden = false;
+    this._setReadOnly(readOnly);
     this.emptyEl.hidden = false;
     this.emptyEl.textContent = "Connecting…";
     this.earlierBtn.hidden = true;
@@ -92,6 +93,17 @@ export class SessionViewer {
     this._fetchHead(this.watch);
     this._stream(this.watch);
     this.timer = setInterval(() => this._renderHead(), 1000);
+  }
+
+  _setReadOnly(reason) {
+    this.readOnly = reason || null;
+    this.composerEl.hidden = !!reason;
+    if (!this.readOnlyEl) {
+      this.readOnlyEl = h("p", { class: "v-readonly muted small" });
+      this.composerEl.after(this.readOnlyEl);
+    }
+    this.readOnlyEl.hidden = !reason;
+    this.readOnlyEl.textContent = reason || "";
   }
 
   _reset() {

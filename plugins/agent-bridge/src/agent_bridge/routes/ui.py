@@ -27,13 +27,15 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from . import ui_history, ui_tasks
+from . import ui_health, ui_history, ui_tasks, ui_workers
 
 router = APIRouter()
 # The UI's task verbs (workspaces / start / resume) ride on this router so the
 # app wires the whole control surface with one include.
 router.include_router(ui_tasks.router)
 router.include_router(ui_history.router)
+router.include_router(ui_health.router)
+router.include_router(ui_workers.router)
 
 #: Same-origin script/style files only (no inline code); data calls only to
 #: this origin; no framing, forms, or base-URL changes.

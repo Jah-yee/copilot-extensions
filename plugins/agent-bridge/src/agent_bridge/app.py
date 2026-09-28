@@ -809,6 +809,43 @@ async def lifespan(app: FastAPI):
 
     live_reap_task = asyncio.create_task(_live_reap_loop())
 
+    # UI worker supervisor -- notice a venue worker whose connection to this
+    # machine dropped (its heartbeat lapsed; it has lost the credential relay)
+    # and reconnect it, resuming the same conversation. Acts only while the
+    # routing table names this daemon, so a cutover pair never both reconnect.
+    # Opt out with AGENT_BRIDGE_UI_WORKER_SUPERVISOR=0.
+    workers_task = None
+    import os as _os
+
+    if _os.environ.get("AGENT_BRIDGE_UI_WORKER_SUPERVISOR", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    ):
+        from .config import config_dir as _config_dir
+        from .routes import ui_workers
+
+        def _routing_active() -> bool:
+            from zdd import routing
+
+            data = routing.read_table(_config_dir())
+            raw = data.get("active") if isinstance(data, dict) else None
+            if not isinstance(raw, dict):
+                return False
+            # A cutover records the launcher's pid, which on Windows is a venv
+            # shim in front of this interpreter; the listening port is exact.
+            bound = getattr(app.state, "bound_port", None)
+            if bound is not None and raw.get("port") == bound:
+                return True
+            return raw.get("pid") in (_os.getpid(), _os.getppid())
+
+        async def _workers_backoff() -> bool:
+            return await _governance_backoff(
+                governance, "pre-mutation:ui-workers", loop_name="ui worker supervisor",
+            )
+
+        workers_task = asyncio.create_task(
+            ui_workers.supervise(app, is_active=_routing_active, backoff=_workers_backoff)
+        )
+
     # The route was published before slow startup work. Record the durable START
     # event only after uvicorn confirms that it is accepting connections.
     if getattr(app.state, "publish_on_ready", False):
@@ -1020,6 +1057,11 @@ async def lifespan(app: FastAPI):
     live_reap_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await live_reap_task
+
+    if workers_task is not None:
+        workers_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await workers_task
 
     # Shutdown: stop credential relay
     if relay_server and relay_server.running:

@@ -65,9 +65,13 @@ _GITHUB_PR = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]
 
 
 def _state(request: Request) -> dict[str, Any]:
-    st = getattr(request.app.state, "ui_tasks", None)
+    return state_for(request.app)
+
+
+def state_for(app: Any) -> dict[str, Any]:
+    st = getattr(app.state, "ui_tasks", None)
     if st is None:
-        st = request.app.state.ui_tasks = {
+        st = app.state.ui_tasks = {
             "cache": None, "refresh": None, "launches": [], "lock": asyncio.Lock(),
             "prs": {}, "subjects": {},
         }
@@ -337,10 +341,13 @@ async def _guard(
     return st, body or {}, None
 
 
-async def _embody(project: str, worktree_id: str, seed: str | None) -> tuple[Any | None, str]:
+async def _embody(project: str, worktree_id: str, seed: str | None,
+                  copilot_args: list[str] | None = None) -> tuple[Any | None, str]:
     args = ["-p", project, "embody", "--worktree-id", worktree_id, "--json"]
     if seed:
         args[5:5] = ["--seed", seed]
+    for arg in copilot_args or []:
+        args.insert(-1, f"--copilot-arg={arg}")
     return await _aw(args, timeout=EMBODY_TIMEOUT)
 
 

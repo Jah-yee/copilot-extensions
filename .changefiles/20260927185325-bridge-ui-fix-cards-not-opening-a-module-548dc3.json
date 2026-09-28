@@ -1,5 +1,5 @@
 {
-  "comment": "Bridge UI: fix cards not opening (a module-level history cache shadowed window.history).",
+  "comment": "Bridge UI: fix cards not opening (a module-level history cache shadowed window.history); fix problems from the page: sign-in health and one-click sign-ins (Copilot, Azure, Azure DevOps), restart-and-resume for a session whose sign-in failed, and automatic reconnect for a CodeSpace worker that lost its connection.",
   "changes": [
     {
       "plugin": "agent-bridge",

@@ -16,7 +16,9 @@ const $ = (s) => document.querySelector(s);
 
 let token = localStorage.getItem(TOKEN_KEY) || "";
 const state = {
-  live: [], workspaces: [], projects: [], projectInfo: {}, errors: {}, tasks: [], loaded: false, lastOk: 0, inflight: false,
+  live: [], workspaces: [], projects: [], projectInfo: {}, problems: {}, workers: [],
+  hostAuth: { checks: [], signins: {} }, signins: {},
+  errors: {}, tasks: [], loaded: false, lastOk: 0, inflight: false,
   wsLoaded: false, wsInflight: false, showAllEarlier: false,
   pending: JSON.parse(sessionStorage.getItem(PENDING_KEY) || "{}"),
   route: { view: "tasks", key: null, sid: null, q: "", venue: "all", repo: "all" },
@@ -139,10 +141,17 @@ function onRoute() {
 async function refresh() {
   if (!token || state.inflight) return;
   state.inflight = true;
-  let live;
-  try { live = await api("/api/v1/live-sessions"); } catch (e) { live = e; }
-  state.inflight = false;
+  let live, problems, workers;
+  try {
+    [live, problems, workers] = await Promise.all([
+      api("/api/v1/live-sessions").catch((e) => e),
+      api("/api/v1/ui/session-problems").catch(() => null),
+      api("/api/v1/ui/workers").catch(() => null),
+    ]);
+  } finally { state.inflight = false; }
   if (live instanceof AuthError) return;
+  if (problems && problems.problems) state.problems = problems.problems;
+  if (workers && workers.workers) state.workers = workers.workers;
   if (live instanceof Error) state.errors.live = live.message;
   else {
     delete state.errors.live;
@@ -230,6 +239,26 @@ function scheduleWorkspaces() {
   wsTimer = setTimeout(async () => { await refreshWorkspaces(); scheduleWorkspaces(); }, document.hidden ? 120000 : 30000);
 }
 
+// The sign-ins the credential relay hands to workers, checked by the bridge
+// without prompting (it caches them, so this is cheap).
+async function refreshHostAuth(force = false) {
+  if (!token) return;
+  try {
+    const d = await api("/api/v1/ui/host-auth" + (force ? "?refresh=true" : ""));
+    state.hostAuth = d;
+    for (const [kind, s] of Object.entries(d.signins || {})) {
+      if (!state.signins[kind] || state.signins[kind].status !== "waiting") state.signins[kind] = s;
+    }
+    render();
+  } catch (e) { /* keep the last answer */ }
+}
+
+let authTimer = null;
+function scheduleHostAuth() {
+  clearTimeout(authTimer);
+  authTimer = setTimeout(async () => { await refreshHostAuth(); scheduleHostAuth(); }, document.hidden ? 300000 : 60000);
+}
+
 // -- rendering ----------------------------------------------------------------------
 
 const VENUE_LABEL = { codespace: "CodeSpace", container: "Container", ssh: "SSH", local: "Local" };
@@ -238,8 +267,21 @@ const BUCKET_LABEL = Object.fromEntries(BUCKETS);
 
 function render() {
   state.tasks = buildTasks(state.live, state.workspaces, state.pending);
+  // A session whose own log ends in an error it hasn't recovered from (an
+  // expired sign-in, most often) can't act on anything: the task needs you.
+  const lost = state.workers.filter((w) => w.state === "lost");
+  for (const t of state.tasks) {
+    const hit = t.sessions.find((x) => x.role !== "previous" && state.problems[x.s.session_id]);
+    t.problem = hit ? { ...state.problems[hit.s.session_id], session: hit.s, role: hit.role } : null;
+    if (t.problem) t.bucket = "needs";
+    // A worker that lost its connection is reconnected automatically; only one
+    // the bridge has given up on needs you.
+    t.lostWorkers = lost.filter((w) => w.supervisor === t.key);
+    if (t.lostWorkers.some(workerGaveUp)) t.bucket = "needs";
+  }
   renderStatus();
   renderSummary();
+  renderAttention();
   if (state.route.view === "tasks") { renderVenueChips(); renderBoard(); renderDetail(); }
   if (state.route.view === "sessions") renderSessions();
 }
@@ -316,7 +358,12 @@ function cardSig(t, selected) {
   return JSON.stringify([t.title, t.bucket, t.progress && [t.progress.summary, t.progress.blocker, t.progress.phase],
     t.progress && t.progress.stale, t.worktree && [t.worktree.follow_up, t.worktree.summary], t.pr, t.venues,
     t.quiet, t.repos, t.sessions.length, ago(t.updated), selected, t.worktree && t.worktree.status,
-    t.fullTitle, t.codespaces]);
+    t.fullTitle, t.codespaces, t.problem && [t.problem.kind, t.problem.at]]);
+}
+
+function problemLine(pr) {
+  return pr.kind === "auth" ? "Copilot sign-in failed. This session can't act on messages until it's fixed."
+    : "Session error: " + pr.message;
 }
 
 function renderCard(t, selected) {
@@ -336,7 +383,8 @@ function renderCard(t, selected) {
       t.bucket === "starting" ? h("span", { class: "spin" }) : h("span", { class: "dot", title: BUCKET_LABEL[t.bucket] }),
       h("h3", { text: t.title }),
       h("time", { class: "muted", text: ago(t.updated) })),
-    ask ? h("p", { class: "c-blocker", title: ask, text: "Waiting on you: " + ask })
+    t.problem ? h("p", { class: "c-blocker", title: t.problem.message, text: problemLine(t.problem) })
+      : ask ? h("p", { class: "c-blocker", title: ask, text: "Waiting on you: " + ask })
       : p.blocker && !p.stale ? h("p", { class: "c-blocker", text: p.blocker })
       : h("p", { class: "c-progress" + (p.summary && t.bucket !== "starting" && !p.stale ? "" : " muted"), text: blurb }),
     h("div", { class: "c-meta" },
@@ -557,7 +605,10 @@ function renderDetail() {
     head: [() => detailHead(task), [task.key, task.title, task.bucket, task.pr, task.repo, task.machine, ago(task.updated)]],
     progress: [() => detailProgress(task), [task.bucket, task.worktree && [task.worktree.follow_up,
       task.worktree.summary, task.worktree.status_note_at], task.progress && [task.progress.summary, task.progress.blocker,
-      task.progress.phase, task.progress.stale, ago(task.progress.ts || 0)]]],
+      task.progress.phase, task.progress.stale, ago(task.progress.ts || 0)],
+      task.problem && [task.problem.kind, task.problem.at, task.problem.session.session_id],
+      task.problem && state.signins.copilot, recovery[task.key],
+      task.lostWorkers.map((w) => [w.session_id, w.reconnecting, w.attempts, w.next_try, w.last_error])]],
     tabs: [() => detailTabs(task, entry), [entry.s.session_id,
       task.sessions.map((x) => [x.s.session_id, x.role, sessionBucket(x.s)])]],
     info: [() => detailInfo(task, entry), [entry.s.session_id, entry.s.status, entry.s.liveness, entry.s.turn_state]],
@@ -650,11 +701,274 @@ function detailAsk(task) {
 }
 
 function detailProgress(task) {
+  const fix = detailProblem(task) || detailRecovered(task);
+  const workers = detailWorkers(task);
   const ask = detailAsk(task);
   const p = task.progress;
-  if (!p) return ask;
-  const milestone = detailMilestone(task, p);
-  return ask ? h("div", null, ask, milestone) : milestone;
+  const milestone = p ? detailMilestone(task, p) : null;
+  const parts = [fix, workers, ask, milestone].filter(Boolean);
+  return parts.length > 1 ? h("div", null, parts) : parts[0] || null;
+}
+
+// -- recovering a stuck session ------------------------------------------------------
+
+const recovery = {};  // task key -> {status: "restarting"|"restarted"|"failed", detail}
+let recoveryNote = "";
+const signinPolls = {};
+
+const SIGNIN_LABEL = { copilot: "GitHub Copilot", azure: "Azure", ado: "Azure DevOps" };
+
+// Each sign-in runs the provider's own flow on this machine (it opens its
+// browser window itself); the page shows its device code, if any, and follows it.
+async function startSignIn(kind) {
+  state.signins[kind] = { status: "starting" };
+  render();
+  try {
+    const r = await request(`/api/v1/ui/sign-in/${kind}`, { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    state.signins[kind] = r.ok ? d : { status: "failed", detail: d.detail || String(r.status) };
+  } catch (e) {
+    state.signins[kind] = { status: "failed", detail: e.message };
+  }
+  if (state.signins[kind].status === "waiting") pollSignIn(kind);
+  render();
+}
+
+function pollSignIn(kind) {
+  clearTimeout(signinPolls[kind]);
+  signinPolls[kind] = setTimeout(async () => {
+    try {
+      state.signins[kind] = await api(`/api/v1/ui/sign-in/${kind}`);
+    } catch (e) { /* keep the last state; try again */ }
+    const s = state.signins[kind];
+    if (s.status === "waiting") pollSignIn(kind);
+    else if (s.status === "done") refreshHostAuth(true);
+    render();
+  }, 2000);
+}
+
+async function cancelSignIn(kind) {
+  clearTimeout(signinPolls[kind]);
+  await request(`/api/v1/ui/sign-in/${kind}`, { method: "DELETE" }).catch(() => null);
+  state.signins[kind] = { status: "idle" };
+  render();
+}
+
+function signInControl(kind, label = "Sign in") {
+  const s = state.signins[kind] || { status: "idle" };
+  if (s.status === "waiting") {
+    return h("div", { class: "signin-code" },
+      s.code
+        ? h("div", null,
+            h("p", null, "Enter this code (a browser tab opens by itself; use the link if it didn't):"),
+            h("div", { class: "row" },
+              h("code", { class: "device-code", text: s.code }),
+              h("button", { class: "ghost small", onclick: (e) => copyText(e.currentTarget, s.code) }, "Copy code"),
+              s.url ? h("a", { class: "button small", href: s.url, target: "_blank", rel: "noopener noreferrer" }, "Open sign-in page ↗") : null))
+        : h("p", { text: "Finish signing in in the window that opened on this machine." }),
+      h("p", { class: "muted small" }, h("span", { class: "spin" }), " Waiting for you to finish… ",
+        h("button", { class: "ghost small", onclick: () => cancelSignIn(kind) }, "Cancel")));
+  }
+  if (s.status === "done") return h("span", { class: "ok small", text: `Signed in to ${SIGNIN_LABEL[kind]}.` });
+  return h("span", { class: "row" },
+    h("button", { class: "primary", disabled: s.status === "starting", onclick: () => startSignIn(kind) },
+      s.status === "starting" ? "Starting…" : label),
+    s.status === "failed" ? h("span", { class: "bad small", text: "Sign-in failed: " + (s.detail || "") }) : null);
+}
+
+// -- workers that lost their connection -------------------------------------------------
+
+function workerGaveUp(w) {
+  return w.state === "lost" && !w.reconnecting && w.next_try == null;
+}
+
+async function reconnectWorker(w) {
+  w.reconnecting = true;
+  render();
+  try {
+    const r = await request(`/api/v1/ui/workers/${encodeURIComponent(w.session_id)}/reconnect`, { method: "POST" });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.status);
+    Object.assign(w, d);
+  } catch (e) {
+    w.reconnecting = false;
+    w.last_error = e.message;
+  }
+  render();
+}
+
+function workerLine(w) {
+  const sid = String(w.session_id).slice(0, 8);
+  const where = w.codespace ? ` on ${w.codespace}` : "";
+  let status;
+  if (w.reconnecting) status = h("span", null, h("span", { class: "spin" }), " Reconnecting it now (this can take a few minutes)…");
+  else if (w.next_try != null) {
+    const wait = Math.max(0, Math.round(w.next_try - Date.now() / 1000));
+    status = h("span", { text: wait > 5 ? `Reconnecting it automatically in ${Math.ceil(wait / 60)} min` +
+      (w.attempts ? ` (attempt ${w.attempts + 1})` : "") + "." : "Reconnecting it automatically…" });
+  } else status = h("span", { text: "The bridge stopped retrying." });
+  return h("div", { class: "w-line" },
+    h("p", null, h("strong", { text: `Worker ${sid}${where} lost its connection to this machine` })),
+    h("p", { class: "small" }, status),
+    w.last_error ? h("p", { class: "muted small", text: "Last attempt: " + w.last_error }) : null,
+    w.note ? h("p", { class: "muted small", text: "Why: " + w.note }) : null,
+    w.reconnecting ? null : h("div", { class: "row" },
+      h("button", { class: workerGaveUp(w) ? "primary" : "ghost", onclick: () => reconnectWorker(w) }, "Reconnect now")));
+}
+
+function detailWorkers(task) {
+  if (!task.lostWorkers || !task.lostWorkers.length) return null;
+  return h("div", { class: "d-progress blocked problem" },
+    task.lostWorkers.map(workerLine),
+    h("p", { class: "muted small", text: "Until it's back it can't use this machine's sign-ins (git, Azure DevOps) " +
+      "or hear from its supervisor. Reconnecting resumes the same conversation." }));
+}
+
+// -- everything that needs attention, in one place ---------------------------------------
+
+function attentionItems() {
+  const items = [];
+  for (const c of state.hostAuth.checks || []) {
+    if (c.ok) continue;
+    items.push({ key: "auth:" + c.kind, fix: () => { if ((state.signins[c.kind] || {}).status !== "waiting") startSignIn(c.kind); },
+      el: h("div", { class: "a-item" },
+        h("p", null, h("strong", { text: `${c.label} isn't working on this machine` })),
+        h("p", { class: "small", text: "Workers borrow this sign-in through the credential relay, so none of them can use it either." }),
+        c.detail ? h("p", { class: "muted small", text: c.detail }) : null,
+        signInControl(c.kind, "Sign in again")) });
+  }
+  const authTasks = state.tasks.filter((t) => t.problem && t.problem.kind === "auth");
+  if (authTasks.length) {
+    const busy = authTasks.some((t) => (recovery[t.key] || {}).status === "restarting");
+    items.push({ key: "copilot", fix: () => authTasks.forEach((t) => { if ((recovery[t.key] || {}).status !== "restarting") restartSession(t); }),
+      el: h("div", { class: "a-item" },
+        h("p", null, h("strong", { text: authTasks.length === 1 ? "A session lost its Copilot sign-in"
+          : `${authTasks.length} sessions lost their Copilot sign-in` })),
+        h("p", { class: "small", text: "They aren't acting on messages. Restarting resumes each one with its history, " +
+          "using this machine's current sign-in." }),
+        h("ul", { class: "a-list" }, authTasks.map((t) => h("li", null,
+          h("a", { href: routeHash({ ...state.route, view: "tasks", key: t.key, sid: null }), text: t.title })))),
+        h("div", { class: "row" },
+          h("button", { class: "primary", disabled: busy, onclick: () => authTasks.forEach(restartSession) },
+            busy ? "Restarting…" : authTasks.length === 1 ? "Restart it" : "Restart them"),
+          h("details", { class: "signin" }, h("summary", null, "Still failing after a restart?"),
+            signInControl("copilot", "Sign in to Copilot again")))) });
+  }
+  for (const w of state.workers.filter((x) => x.state === "lost")) {
+    items.push({ key: "worker:" + w.session_id, fix: () => { if (!w.reconnecting) reconnectWorker(w); },
+      el: h("div", { class: "a-item" }, workerLine(w),
+        w.supervisor ? h("p", { class: "small" }, h("a", {
+          href: routeHash({ ...state.route, view: "tasks", key: w.supervisor, sid: null }),
+          text: "Open its task" })) : null) });
+  }
+  return items;
+}
+
+let attentionSig = "";
+function renderAttention() {
+  const el = $("#attention");
+  const items = attentionItems();
+  // Rebuilt only when something in it changes, so a code or a spinner stays put.
+  const sig = JSON.stringify([state.hostAuth.checks, state.signins, state.workers.filter((w) => w.state === "lost"),
+    state.tasks.filter((t) => t.problem && t.problem.kind === "auth").map((t) => [t.key, recovery[t.key]]),
+    Math.floor(Date.now() / 60000)]);
+  if (sig === attentionSig) return;
+  attentionSig = sig;
+  el.hidden = !items.length;
+  if (!items.length) { clear(el); return; }
+  const fixAll = h("button", { class: "primary", onclick: () => items.forEach((i) => i.fix()) }, "Fix all");
+  replaceChildren(el,
+    h("div", { class: "a-head" },
+      h("strong", { text: items.length === 1 ? "Something needs attention" : `${items.length} things need attention` }),
+      h("span", { class: "grow" }),
+      items.length > 1 ? fixAll : null),
+    h("div", { class: "a-items" }, items.map((i) => i.el)));
+}
+
+async function restartSession(task) {
+  const sid = task.problem.session.session_id;
+  recovery[task.key] = { status: "restarting" };
+  render();
+  try {
+    const r = await request(`/api/v1/ui/tasks/${encodeURIComponent(task.key)}/restart`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sid, note: recoveryNote.trim() }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.status);
+    // The bridge follows the restart and sends the note itself, so it arrives
+    // even if this page is closed; the page only shows how it went.
+    recovery[task.key] = { status: "restarted", ...d };
+    recoveryNote = "";
+    delete state.problems[sid];
+    followRestart(task.key);
+  } catch (e) {
+    recovery[task.key] = { status: "failed", detail: e.message };
+  }
+  render();
+  refresh();
+}
+
+function followRestart(key) {
+  setTimeout(async () => {
+    try {
+      const d = await api(`/api/v1/ui/tasks/${encodeURIComponent(key)}/restart`);
+      recovery[key] = { ...recovery[key], ...d };
+      render();
+      if (d.state === "waiting" || d.note === "waiting") followRestart(key);
+    } catch (e) { followRestart(key); }
+  }, 3000);
+}
+
+function detailRecovered(task) {
+  const rec = recovery[task.key];
+  if (!rec || rec.status !== "restarted") return null;
+  const sid = String(rec.session_id || "").slice(0, 8);
+  const head = {
+    waiting: h("p", null, h("span", { class: "spin" }), ` Restarting session ${sid}…`),
+    resumed: h("p", { class: "ok", text: `Resumed session ${sid} with its history.` }),
+    fresh: h("p", { class: "bad", text: `Copilot couldn't resume ${sid} and started a fresh session ` +
+      `(${String(rec.new_session_id || "").slice(0, 8)}) without its history. Its saved conversation is still on disk.` }),
+    timeout: h("p", { class: "bad", text: `Session ${sid} hasn't come back after a few minutes. Check the Picker.` }),
+  }[rec.state] || null;
+  const withMsg = rec.with_message;
+  const note = { waiting: "It gets a note about the restart" + (withMsg ? ", with your message," : "") + " as soon as it's back.",
+                 sent: "It was told the restart stopped its background work" + (withMsg ? ", and given your message." : "."),
+                 failed: "The note to it couldn't be delivered" + (rec.note_detail ? `: ${rec.note_detail}` : "") +
+                   "; send it a message below.",
+                 not_sent: "It wasn't told about the restart; send it a message below." }[rec.note];
+  return h("div", { class: "d-progress" + (rec.state === "fresh" || rec.state === "timeout" ? " blocked" : "") },
+    head, note ? h("p", { class: "muted small", text: note }) : null);
+}
+
+function detailProblem(task) {
+  const pr = task.problem;
+  if (!pr) return null;
+  const rec = recovery[task.key] || {};
+  const lg = state.signins.copilot || { status: "idle" };
+  const busy = rec.status === "restarting";
+  const note = h("textarea", { rows: "2", placeholder: "Optional: a message to send once it's back (for example, " +
+    "what you asked it before this failed)", "aria-label": "Message after restart" });
+  note.value = recoveryNote;
+  note.addEventListener("input", () => { recoveryNote = note.value; });
+  const restartBtn = h("button", { class: "primary", onclick: () => restartSession(task) },
+    busy ? "Restarting…" : "Restart this session");
+  restartBtn.disabled = busy;
+  const signIn = signInControl("copilot", "Sign in to Copilot");
+  return h("div", { class: "d-progress blocked problem" },
+    h("p", null, h("strong", { text: pr.kind === "auth" ? "Copilot sign-in failed" : "This session hit an error" })),
+    h("p", { text: pr.kind === "auth"
+      ? `The ${ROLE_LABEL[pr.role] ? ROLE_LABEL[pr.role].toLowerCase() : "session"} (${String(pr.session.session_id).slice(0, 8)}) ` +
+        "can't reach Copilot, so it isn't acting on messages. Restarting it usually fixes this: it resumes the same " +
+        "session, with its history, using this machine's current sign-in."
+      : pr.message }),
+    pr.kind === "auth" ? h("p", { class: "muted small", text: pr.message + (pr.at ? " · " + ago(parseStamp(pr.at)) : "") }) : null,
+    rec.status === "restarted"
+      ? h("p", { class: "ok", text: "Restarted. It reappears here once it's back, usually within a minute." })
+      : h("div", null, note, h("div", { class: "row" }, restartBtn,
+          rec.status === "failed" ? h("span", { class: "bad small", text: rec.detail }) : null)),
+    pr.kind === "auth" ? h("details", { class: "signin", open: lg.status !== "idle" && lg.status !== undefined },
+      h("summary", null, "Still failing after a restart? Sign in to Copilot again"), signIn) : null);
 }
 
 function detailMilestone(task, p) {
@@ -1075,6 +1389,7 @@ async function start() {
   showApp();
   onRoute();
   refreshWorkspaces().then(() => { if ($("#newtask").open) fillProjects(); scheduleWorkspaces(); });
+  refreshHostAuth().then(scheduleHostAuth);
   await refresh();
   schedulePoll();
 }

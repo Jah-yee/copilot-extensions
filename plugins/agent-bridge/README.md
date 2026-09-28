@@ -335,6 +335,21 @@ bridge fills in; the page never sends a template). An earlier task shows its
 last session's transcript read back through the cold-store provider seam
 (`/api/v1/ui/sessions/{id}/history`, mapped to the live stream's kinds and
 bounded) and its branch's own commits (`/api/v1/ui/tasks/{id}/commits`).
+Problems are fixed from the page, never a terminal: a banner lists what needs
+attention with one **Fix all**. A session whose own log ends in an unrecovered
+error (an expired Copilot sign-in, typically) is restarted and resumed with its
+history (`/api/v1/ui/tasks/{id}/restart`); the bridge then tells it the restart
+ended its background shells, plus an optional message. The sign-ins the
+credential relay hands to workers (Git Credential Manager for the relay's Azure
+DevOps host, the Azure CLI) are checked without prompting
+(`/api/v1/ui/host-auth`), and each provider's own sign-in, Copilot's device code
+included, runs from a button (`/api/v1/ui/sign-in/{copilot|azure|ado}`). A
+CodeSpace worker whose heartbeat lapses has lost its connection, and with it
+the relay. The daemon reconnects it automatically (`routes/ui_workers.py`:
+`agent-codespaces copilot --detach --resume` from its supervisor's worktree,
+with backoff), unless it was stopped on purpose, and the page offers the same
+as a button (`/api/v1/ui/workers`). Set
+`AGENT_BRIDGE_UI_WORKER_SUPERVISOR=0` to turn automatic reconnects off.
 The page, scripts, and stylesheet
 ship as package data (`ui_static/`) served from a fixed allowlist under a CSP
 with no inline code; they carry no data. Data comes only from the

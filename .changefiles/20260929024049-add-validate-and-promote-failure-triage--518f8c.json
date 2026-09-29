@@ -1,9 +1,0 @@
-{
-  "comment": "Add validate-and-promote failure triage skill + troubleshooting-index entry",
-  "changes": [
-    {
-      "plugin": "copilot-extensions-harness",
-      "type": "patch"
-    }
-  ]
-}

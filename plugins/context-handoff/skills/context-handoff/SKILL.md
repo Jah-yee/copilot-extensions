@@ -106,6 +106,45 @@ contradiction, or a step that requires confirmation before a potentially
 destructive action. Even then, the correct close is still to save and trigger
 a handoff naming the blocker -- not a silent stop.
 
+## Self-audit before declaring completion
+
+A brief that says "Continuing Objective: None outstanding" or ships an empty
+**Successor Work Roster** is a claim, not a default -- and it is easy to get
+wrong even when every explicit ask genuinely was completed. Over the course of
+a session you routinely say things in passing that are themselves open items:
+"that closes the specific gap; the broader idea is still open for a future
+pass," "I didn't chase that down," "left as a follow-up," "not fully verified,"
+"deferred." None of those require a fresh user ask to exist -- they are
+self-flagged threads you already noticed, and a brief that omits them is
+**more misleading than a terse one**, because a successor has no way to know
+what it doesn't know.
+
+Before composing the **Continuing Objective** / **Successor Work Roster** /
+**Completion Gates** sections (either trigger path below):
+
+1. Re-scan your own turns in this conversation -- not just the final one --
+   for open-ended language: "still open," "future pass," "not yet," "didn't
+   verify," "follow-up," "left as-is," "deferred," "out of scope for this,"
+   or similar.
+2. **Classify each hit against what happened afterward, not just the hit
+   itself.** An earlier "didn't verify" or "still open" may have been
+   resolved by a later turn in the same session -- check the turns that
+   follow the hit before deciding it's still open. Carry forward only the
+   hits that remain genuinely unresolved at the point the brief is composed.
+3. For each hit that remains open, fold it into the brief's own carrier for
+   open work -- the **Successor Work Roster** for the standalone shape, or
+   the **Next Slice** for the effort-backed shape (which has no Successor
+   Work Roster; route the hit there, or into the active effort itself when
+   it doesn't belong to this handoff leg specifically) -- or state explicitly
+   in the brief that it was deliberately scoped out and why. Never let it
+   silently disappear because the primary ask happened to be done, and never
+   drop it for lack of a Successor Work Roster in the shape you're using.
+4. Only write "None outstanding" once this scan has actually happened, not
+   because nothing came immediately to mind.
+
+This is a self-check, not a formal tool -- do it by re-reading, not by
+assuming the last turn's framing already covers everything you said earlier.
+
 ## Two triggers, two gates
 
 ### 1. Context-pressure-driven handoff: trigger directly
@@ -119,7 +158,8 @@ more work left to do:
 2. **Call `generate_handoff_prompt`.**
 3. **Compose the markdown brief** using the effort-backed shape when a valid
    open active effort exists, otherwise the full standalone shape. Note the
-   sync outcome (synced cleanly / conflict left unresolved) if relevant.
+   sync outcome (synced cleanly / conflict left unresolved) if relevant. Run
+   the **Self-audit before declaring completion** step above first.
 4. **Call `save_handoff_prompt`.** This safely stores the baton and returns the
    short handoff seed.
 5. **Call `trigger_handoff` immediately.**
@@ -133,7 +173,9 @@ When you have completed the requested work and would otherwise end the turn by
 listing a set of follow-up ideas or questions:
 
 1. **Call `generate_handoff_prompt`.**
-2. **Compose the markdown brief.**
+2. **Compose the markdown brief**, running the **Self-audit before declaring
+   completion** step above first -- this is exactly the path where "all
+   requested work is complete" is tempting to write without checking it.
 3. **Call `save_handoff_prompt`.**
 4. **Replace the usual follow-up list** with one short, low-friction offer to
    continue via handoff.
@@ -297,6 +339,55 @@ confirmed `mode: auto` is set.
 
 If the user says "resume from handoff" without pasting an exact id or prompt,
 sweep the current worktree's state first rather than doing a global search.
+
+### Verify the brief's completeness, not just its truthfulness
+
+Confirming that a brief's claims are *true* (referenced PRs/commits actually
+merged, cited files actually exist) is not the same as confirming the brief
+is *complete*. A predecessor's self-audit (see **Self-audit before declaring
+completion** above) can still miss something, and a brief you didn't compose
+yourself deserves a lighter version of the same check before you report
+"nothing outstanding" to the user:
+
+1. When a session-history/transcript query surface is available (for example
+   a session-store query tool), **search it for the same open-ended phrases**
+   ("still open," "future pass," "didn't verify," "follow-up," "deferred")
+   rather than pulling the predecessor's full turn history into your own
+   context -- a session can run to hundreds of turns, and reading all of them
+   defeats the point of a bounded handoff. Fetch only the matched turns plus a
+   little surrounding context; if the available surface can only return a
+   full transcript with no way to search or page it, delegate the read to a
+   sub-agent (the same context-firewall pattern the `session-rampup` agent
+   uses) rather than loading it directly.
+2. **A bounded read around a match can miss a later resolution.** Before
+   classifying a hit as a dropped item, do a targeted follow-up query for
+   turns/status references *after* the match (not the full transcript) --
+   the predecessor may have resolved it later in the same session and the
+   brief simply reflects that later state correctly. Only items that remain
+   unresolved through the end of the predecessor's own history count as
+   dropped.
+3. **Identifying the right predecessor session is best-effort, not
+   guaranteed.** Nothing today reliably threads a predecessor's session ID
+   through the handoff payload into your hands, so resolve it from whatever
+   lineage signals the available tooling exposes (worktree/session history,
+   timestamps, the brief's own content) rather than assuming an authoritative
+   pointer exists. If you can't identify a specific predecessor session with
+   reasonable confidence, that itself is a retrieval failure -- see point 5.
+4. If the identified predecessor session's own first turn shows it was itself
+   resuming from an earlier handoff, treat that as a chain: a terse or
+   all-green brief is more likely to be compressed rather than complete, so
+   extend the same spot-check one hop further back before accepting "nothing
+   outstanding" at face value.
+5. If you find a dropped item -- one that was still unresolved when the
+   predecessor's own history ends -- surface it to the user rather than
+   quietly picking it up or quietly dropping it again; it may be intentional,
+   or it may be exactly the kind of gap this check exists to catch.
+6. **Disclose whenever the check didn't actually happen** -- not only when no
+   history surface exists at all, but whenever the specific predecessor
+   transcript is missing, remote, expired, unreadable, or unidentifiable (per
+   point 3). "The brief looks complete but I could not cross-check it against
+   the predecessor's own transcript (<reason>)" is honest; a bare "nothing
+   outstanding" is not, when the check was never actually completed.
 
 ### When consume fails because the handoff is already claimed
 
@@ -499,6 +590,12 @@ Compose the appropriate shape and pass it to `save_handoff_prompt` as
 - Separate the handoff leg's completion gate from the broader objective's
   completion gate.
 - Never claim auto-pickup. A handoff is not loaded automatically on restart.
+- **"None outstanding" is a checked claim, not a default.** Run the
+  **Self-audit before declaring completion** step before writing an empty
+  Successor Work Roster or Continuing Objective; on the resume side, spot-check
+  the brief against the predecessor's own transcript per **Verify the brief's
+  completeness, not just its truthfulness** before reporting "nothing queued"
+  to the user.
 - Never end a turn with outstanding work and no handoff. "Suitable stopping
   point," "session ran long," and "getting late" do not excuse it; only a
   genuine crossroads, an error, a design contradiction, or a confirmation-gated

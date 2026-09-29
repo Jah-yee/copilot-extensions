@@ -34,6 +34,7 @@ def test_installers_fall_back_and_preserve_bounded_diagnostics() -> None:
     assert "falling back to the base package" in posix
 
 
+@pytest.mark.guard
 def test_installers_preinstall_uv_editable_workspace_dependencies() -> None:
     powershell = (PLUGIN / "scripts" / "init.ps1").read_text(encoding="utf-8")
     posix = (PLUGIN / "scripts" / "init.sh").read_text(encoding="utf-8")

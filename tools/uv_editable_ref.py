@@ -399,7 +399,7 @@ def _file_hashes(root: Path) -> dict[str, str]:
     *located* under a directory named e.g. ``build`` would have every
     file's ``.parts`` match that ancestor name too, silently emptying the
     whole result and making any two trees compare as falsely equal."""
-    ignored_dirs = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
+    ignored_dirs = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
     out: dict[str, str] = {}
     if not root.is_dir():
         return out

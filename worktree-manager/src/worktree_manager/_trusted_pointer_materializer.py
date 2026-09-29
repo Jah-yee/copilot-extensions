@@ -364,7 +364,7 @@ def _uv_editable_ignore(_dir: str, names: list[str]) -> set[str]:
     """Mirrors ``materialize_main.py``'s own ``_ignore`` -- excludes build/
     cache artifacts from the canonical-lib-tree copy."""
     return {n for n in names if n in {
-        ".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist",
+        ".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist",
     } or n.endswith((".pyc", ".pyo")) or n.endswith(".egg-info")}
 
 
@@ -375,7 +375,7 @@ def _file_hashes(root: Path) -> dict[str, str]:
     ``ignore`` callback excludes (so a fresh copy is never falsely
     reported as "not matching" a canonical tree that still carries them
     as ordinary local dev artifacts)."""
-    ignored_dirs = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
+    ignored_dirs = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
     out: dict[str, str] = {}
     if not root.is_dir():
         return out

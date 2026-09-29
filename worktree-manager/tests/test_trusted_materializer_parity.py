@@ -391,6 +391,9 @@ def test_uv_editable_parity_ignores_egg_info_in_comparison_and_materialization(
         egg = canon / "src" / "agent_zdd.egg-info"
         egg.mkdir(parents=True)
         (egg / "PKG-INFO").write_text("generated metadata\n", encoding="utf-8")
+        venv = canon / ".venv" / "lib"
+        venv.mkdir(parents=True)
+        (venv / "marker.txt").write_text("generated venv\n", encoding="utf-8")
         _uv_editable_consumer(root, lib="zdd", raw_path="../libs/zdd")
 
     got_trusted, got_canonical = _run_uv_editable_scenario(
@@ -403,3 +406,4 @@ def test_uv_editable_parity_ignores_egg_info_in_comparison_and_materialization(
         tmp_path / "uv-egg-info-canonical" / "slot",
     ):
         assert not (dest / "libs/zdd/src/agent_zdd.egg-info").exists()
+        assert not (dest / "libs/zdd/.venv").exists()

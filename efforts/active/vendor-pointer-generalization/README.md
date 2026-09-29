@@ -2581,3 +2581,58 @@ _Pending._
   excluded real `zdd` copy; `src-passthrough` retirement (once nothing
   else depends on it); Phase 2 (installer engine); Phase 3 (pattern doc /
   Phase 0-style broader audit).
+
+### 2026-09-29 — `agent-worktrees`'s `plugin-activation` re-conversion attempted, blocked, reverted; `src-passthrough` retirement deferred
+
+- Only two real `src-passthrough` `VENDOR_POINTER.json` copies remained
+  repo-wide, both `plugin-activation`: `customizing-copilot`'s (permanent
+  by design, `_resolve_state_py()` depends on it) and `agent-worktrees`'s
+  (a stub, inconsistent with its siblings `plugin-resolve`/
+  `dropin-registry`, which PR #4447 reverted to FULL real copies rather
+  than leaving as stubs or pointers of any kind).
+- Asked the operator directly (this was flagged in the prior leg's own
+  Journal entry as needing a fresh maintainer call, mirroring the
+  `agent-procutil` exclusion). **First answer: convert to `uv`-editable.**
+  Attempted it: `sync-vendored-libs.py --uv-editable agent-worktrees
+  plugin-activation`, then live `uv pip install
+  plugins/agent-worktrees` and `uv pip install -e plugins/agent-worktrees`
+  probes. **Both failed** with a `uv` resolver conflict: canonical
+  `plugin-activation`'s own internal `[tool.uv.sources]` reference to
+  `agent-dropin-registry` (and `agent-plugin-resolve`) collided with
+  `agent-worktrees`'s own DELIBERATE real local copies of those same two
+  libs — the exact "a lib depending on another vendored lib cannot be
+  converted ahead of that dependency for any consumer that ALSO directly
+  vendors the same dependency" ordering hazard first found during
+  `ssh-manager`'s conversion, except here the dependency (`dropin-
+  registry`/`plugin-resolve`) is PERMANENTLY real for this one consumer
+  by deliberate build-surface design, not merely not-yet-converted — so
+  there is no future ordering fix that resolves it short of undoing PR
+  #4447's own decision.
+- Reported the conflict back to the operator with three live options
+  (revert to `src-passthrough` status quo; also convert `agent-worktrees`'s
+  `dropin-registry`/`plugin-resolve` to `uv`-editable, undoing #4447;
+  convert to a full real copy matching its siblings instead) plus a
+  fourth to defer. **Operator's second, final answer: revert — leave
+  `agent-worktrees`'s `plugin-activation` as `src-passthrough`
+  (status quo).** The attempted conversion had already been cleanly
+  reverted (no local copy deleted, no `pyproject.toml` rewritten, no
+  commits made) before this answer came back, so no further action was
+  needed to restore it.
+- **`src-passthrough` retirement (Plan item) is therefore deferred, not
+  done** — one real, non-permanent user of the pointer kind still exists
+  (`agent-worktrees`'s `plugin-activation`), and it cannot be converted to
+  any of the effort's other forms without either undoing a deliberate,
+  separately-owned build-surface decision (PR #4447) or accepting a
+  broken `uv` resolution for that one consumer. This is now the 3rd
+  concrete piece of evidence for this effort's own Phase 2 (a canonical-
+  reference form for the installer engine) and, more broadly, suggests
+  `agent-worktrees`'s whole build-surface-vs-canonical-reference tension
+  (procutil, zdd, and now plugin-activation) may need its own dedicated
+  resolution rather than being chased one lib at a time — worth raising
+  explicitly before the next leg spends more cycles on individual
+  `agent-worktrees` exceptions.
+- **Still not done after this leg:** `src-passthrough` retirement (blocked
+  as above — revisit only after `agent-worktrees`'s build-surface tension
+  gets its own resolution, or Phase 2 removes the need for it entirely);
+  Phase 2 (installer engine); Phase 3 (pattern doc / Phase 0-style
+  broader audit).

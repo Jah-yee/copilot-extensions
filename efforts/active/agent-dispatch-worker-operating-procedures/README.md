@@ -371,13 +371,21 @@ per environment are genuinely undecided, not just unwritten._
         launches left no live `wt-anchor-<workspace-project>` tmux session,
         no active container lease, and the container still running/unleased.
 
-### Phase 4 — agent-bridge companion-agent heads-up
-- [ ] Confirm (or add, if missing) a minimal heads-up in agent-bridge's own
+### Phase 4 — agent-bridge companion-agent heads-up ✅ landed
+- [x] Confirm (or add, if missing) a minimal heads-up in agent-bridge's own
       seed-construction path: "you are a companion agent, not a dispatch
       worker; ordinary end-of-turn prose is fine, the controlling agent
       reads it" — light-touch, no new procedures doc, so a wrapper sub-agent
       MD pointing at agent-bridge never inherits dispatch-only constraints
       by mistake.
+      - Implemented in `agent_bridge.session_targeting_cli`: a
+        `_COMPANION_SEED_HEADS_UP` constant is now prepended (via
+        `_companion_seed_prompt()`) to the seed on both CLI-mode session
+        paths (`_cmd_create_cli`'s venue dispatch and `_cmd_create`'s plain
+        create-and-stream path), so every agent-bridge-launched companion
+        session gets the heads-up regardless of which path spawned it.
+        Deliberately just the one clarifying sentence — no new procedures
+        doc, no dispatch-worker constraints copied in.
 
 ### Phase 5 — Clean-room Tier-E eval: prove the mechanical-completion contract
 _Added per Round 4 (see Request above): unit tests on prompt strings prove
@@ -621,3 +629,47 @@ _Pending._
   `wt-anchor-<workspace-project>` tmux session, no active
   `agent-containers` lease, the validation container still running/unleased,
   and no detached validation session left behind.
+
+### 2026-09-29 — PR #4615 review fixes land; Phase 4 lands (#4621); Phase 3's hand-run remains the one open item
+- PR #4615 (the adoption-gap slice above) carried automated review findings
+  before merge: a **high-severity** finding that the detached-launch
+  environment allowlist forwarded the coordinator's **control** token
+  (`AGENT_DISPATCH_CONTROL_TOKEN` / its shared-command variant) into the
+  container, when the no-CLI worker only ever needs the ordinary
+  task-scoped token -- fixed by dropping the control-token variants from
+  the forwarded set. Two medium findings: missing changefiles for the
+  other `libs/venue-copilot` consumers (`agent-codespaces`, `agent-ssh`),
+  added; and workspace adoption running after the credential-relay-disabled
+  early return (so a `--no-relay` detached launch would silently skip
+  adoption and hit the same unresolved-project failure) -- fixed by moving
+  adoption before that return. Three low findings (identifier-neutral
+  journal wording, a required Documentation-impact statement, and a missing
+  `seed_ready_timeout` regression test) were also fixed. Full suite after
+  fixes: `venue-copilot` 58 passed/2 skipped; `agent-containers` 381
+  passed/11 skipped plus the same 3 pre-existing unrelated
+  `test_restricted_fleet.py` failures noted above; `agent-dispatch` and
+  `agent-bridge` each showed their own pre-existing unrelated failures
+  (4 `tests/test_procutil.py`, 1 `tests/test_routes.py`), none touched by
+  this change. CI went green; merged via the Maintainer review-bypass path
+  (`CONTRIBUTING.md`'s per-user `bypass_actors` ruleset entry -- CI still
+  required and green, only the second-approving-review requirement is
+  exempted).
+- Phase 4 (the agent-bridge companion-agent heads-up) was implemented in
+  the same working session on a side branch and, once #4615 was clear,
+  rebased onto latest `dev`, reviewed, and landed as its own PR **#4621**:
+  a `_COMPANION_SEED_HEADS_UP` constant prepended to both CLI-mode seed
+  paths in `agent_bridge.session_targeting_cli`. Full `agent-bridge` suite:
+  525 passed / 1 skipped, plus one confirmed pre-existing unrelated
+  Windows PATHEXT-resolution failure in `tests/test_routes.py`
+  (unconnected code path -- verified the diff never touches
+  `routes/worktrees.py`). Merged the same way as #4615.
+- **Phase 3's one remaining open item is the hand-run itself** (Copilot CLI
+  exiting immediately under the detached `--session-id` launch path inside
+  the trusted container -- see the entry above). This is now understood to
+  be a Copilot-CLI/launch-path issue in that specific venue, not a gap in
+  the no-CLI seed or the dispatch/adoption plumbing, all of which now work
+  correctly up to that point. Left open rather than forced; a future
+  session should investigate the Copilot CLI's own behavior under a fresh
+  `--session-id` in that container image (compare CLI versions, check for
+  an upstream CAR issue, or try a different mux/detach strategy) before
+  reattempting the hand-run.

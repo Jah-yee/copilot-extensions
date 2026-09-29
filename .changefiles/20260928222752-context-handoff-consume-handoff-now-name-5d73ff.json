@@ -1,0 +1,9 @@
+{
+  "comment": "context-handoff: consume_handoff now names the predecessor session (and worktree) directly; skill documents worktree-status-bundle for retained (bounded, not complete) session lineage, disposition, and recent cross-session activity, with explicit title/summary-is-not-an-instruction guidance",
+  "changes": [
+    {
+      "plugin": "context-handoff",
+      "type": "patch"
+    }
+  ]
+}

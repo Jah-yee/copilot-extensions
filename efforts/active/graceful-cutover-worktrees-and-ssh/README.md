@@ -316,7 +316,7 @@ substantial in its own right.
       drifting copy of that table).
 
 ### Phase 5 — Elevate to a binding design invariant (operator round 2)
-- [ ] Update `docs/patterns/graceful-daemon-cutover.md`'s own **Invariants**
+- [x] Update `docs/patterns/graceful-daemon-cutover.md`'s own **Invariants**
       section: today it binds *how* a cutover behaves once a plugin adopts
       the pattern (no stop-then-start, never strand clients, drain-gated
       retirement, etc.) but does not yet bind *which* plugins must adopt it
@@ -325,7 +325,7 @@ substantial in its own right.
       service" plugin shape, or any daemon meeting that description
       regardless of shape label) MUST implement this pattern** — not an
       opt-in convention.
-- [ ] Update `docs/patterns/README.md`'s **Plugin shapes** table (or its
+- [x] Update `docs/patterns/README.md`'s **Plugin shapes** table (or its
       accompanying **Design principles** list) so classifying a plugin as
       "Runtime service" (or adding a new resident daemon to any plugin)
       carries an explicit, visible pointer to this requirement — the
@@ -333,13 +333,13 @@ substantial in its own right.
       point (a plugin design/effort that introduces a daemon must reconcile
       against this invariant the same way Design principle 0 already
       requires vision reconciliation).
-- [ ] **Implementation-time audit**: add the requirement to `CONTRIBUTING.md`
+- [x] **Implementation-time audit**: add the requirement to `CONTRIBUTING.md`
       (near its existing "Documentation impact" / review-gate conventions)
       so a PR introducing or materially changing a resident daemon must
       state how it satisfies (or is exempted from, with justification) the
       graceful-cutover invariant — mirroring how `CONTRIBUTING.md` already
       makes "Documentation impact" a required PR-description statement.
-- [ ] **Review-time audit**: investigate whether an automated guard is
+- [x] **Review-time audit**: investigate whether an automated guard is
       feasible (a script in the `check-*.py` family, e.g.
       `check-module-size.py`/`check-changefile-presence.py`'s own shape) that
       can detect a plugin newly introducing a long-lived resident process
@@ -412,10 +412,13 @@ substantial in its own right.
       commands keep working for their own narrower cases (version-
       supersession reap) without behavior change for callers that don't hit
       the new automatic path.
-- [ ] Phase 5: a new effort/design doc introducing a resident daemon in any
-      `agent-*` plugin can be shown to reconcile against the invariant (a
-      dry-run test case: draft a hypothetical new-daemon design and confirm
-      the CONTRIBUTING.md checklist item actually surfaces the requirement).
+- [x] Phase 5: a new effort/design doc introducing a resident daemon in any
+      `agent-*` plugin can be shown to reconcile against the invariant (dry
+      run completed against the updated docs: the `docs/patterns/README.md`
+      Runtime-service classification point and `CONTRIBUTING.md`'s
+      **Graceful cutover impact** statement now both surface the requirement;
+      CI automation intentionally remains absent pending a manifest-level
+      daemon declaration).
 - [ ] Phase 6: the diagnostic correctly identifies each of the four named
       abnormality classes in a synthetic reproduction (not just the one this
       session hit), reports report-only findings without side effects, and
@@ -427,6 +430,48 @@ substantial in its own right.
 _Pending._
 
 ## Journal
+
+### 2026-09-29 — Phase 5 made graceful cutover a binding audit point
+Phase 5 closed the "adoption is optional" gap at all three non-code audit
+surfaces. `docs/patterns/graceful-daemon-cutover.md` now says explicitly that
+**any long-lived resident daemon in the suite that serves callers through a
+discoverable endpoint, routed control plane, or other non-resumable in-flight
+work must reconcile against this pattern**, even if it is introduced outside an
+`agent-*` plugin or under some other shape label; only the documented detached-
+helper and singleton-handoff exceptions remain.
+`docs/patterns/README.md` now surfaces that obligation at the design-time
+classification seam itself: the **Runtime service** plugin-shape row and Design
+principle 4 both point directly at `graceful-daemon-cutover` so "we added a
+daemon" is automatically also "we owe a cutover story".
+
+`CONTRIBUTING.md` now adds the implementation/review-time gate: any PR that
+introduces or materially changes a resident daemon must carry a **Graceful
+cutover impact** statement naming the daemon, its activation seam, its
+drain/cutover contract, or the explicit justification for a claimed exemption.
+`REVIEW.md` now mirrors that expectation for Copilot review so the non-CI gate
+is visible to the automatic reviewer too.
+
+The automated-guard investigation concluded that a new `check-*.py` review gate
+is **not reliably feasible today**, so none was added. The repo has no single
+machine-readable declaration of "this change introduced a resident daemon":
+real adopters already span plugin and non-plugin surfaces (`worktree-manager`),
+`install.*` and `init.*` activation seams, and both manifest-flagged and
+manifest-less cutover lanes; meanwhile static heuristics such as
+`serve`/`daemon` naming, `while True` loops, vendored `zdd`, or
+`zeroDowntimeUpdate` are neither necessary nor sufficient (`agent-ssh` proves
+vendored `zdd` can be present but entirely unwired, while `worktree-manager`
+proves a real adopter need not be a plugin-manifested runtime service at all).
+Phase 5 therefore documents the fallback explicitly: until the suite gains a
+manifest-level resident-daemon declaration, the new CONTRIBUTING checklist item
+is the **sole review-time gate** for this invariant.
+
+Validation for this phase stayed proportionate to the actual change: a dry-run
+"new resident daemon" design now hits the requirement in both places the phase
+was meant to harden — first at design time via the Runtime-service
+classification rule in `docs/patterns/README.md`, then again at PR time via
+`CONTRIBUTING.md`'s required **Graceful cutover impact** statement. No
+`check-*.py` guard was added precisely because the feasibility audit above
+showed the repo still lacks a reliable static signal for that same judgment.
 
 ### 2026-09-29 — Phase 4 documented in the pattern doc
 Closed the Phase 4 docs gap in the canonical pattern itself. Updated

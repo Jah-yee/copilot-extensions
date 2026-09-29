@@ -1468,17 +1468,20 @@ def show_install_status() -> None:
             f"(checked {python} and {lib})"
         )
 
-    # Wrappers
-    bd = bin_dir()
-    if platform.system() == "Windows":
-        wrapper_name = "launch-session.cmd"
+    # Interactive mux launch (relocated to Worktree Manager; agent-worktrees
+    # no longer deploys its own launch-session wrapper).
+    configured_manager_root = os.environ.get("WORKTREE_MANAGER_ROOT", "").strip()
+    manager_root = (
+        Path(configured_manager_root).expanduser()
+        if configured_manager_root
+        else Path.home() / ".worktree-manager"
+    )
+    if (manager_root / "current-version").exists():
+        output.ok(f"Interactive launch: Worktree Manager found at {manager_root}")
     else:
-        wrapper_name = "launch-session.sh"
-    p = bd / wrapper_name
-    if p.exists():
-        output.ok(f"{wrapper_name} deployed")
-    else:
-        output.err(f"{wrapper_name} missing")
+        output.skipped(
+            "Interactive launch: no Worktree Manager found; direct non-mux fallback"
+        )
 
     # Binstub
     lb = local_bin()

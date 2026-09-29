@@ -66,6 +66,52 @@ def test_install_status_rejects_stale_legacy_package(tmp_path, monkeypatch, caps
     assert "Package deployed" not in output
 
 
+def test_install_status_reports_relocated_worktree_manager(
+    tmp_path, monkeypatch, capsys
+):
+    _configure_status(tmp_path, monkeypatch)
+    manager_root = tmp_path / "worktree-manager"
+    manager_root.mkdir()
+    (manager_root / "current-version").write_text("0.1.0-dev1", encoding="utf-8")
+    monkeypatch.setenv("WORKTREE_MANAGER_ROOT", str(manager_root))
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout="/active/agent_worktrees\n"
+        ),
+    )
+
+    installer.show_install_status()
+
+    output = capsys.readouterr().out
+    assert f"Interactive launch: Worktree Manager found at {manager_root}" in output
+    assert "launch-session.cmd" not in output
+
+
+def test_install_status_reports_supported_direct_launch_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    _configure_status(tmp_path, monkeypatch)
+    monkeypatch.setenv("WORKTREE_MANAGER_ROOT", str(tmp_path / "missing-manager"))
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout="/active/agent_worktrees\n"
+        ),
+    )
+
+    installer.show_install_status()
+
+    output = capsys.readouterr().out
+    assert (
+        "Interactive launch: no Worktree Manager found; direct non-mux fallback"
+        in output
+    )
+    assert "launch-session.cmd missing" not in output
+
+
 def test_venv_python_prefers_last_known_good_over_newest_slot(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "install_dir", lambda: tmp_path)
     subdir, name = (

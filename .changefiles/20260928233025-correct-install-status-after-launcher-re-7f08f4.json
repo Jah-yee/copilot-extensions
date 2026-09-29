@@ -1,0 +1,9 @@
+{
+  "comment": "Correct install-status after launcher relocation",
+  "changes": [
+    {
+      "plugin": "agent-worktrees",
+      "type": "patch"
+    }
+  ]
+}

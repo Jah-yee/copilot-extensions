@@ -142,6 +142,20 @@ def test_restore_canonical_skips_when_full_tree_differs_even_if_src_and_version_
     assert not (repo / "libs/shared-lib").exists()
 
 
+def test_restore_canonical_refuses_a_symlinked_copy_ancestor(repo: Path):
+    real = repo.parent / "shared-lib-real"
+    _write(real, "src/shared_lib/__init__.py", "shared = 1\n")
+    _lib_pyproject(real, "pyproject.toml", "0.1.0-dev1")
+    target = repo / "plugins" / "alpha" / "libs"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(real.parent, target_is_directory=True)
+
+    result = _run(repo, "--restore-canonical")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "is a symlink -- refusing" in result.stderr
+    assert not (repo / "libs/shared-lib").exists()
+
+
 def test_restore_canonical_skips_when_copies_disagree(repo: Path):
     _seed_two_copies_in_sync(repo)
     _write(repo, "plugins/beta/libs/shared-lib/src/shared_lib/__init__.py",

@@ -214,10 +214,14 @@ function Install-AgentSshPackage {
     param(
         [Parameter(Mandatory = $true)][string]$Python,
         [Parameter(Mandatory = $true)][string]$Source,
-        [string[]]$Dependencies = @()
+        [string[]]$Dependencies = @(),
+        [switch]$SkipUv
     )
 
-    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    $uvCommand = $null
+    if (-not $SkipUv) {
+        $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
+    }
     if ($uvCommand) {
         $uvResult = 1
         try {
@@ -771,11 +775,12 @@ if (-not $venueCopilotDir) {
     Write-Fail 'Cannot locate venue-copilot library'
     exit 1
 }
+$skipUv = $false
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     & uv pip install --python $VenvPython --reinstall-package agent-venue-copilot "$venueCopilotDir" --quiet 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail 'venue-copilot install failed'
-        exit 1
+        Write-Warn 'venue-copilot uv preinstall failed -- falling back to python -m pip'
+        $skipUv = $true
     }
 }
 $zddDir = Resolve-Zdd
@@ -793,7 +798,8 @@ $vendoredDependencies = @(
 $pkgInstalled = Install-AgentSshPackage `
     -Python $VenvPython `
     -Source $PluginDir `
-    -Dependencies $vendoredDependencies
+    -Dependencies $vendoredDependencies `
+    -SkipUv:$skipUv
 $ErrorActionPreference = $prevEAP
 if (-not $pkgInstalled) {
     Write-Fail 'Failed to install agent-ssh package into venv'

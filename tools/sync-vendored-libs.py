@@ -259,14 +259,7 @@ def _copies_agree(paths: list[Path]) -> tuple[bool, list[str]]:
 
 
 def _full_trees_agree(paths: list[Path]) -> tuple[bool, list[str]]:
-    """True + [] when every copy's complete filtered tree matches.
-
-    ``--restore-canonical`` now promotes a copy's full lib tree, not just
-    ``src/`` plus the declared version, so its truth-selection gate must
-    compare the same surface. Reuse ``uv_editable_ref.lib_tree_matches()``'s
-    filtered-tree comparison (already hardened for build/cache artifacts and
-    extra-file detection) instead of silently selecting ``paths[0]`` when
-    another copy differs only in README/tests/metadata."""
+    """True + [] when every copy's complete filtered tree matches."""
     problems: list[str] = []
     ref = paths[0]
     for other in paths[1:]:
@@ -401,22 +394,27 @@ def _copy_tests(src_lib: Path, dst_lib: Path) -> None:
 
 
 def _copy_lib_tree(src_lib: Path, dst_lib: Path) -> None:
-    """Replace ``dst_lib`` with a filtered copy of the whole ``src_lib`` tree.
-
-    Used by ``--restore-canonical`` when a verified-consistent real vendored
-    copy becomes the top-level canonical source of truth. This is broader than
-    ``_copy_src`` + ``_sync_version``: canonical promotion must also carry the
-    copy's own ``README.md`` / ``tests/`` / metadata files and create the
-    canonical root when it does not exist yet, or the promoted canonical would
-    immediately differ from the known-good shipped tree on anything outside
-    ``src/`` plus the version string.
-    """
+    """Replace ``dst_lib`` with a filtered copy of the whole ``src_lib`` tree."""
+    bad_ancestor = _find_symlinked_ancestor(src_lib, REPO)
+    if bad_ancestor is not None:
+        raise SystemExit(
+            f"{bad_ancestor} is a symlink -- refusing (a canonical lib root, "
+            "and every ancestor between it and the repository root, must be "
+            "a real directory)"
+        )
     found = _find_symlink(src_lib)
     if found is not None:
         where = src_lib.name if found == "." else f"{src_lib.name}/{found}"
         raise SystemExit(
             f"{where} is a symlink -- refusing (a vendored lib copy promoted "
             "to canonical must contain only real files)"
+        )
+    bad_ancestor = _find_symlinked_ancestor(dst_lib, REPO)
+    if bad_ancestor is not None:
+        raise SystemExit(
+            f"{bad_ancestor} is a symlink -- refusing (a canonical lib root, "
+            "and every ancestor between it and the repository root, must be "
+            "a real directory)"
         )
     if dst_lib.is_symlink():
         raise SystemExit(

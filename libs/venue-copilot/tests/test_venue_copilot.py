@@ -371,6 +371,7 @@ class TestDetachedLaunchAdditions:
             "anchor-example@cs-1", anchor=True, detach=True,
             seed="keep $HOME literal", driver="d",
             copilot_args=["--plugin-dir=$HOME/.stage/a b", "--no-ask-user"],
+            embody_bin=str(stub),
             login_shell=login_shell,
         )
         # The remote shell expands $HOME only inside --copilot-arg values; the
@@ -380,7 +381,7 @@ class TestDetachedLaunchAdditions:
             [bash, "--noprofile", "--norc", "-c", script],
             capture_output=True,
             text=True,
-            env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": "/h/u"},
+            env={"PATH": "/usr/bin:/bin", "HOME": "/h/u"},
         ).stdout.splitlines()
         assert "--copilot-arg=--plugin-dir=/h/u/.stage/a b" in out
         assert "keep $HOME literal" in out

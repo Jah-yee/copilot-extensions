@@ -276,10 +276,13 @@ def test_shell_pip_fallback_resolves_canonical_when_local_copy_absent(tmp_path: 
 def test_powershell_installer_resolves_uv_editable_libs_via_shared_helper() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
 
+    assert "[switch]$SkipUv" in installer
     assert "function Resolve-VenueCopilot" in installer
     assert "Resolve-VendoredLib -LibName 'venue-copilot'" in installer
     assert "$venueCopilotDir = Resolve-VenueCopilot" in installer
     assert "--reinstall-package agent-venue-copilot" in installer
+    assert "venue-copilot uv preinstall failed -- falling back to python -m pip" in installer
+    assert "-SkipUv:$skipUv" in installer
     assert "function Resolve-Zdd" in installer
     assert "Resolve-VendoredLib -LibName 'zdd'" in installer
     assert "$zddDir = Resolve-Zdd" in installer

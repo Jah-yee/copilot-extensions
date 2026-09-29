@@ -107,6 +107,24 @@ def test_restore_canonical_copies_agreeing_copies_up(repo: Path):
     assert "shared-lib: canonical drift" not in check.stdout
 
 
+def test_restore_canonical_creates_missing_top_level_lib_and_copies_full_tree(repo: Path):
+    _seed_two_copies_in_sync(repo, version="0.1.0-dev21")
+    _write(repo, "plugins/alpha/libs/shared-lib/README.md", "# shared-lib\n")
+    _write(repo, "plugins/alpha/libs/shared-lib/tests/test_shared.py", "def test_ok():\n    assert True\n")
+
+    result = _run(repo, "--restore-canonical")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "canonical restored" in result.stdout
+
+    canonical = repo / "libs/shared-lib"
+    assert (canonical / "src/shared_lib/__init__.py").read_text() == "shared = 1\n"
+    assert (canonical / "pyproject.toml").read_text(encoding="utf-8").count("0.1.0-dev21") == 1
+    assert (canonical / "README.md").read_text(encoding="utf-8") == "# shared-lib\n"
+    assert (canonical / "tests/test_shared.py").read_text(encoding="utf-8") == (
+        "def test_ok():\n    assert True\n"
+    )
+
+
 def test_restore_canonical_skips_when_copies_disagree(repo: Path):
     _seed_two_copies_in_sync(repo)
     _write(repo, "plugins/beta/libs/shared-lib/src/shared_lib/__init__.py",

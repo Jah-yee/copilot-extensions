@@ -21,7 +21,10 @@ This tool closes that gap in three modes:
 * ``--restore-canonical``: the safe direction *today*, given that copies are
   the verified-consistent, actually-shipped truth. Copies a lib's first copy
   (after confirming all copies agree) up into the top-level ``libs/<lib>``,
-  syncing ``src/`` and the declared version. Never touches plugin copies.
+  creating that canonical root when missing and replacing its complete
+  filtered lib tree (``src/``, ``tests/`` when present, ``README.md``,
+  ``pyproject.toml``, and any other real tracked files, while still ignoring
+  build/cache cruft). Never touches plugin copies.
 * ``--materialize``: the FUTURE direction once canonical is restored and kept
   current -- copies top-level ``libs/<lib>`` DOWN into every
   ``plugins/<plugin>/libs/<lib>``. This is the shape the dev/main release
@@ -372,6 +375,40 @@ def _copy_tests(src_lib: Path, dst_lib: Path) -> None:
     _safe_replace_tree(src_lib / "tests", dst_lib / "tests", label=f"{src_lib.name}/tests")
 
 
+def _copy_lib_tree(src_lib: Path, dst_lib: Path) -> None:
+    """Replace ``dst_lib`` with a filtered copy of the whole ``src_lib`` tree.
+
+    Used by ``--restore-canonical`` when a verified-consistent real vendored
+    copy becomes the top-level canonical source of truth. This is broader than
+    ``_copy_src`` + ``_sync_version``: canonical promotion must also carry the
+    copy's own ``README.md`` / ``tests/`` / metadata files and create the
+    canonical root when it does not exist yet, or the promoted canonical would
+    immediately differ from the known-good shipped tree on anything outside
+    ``src/`` plus the version string.
+    """
+    found = _find_symlink(src_lib)
+    if found is not None:
+        where = src_lib.name if found == "." else f"{src_lib.name}/{found}"
+        raise SystemExit(
+            f"{where} is a symlink -- refusing (a vendored lib copy promoted "
+            "to canonical must contain only real files)"
+        )
+    if dst_lib.is_symlink():
+        raise SystemExit(
+            f"libs/{dst_lib.name} (destination) is a symlink -- refusing to "
+            "replace it blindly (a canonical lib root must be a real directory)"
+        )
+    _remove_path(dst_lib)
+
+    def _ignore(_root: str, names: list[str]) -> set[str]:
+        ignored = {name for name in names if name in _IGNORE_PARTS}
+        ignored.update(name for name in names if name.endswith((".pyc", ".pyo")))
+        ignored.update(name for name in names if name.endswith(".egg-info"))
+        return ignored
+
+    shutil.copytree(src_lib, dst_lib, ignore=_ignore)
+
+
 def _sync_version(src_lib: Path, dst_lib: Path) -> None:
     src_pp = src_lib / "pyproject.toml"
     pp = dst_lib / "pyproject.toml"
@@ -508,11 +545,8 @@ def cmd_restore_canonical() -> int:
                 continue
         truth = real[0]
         canonical = LIBS_DIR / lib
-        if not canonical.is_dir():
-            print(f"{lib}: no top-level libs/{lib}/ to restore into -- skipping")
-            continue
-        _copy_src(truth, canonical)
-        _sync_version(truth, canonical)
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        _copy_lib_tree(truth, canonical)
         print(f"{lib}: canonical restored from {truth}")
     return 0
 

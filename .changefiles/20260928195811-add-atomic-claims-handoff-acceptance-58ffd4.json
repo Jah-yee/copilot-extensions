@@ -1,9 +1,0 @@
-{
-  "comment": "Add atomic claims handoff acceptance",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

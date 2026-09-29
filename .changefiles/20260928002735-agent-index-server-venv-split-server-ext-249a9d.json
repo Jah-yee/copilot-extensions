@@ -1,0 +1,9 @@
+{
+  "comment": "agent-index-server-venv-split: [server] extras group + server_venv_python resolver + spawn_passive retarget",
+  "changes": [
+    {
+      "plugin": "agent-index",
+      "type": "minor"
+    }
+  ]
+}

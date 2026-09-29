@@ -1,0 +1,9 @@
+{
+  "comment": "Use install.sh install (not the lean provision mode) when provisioning agent-worktrees into a trusted container, and require the deployed launch-command.sh in the readiness check -- provision deliberately skips the launcher scripts embody's detached launch depends on, which silently deadlocked every such launch with an opaque not-ready-timeout.",
+  "changes": [
+    {
+      "plugin": "agent-containers",
+      "type": "patch"
+    }
+  ]
+}

@@ -382,3 +382,24 @@ def test_lib_tree_matches_parity_ignores_only_relative_build_dir_names(
     assert trusted._lib_tree_matches(a, c) is True
     assert canonical.uer.lib_tree_matches(a, c) is True
 
+
+def test_uv_editable_parity_ignores_egg_info_in_comparison_and_materialization(
+    tmp_path: Path, canonical,
+):
+    def build(root: Path) -> None:
+        canon = _canonical_lib(root, "zdd", version="0.1.0-dev5", content="real = True\n")
+        egg = canon / "src" / "agent_zdd.egg-info"
+        egg.mkdir(parents=True)
+        (egg / "PKG-INFO").write_text("generated metadata\n", encoding="utf-8")
+        _uv_editable_consumer(root, lib="zdd", raw_path="../libs/zdd")
+
+    got_trusted, got_canonical = _run_uv_editable_scenario(
+        tmp_path, canonical, name="uv-egg-info", build=build
+    )
+    assert got_trusted == got_canonical == "ok"
+
+    for dest in (
+        tmp_path / "uv-egg-info-trusted" / "slot",
+        tmp_path / "uv-egg-info-canonical" / "slot",
+    ):
+        assert not (dest / "libs/zdd/src/agent_zdd.egg-info").exists()

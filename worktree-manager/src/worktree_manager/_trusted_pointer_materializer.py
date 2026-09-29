@@ -365,7 +365,7 @@ def _uv_editable_ignore(_dir: str, names: list[str]) -> set[str]:
     cache artifacts from the canonical-lib-tree copy."""
     return {n for n in names if n in {
         ".git", "__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist",
-    } or n.endswith((".pyc", ".pyo"))}
+    } or n.endswith((".pyc", ".pyo")) or n.endswith(".egg-info")}
 
 
 def _file_hashes(root: Path) -> dict[str, str]:
@@ -382,7 +382,12 @@ def _file_hashes(root: Path) -> dict[str, str]:
     for f in root.rglob("*"):
         if not f.is_file():
             continue
-        if ignored_dirs & set(f.relative_to(root).parts) or f.suffix in (".pyc", ".pyo"):
+        rel_parts = set(f.relative_to(root).parts)
+        if (
+            ignored_dirs & rel_parts
+            or any(part.endswith(".egg-info") for part in rel_parts)
+            or f.suffix in (".pyc", ".pyo")
+        ):
             continue
         out[f.relative_to(root).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
     return out

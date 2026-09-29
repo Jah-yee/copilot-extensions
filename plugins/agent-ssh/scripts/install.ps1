@@ -287,12 +287,13 @@ raise SystemExit(1)
     return $null
 }
 
-# Resolve the ssh-manager / agent-procutil vendored libs (thin wrappers) --
-# both are now consumed as `uv`-editable canonical references
-# (vendor-pointer-generalization effort, Phase 1), so a dev checkout has
-# no `$PluginDir\libs\<lib>` copy for either one.
+# Resolve the ssh-manager / agent-procutil / venue-copilot vendored libs
+# (thin wrappers) -- all 3 are now consumed as `uv`-editable canonical
+# references (vendor-pointer-generalization effort, Phase 1), so a dev
+# checkout has no `$PluginDir\libs\<lib>` copy for any of them.
 function Resolve-SshManager { return (Resolve-VendoredLib -LibName 'ssh-manager') }
 function Resolve-AgentProcutil { return (Resolve-VendoredLib -LibName 'agent-procutil') }
+function Resolve-VenueCopilot { return (Resolve-VendoredLib -LibName 'venue-copilot') }
 function Resolve-Zdd { return (Resolve-VendoredLib -LibName 'zdd') }
 
 $PluginDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -765,6 +766,11 @@ if (-not $sshManagerDir) {
     Write-Fail 'Cannot locate ssh-manager library'
     exit 1
 }
+$venueCopilotDir = Resolve-VenueCopilot
+if (-not $venueCopilotDir) {
+    Write-Fail 'Cannot locate venue-copilot library'
+    exit 1
+}
 $zddDir = Resolve-Zdd
 if (-not $zddDir) {
     Write-Fail 'Cannot locate zdd library'
@@ -774,7 +780,7 @@ $vendoredDependencies = @(
     $agentProcutilDir,
     (Join-Path $PluginDir 'libs\dropin-registry'),
     $sshManagerDir,
-    (Join-Path $PluginDir 'libs\venue-copilot'),
+    $venueCopilotDir,
     $zddDir
 )
 $pkgInstalled = Install-AgentSshPackage `

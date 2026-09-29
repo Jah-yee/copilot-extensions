@@ -1,0 +1,17 @@
+{
+  "comment": "vendor-pointer-generalization: promote session-liveness-probe and venue-copilot to canonical, convert their consumers to uv-editable references, and teach the affected installers + CI canonical-lib coverage about the new dev-time layout.",
+  "changes": [
+    {
+      "plugin": "agent-containers",
+      "type": "patch"
+    },
+    {
+      "plugin": "agent-codespaces",
+      "type": "patch"
+    },
+    {
+      "plugin": "agent-ssh",
+      "type": "patch"
+    }
+  ]
+}

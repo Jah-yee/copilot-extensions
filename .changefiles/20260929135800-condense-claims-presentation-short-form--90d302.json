@@ -1,9 +1,0 @@
-{
-  "comment": "Condense CLAIMS presentation: short-form kind prefixes, bare PR/bug refs by default, worktree WT prefix wired in, session added to the pecking order",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "minor"
-    }
-  ]
-}

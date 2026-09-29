@@ -306,7 +306,13 @@ def test_uv_editable_parity_fixes_up_a_nested_canonical_dependency(tmp_path: Pat
     sibling of the copied lib, then dropping `editable = true` from the
     nested entry) alongside the consumer's own top-level rewrite."""
     def _build(root: Path) -> Path:
-        _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+        procutil = _canonical_lib(root, "agent-procutil", version="0.2.0-dev1", content="real = True\n")
+        egg = procutil / "src" / "agent_procutil.egg-info"
+        egg.mkdir(parents=True)
+        (egg / "PKG-INFO").write_text("generated metadata\n", encoding="utf-8")
+        venv = procutil / ".venv" / "lib"
+        venv.mkdir(parents=True)
+        (venv / "marker.txt").write_text("generated venv\n", encoding="utf-8")
         dep_dir = _canonical_lib(root, "zdd", version="0.1.0-dev1", content="real\n")
         (dep_dir / "pyproject.toml").write_text(
             '[project]\nname = "x"\nversion = "0.1.0-dev1"\n'
@@ -349,6 +355,8 @@ def test_uv_editable_parity_fixes_up_a_nested_canonical_dependency(tmp_path: Pat
         assert (consumer / "libs/agent-procutil/src/agent_procutil/__init__.py").read_text() == (
             "real = True\n"
         )
+        assert not (consumer / "libs/agent-procutil/src/agent_procutil.egg-info").exists()
+        assert not (consumer / "libs/agent-procutil/.venv").exists()
 
 
 def test_lib_tree_matches_parity_ignores_only_relative_build_dir_names(

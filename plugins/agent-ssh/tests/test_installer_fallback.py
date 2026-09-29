@@ -279,6 +279,7 @@ def test_powershell_installer_resolves_uv_editable_libs_via_shared_helper() -> N
     assert "function Resolve-VenueCopilot" in installer
     assert "Resolve-VendoredLib -LibName 'venue-copilot'" in installer
     assert "$venueCopilotDir = Resolve-VenueCopilot" in installer
+    assert "--reinstall-package agent-venue-copilot" in installer
     assert "function Resolve-Zdd" in installer
     assert "Resolve-VendoredLib -LibName 'zdd'" in installer
     assert "$zddDir = Resolve-Zdd" in installer

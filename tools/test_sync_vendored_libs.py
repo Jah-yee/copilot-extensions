@@ -109,8 +109,13 @@ def test_restore_canonical_copies_agreeing_copies_up(repo: Path):
 
 def test_restore_canonical_creates_missing_top_level_lib_and_copies_full_tree(repo: Path):
     _seed_two_copies_in_sync(repo, version="0.1.0-dev21")
-    _write(repo, "plugins/alpha/libs/shared-lib/README.md", "# shared-lib\n")
-    _write(repo, "plugins/alpha/libs/shared-lib/tests/test_shared.py", "def test_ok():\n    assert True\n")
+    for plugin in ("alpha", "beta"):
+        _write(repo, f"plugins/{plugin}/libs/shared-lib/README.md", "# shared-lib\n")
+        _write(
+            repo,
+            f"plugins/{plugin}/libs/shared-lib/tests/test_shared.py",
+            "def test_ok():\n    assert True\n",
+        )
 
     result = _run(repo, "--restore-canonical")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -123,6 +128,18 @@ def test_restore_canonical_creates_missing_top_level_lib_and_copies_full_tree(re
     assert (canonical / "tests/test_shared.py").read_text(encoding="utf-8") == (
         "def test_ok():\n    assert True\n"
     )
+
+
+def test_restore_canonical_skips_when_full_tree_differs_even_if_src_and_version_match(repo: Path):
+    _seed_two_copies_in_sync(repo)
+    _write(repo, "plugins/alpha/libs/shared-lib/README.md", "# alpha\n")
+    _write(repo, "plugins/beta/libs/shared-lib/README.md", "# beta\n")
+
+    result = _run(repo, "--restore-canonical")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SKIPPED" in result.stdout
+    assert "complete filtered tree differs" in result.stdout
+    assert not (repo / "libs/shared-lib").exists()
 
 
 def test_restore_canonical_skips_when_copies_disagree(repo: Path):

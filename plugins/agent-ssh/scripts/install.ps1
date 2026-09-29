@@ -771,6 +771,13 @@ if (-not $venueCopilotDir) {
     Write-Fail 'Cannot locate venue-copilot library'
     exit 1
 }
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    & uv pip install --python $VenvPython --reinstall-package agent-venue-copilot "$venueCopilotDir" --quiet 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail 'venue-copilot install failed'
+        exit 1
+    }
+}
 $zddDir = Resolve-Zdd
 if (-not $zddDir) {
     Write-Fail 'Cannot locate zdd library'

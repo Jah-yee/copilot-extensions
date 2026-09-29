@@ -137,7 +137,15 @@ POINTER_NAME = "VENDOR_POINTER.json"
 # instead of each hardcoding "plugins/<x>" and silently missing these.
 _EXTRA_CONSUMER_DIRS = ("worktree-manager",)
 
-_IGNORE_PARTS = {"build", ".venv", "__pycache__", "dist"}
+_IGNORE_PARTS = {
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+}
 _VERSION_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")', re.MULTILINE)
 
 # The generated `src-passthrough` stub template -- split into its own module
@@ -247,6 +255,23 @@ def _copies_agree(paths: list[Path]) -> tuple[bool, list[str]]:
     versions = {str(p): _declared_version(p) for p in paths}
     if len(set(versions.values())) > 1:
         problems.append(f"version skew across copies: {versions}")
+    return (not problems), problems
+
+
+def _full_trees_agree(paths: list[Path]) -> tuple[bool, list[str]]:
+    """True + [] when every copy's complete filtered tree matches.
+
+    ``--restore-canonical`` now promotes a copy's full lib tree, not just
+    ``src/`` plus the declared version, so its truth-selection gate must
+    compare the same surface. Reuse ``uv_editable_ref.lib_tree_matches()``'s
+    filtered-tree comparison (already hardened for build/cache artifacts and
+    extra-file detection) instead of silently selecting ``paths[0]`` when
+    another copy differs only in README/tests/metadata."""
+    problems: list[str] = []
+    ref = paths[0]
+    for other in paths[1:]:
+        if not uer.lib_tree_matches(ref, other):
+            problems.append(f"complete filtered tree differs: {ref} vs {other}")
     return (not problems), problems
 
 
@@ -537,7 +562,7 @@ def cmd_restore_canonical() -> int:
                   "(canonical is already the only source)")
             continue
         if len(real) >= 2:
-            ok, problems = _copies_agree(real)
+            ok, problems = _full_trees_agree(real)
             if not ok:
                 print(f"{lib}: SKIPPED -- copies disagree, fix that first:")
                 for p in problems:

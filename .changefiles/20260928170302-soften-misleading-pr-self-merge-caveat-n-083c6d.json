@@ -1,9 +1,0 @@
-{
-  "comment": "Soften misleading pr-self-merge caveat: no approval is required when review_blocking is false",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

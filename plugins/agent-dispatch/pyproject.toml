@@ -29,7 +29,7 @@ dependencies = [
 # zero-downtime cutover primitives -- the routing table + cutover orchestrator
 # (module ``zdd``), vendored byte-identically (like versioned_runtime.py) so the
 # installer-driven graceful daemon cutover reuses the shared library.
-agent-zdd = { path = "libs/zdd" }
+agent-zdd = { path = "../../libs/zdd", editable = true }
 # `path` escapes this plugin's own root and resolves live to
 # `libs/agent-procutil`, so this `dev`-branch checkout has nothing to keep
 # manually in sync -- only a real `main`-branch release

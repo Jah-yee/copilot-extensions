@@ -86,7 +86,7 @@ agent-plugin-activation = { path = "../libs/plugin-activation", editable = true 
 agent-work-coalescing-singleton = { path = "../libs/work-coalescing-singleton", editable = true }
 # Zero-downtime active/passive cutover primitives (module ``zdd``). Vendored
 # per the same byte-identical-in-consumer rule as the runtime plugins.
-agent-zdd = { path = "libs/zdd" }
+agent-zdd = { path = "../libs/zdd", editable = true }
 
 [project.scripts]
 worktree-manager = "worktree_manager.__main__:console_entry"

@@ -28,7 +28,7 @@ agent-procutil = { path = "../../libs/agent-procutil", editable = true }
 # recovery breadcrumb (module ``zdd``). Vendored per plugin; byte-identical src
 # across copies. Lets a vault version bump drain-and-cut-over instead of a hard
 # restart, so the unlocked master secret survives (#743).
-agent-zdd = { path = "libs/zdd" }
+agent-zdd = { path = "../../libs/zdd", editable = true }
 # single-instance lease + supersession self-retire (module
 # ``single_instance_lease``). Guards "one active vault per host" and drives the
 # drained predecessor's self-retire during a cutover (#743). This is a

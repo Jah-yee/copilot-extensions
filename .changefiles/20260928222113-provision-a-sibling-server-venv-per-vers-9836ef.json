@@ -1,9 +1,0 @@
-{
-  "comment": "Provision a sibling SERVER venv per version (install.ps1/install.sh), so config.server_venv_python() resolves to a real interpreter and spawn_passive stops falling back to the shared client venv.",
-  "changes": [
-    {
-      "plugin": "agent-index",
-      "type": "minor"
-    }
-  ]
-}

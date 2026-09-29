@@ -1,0 +1,9 @@
+{
+  "comment": "Clarify agent-bridge companion seed behavior.",
+  "changes": [
+    {
+      "plugin": "agent-bridge",
+      "type": "dev"
+    }
+  ]
+}

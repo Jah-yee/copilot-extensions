@@ -1,0 +1,9 @@
+{
+  "comment": "vendor-pointer-generalization: keep worktree-manager's trusted materializer in parity with the new canonical egg-info filtering so self-install refuses/omits generated packaging metadata the same way tools/materialize_main.py now does.",
+  "changes": [
+    {
+      "plugin": "worktree-manager",
+      "type": "dev"
+    }
+  ]
+}

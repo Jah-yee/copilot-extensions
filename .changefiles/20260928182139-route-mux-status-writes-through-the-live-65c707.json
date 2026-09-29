@@ -1,9 +1,0 @@
-{
-  "comment": "Route mux status writes through the live mux-daemon endpoint",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

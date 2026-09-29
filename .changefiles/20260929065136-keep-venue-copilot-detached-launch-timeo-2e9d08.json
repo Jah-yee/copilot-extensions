@@ -1,9 +1,0 @@
-{
-  "comment": "Keep venue-copilot detached launch timeout forwarding in sync with the shared library.",
-  "changes": [
-    {
-      "plugin": "agent-codespaces",
-      "type": "dev"
-    }
-  ]
-}

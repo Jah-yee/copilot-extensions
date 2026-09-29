@@ -20,6 +20,7 @@ dependencies = [
     "agent-procutil",
     "agent-dropin-registry",
     "agent-plugin-activation",
+    "agent-zdd",
     "agent-single-instance-lease",
     "agent-work-coalescing-singleton",
     "agent-lazy-cli-dispatch",
@@ -36,16 +37,19 @@ dependencies = [
 agent-config-migrate = { path = "../../libs/config-migrate", editable = true }
 # Copilot CLI + Claude plugin resolution -- marketplaces, plugins, repo settings
 # (module ``plugin_resolve``). Shared with agent-bridge / agent-codespaces.
-agent-plugin-resolve = { path = "../../libs/plugin-resolve", editable = true }
+agent-plugin-resolve = { path = "libs/plugin-resolve" }
 # Shared Windows-headless / detached process-spawn kwargs (module
 # ``agent_procutil``). Vendored per plugin; byte-identical src across copies.
 agent-procutil = { path = "libs/agent-procutil" }
 # Resilient scan authority, entry decisions, and bounded warning tracking for
 # filesystem registries (module ``dropin_registry``).
-agent-dropin-registry = { path = "../../libs/dropin-registry", editable = true }
+agent-dropin-registry = { path = "libs/dropin-registry" }
 # Effective global-or-adopted-project plugin eligibility and identity-verified
 # roots for attributed registry entries (module ``plugin_activation``).
-agent-plugin-activation = { path = "../../libs/plugin-activation", editable = true }
+agent-plugin-activation = { path = "libs/plugin-activation" }
+# zero-downtime cutover primitives -- the routing table + cutover orchestrator
+# (module ``zdd``), vendored byte-identically per consumer.
+agent-zdd = { path = "libs/zdd" }
 # Single-instance lease (module ``single_instance_lease``). Guards "one active
 # classify pass per project per host" (plugin-process-hygiene Phase 4c,
 # #2315): a losing caller waits for the winner's pass to finish, then reads

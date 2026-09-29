@@ -1,9 +1,0 @@
-{
-  "comment": "Tasks pane: standardize the row on the shared two-line shape (columnized stats + [tag] repo title - phrase subtitle)",
-  "changes": [
-    {
-      "plugin": "agent-dispatch",
-      "type": "patch"
-    }
-  ]
-}

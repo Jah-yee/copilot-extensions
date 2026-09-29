@@ -342,14 +342,43 @@ class TestPushTimeoutTreeKill:
     this since the whole point is real OS-level process/descendant lifetime.
     """
 
-    def test_run_bounded_kills_grandchild_on_timeout(self, tmp_path):
+    def test_run_bounded_kills_grandchild_on_timeout(self, tmp_path, monkeypatch):
         import os
+        import platform
         import subprocess
         import sys
         import time
 
         from agent_worktrees import push_timeout
-        from agent_worktrees.locks import pid_alive
+        from agent_worktrees.locks import pid_alive, process_start_time
+
+        # This test's whole point is the REAL, non-contained pgid-based
+        # descendant sweep in push_timeout._kill_tree (see its own
+        # docstring): that sweep is deliberately skipped whenever
+        # contained_test_mode() is true, so that a test harness invoking a
+        # stalled command doesn't killpg its own worker. The repository's
+        # own full-suite test runner (tools/run-plugin-tests.py, via
+        # tools/plugin_test_containment.py) sets
+        # COPILOT_EXTENSIONS_TEST_CONTAINED=1 ambiently for the ENTIRE
+        # test process to protect itself from exactly that -- which leaks
+        # into this test's own call to run_bounded() and silently disables
+        # the very sweep being asserted (confirmed live: the fast/PR-time
+        # lane runs a bare test invocation with no such wrapper, so this
+        # passed there, while every full-suite run -- including every real
+        # validate-and-promote promotion attempt -- inherits the
+        # containment flag and fails this assertion deterministically).
+        #
+        # Clearing it here is required to exercise the real sweep, but it
+        # also moves the spawned tree outside plugin_test_containment.py's
+        # own protection: if push_timeout._kill_tree ever regresses --
+        # exactly the failure this test exists to catch -- the escaped
+        # grandchild would otherwise survive its full 60s sleep unreaped
+        # and excluded from the suite's own resource accounting. The
+        # `finally` block below is an independent safety net -- it force-
+        # kills the recorded grandchild PID directly regardless of whether
+        # the assertion above it passed or failed, so this test can never
+        # itself leak a live process even on its own negative path.
+        monkeypatch.delenv("COPILOT_EXTENSIONS_TEST_CONTAINED", raising=False)
 
         ready = tmp_path / "ready"
         pidfile = tmp_path / "grandchild.pid"
@@ -373,23 +402,60 @@ class TestPushTimeoutTreeKill:
         )
         cmd = [sys.executable, str(outer_script)]
 
-        with pytest.raises(subprocess.TimeoutExpired):
-            push_timeout.run_bounded(cmd, cwd=str(tmp_path), env=dict(os.environ), timeout=1.0)
+        grandchild_pid: int | None = None
+        grandchild_start_time: str | None = None
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                push_timeout.run_bounded(
+                    cmd, cwd=str(tmp_path), env=dict(os.environ), timeout=1.0,
+                )
 
-        deadline = time.monotonic() + 10
-        while not (ready.exists() and pidfile.exists()) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert ready.exists() and pidfile.exists(), (
-            "grandchild never started -- test setup issue, not a real assertion"
-        )
-        grandchild_pid = int(ready.read_text().strip())
+            deadline = time.monotonic() + 10
+            while not (ready.exists() and pidfile.exists()) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert ready.exists() and pidfile.exists(), (
+                "grandchild never started -- test setup issue, not a real assertion"
+            )
+            grandchild_pid = int(ready.read_text().strip())
+            # Captured immediately after reading the PID, before any risk
+            # of it exiting and being reused -- the finally block below
+            # revalidates against this token before ever signaling the PID.
+            grandchild_start_time = process_start_time(grandchild_pid)
 
-        deadline = time.monotonic() + 10
-        alive = pid_alive(grandchild_pid)
-        while alive and time.monotonic() < deadline:
-            time.sleep(0.2)
+            deadline = time.monotonic() + 10
             alive = pid_alive(grandchild_pid)
-        assert not alive, "grandchild process survived run_bounded's tree-kill"
+            while alive and time.monotonic() < deadline:
+                time.sleep(0.2)
+                alive = pid_alive(grandchild_pid)
+            assert not alive, "grandchild process survived run_bounded's tree-kill"
+        finally:
+            # Independent safety net (see comment above): force-kill the
+            # grandchild directly by PID if it's still alive, regardless of
+            # the outcome above -- this test must never itself leak a live
+            # process back to the (now-uncontained) suite. Revalidate the
+            # start-time identity token first (agent_worktrees.locks'
+            # PID-reuse-proof mechanism, already used elsewhere in this
+            # module for exactly this class of race): a PID can be reaped
+            # and reused by an unrelated process during the poll window
+            # above, and signaling a bare PID without this check could kill
+            # that unrelated process instead of our own grandchild.
+            if (
+                grandchild_pid is not None
+                and grandchild_start_time is not None
+                and pid_alive(grandchild_pid)
+                and process_start_time(grandchild_pid) == grandchild_start_time
+            ):
+                if platform.system() == "Windows":
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(grandchild_pid)],
+                        capture_output=True, check=False,
+                    )
+                else:
+                    import signal
+                    try:
+                        os.kill(grandchild_pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
 
     def test_kill_tree_kills_root_via_handle(self, monkeypatch):
         """Copilot review finding on PR #4600: the root process must be

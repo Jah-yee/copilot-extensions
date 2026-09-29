@@ -1262,7 +1262,18 @@ function Install-ServerVenv {
        `config.server_venv_python()` already falls back to `$null` (in-process
        `serve()`, or the shared venv for `spawn_passive`) when no sibling
        exists, so a failure here must never block the primary client
-       install/update. #>
+       install/update.
+
+       Prefers a signed base Python via `--copies` (mirroring the main venv's
+       own preference, see `Get-SignedBasePython`'s docstring): the resulting
+       python.exe is BOTH spawnable over a non-interactive SSH logon AND
+       Smart-App-Control-allowed, same rationale as the primary slot. Falls
+       back to `uv venv` (or a bare `python -m venv`) only when no signed base
+       is available. Note this is NOT a latency optimization -- CPython's own
+       Windows venv launcher re-execs the base interpreter as a child process
+       either way (`--copies` and a plain/uv-created venv launcher both do
+       this; confirmed empirically), so preferring the signed base changes
+       SSH/SAC compatibility, not the number of process hops a spawn takes. #>
     param(
         [Parameter(Mandatory)][string]$InstallRole,
         [Parameter(Mandatory)][AllowNull()][string]$PythonCmd
@@ -1282,7 +1293,12 @@ function Install-ServerVenv {
         $signedBase = Get-SignedBasePython
         if ($signedBase) {
             & $signedBase -m venv --copies --clear $serverVenvDir 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0 -and (Test-Path $serverVenvPython)) { $created = $true }
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $serverVenvPython)) {
+                $created = $true
+                Write-Ok "Server venv created from signed Python ($signedBase)"
+            } else {
+                Write-Warn 'Signed-Python server venv creation failed -- falling back to uv'
+            }
         }
         if (-not $created) {
             if (Get-Command uv -ErrorAction SilentlyContinue) {

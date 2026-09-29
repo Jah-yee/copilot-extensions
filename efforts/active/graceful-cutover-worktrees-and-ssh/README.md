@@ -302,10 +302,11 @@ substantial in its own right.
       targeted ephemeral-process hygiene only.
 
 ### Phase 4 — Close the loop in the pattern doc itself
-- [ ] Add `agent-worktrees` and `worktree-manager` rows to
+- [x] Add `agent-worktrees` and `worktree-manager` rows to
       `docs/patterns/graceful-daemon-cutover.md`'s **Per-plugin adoption**
-      table and **Rollout sequencing** list once Phases 1-2 land.
-- [ ] Add an `agent-ssh` row **only if** Phase 3's audit finds a real daemon
+      table, update its **Cross-platform parity** guidance, and extend its
+      **Rollout sequencing** list once Phases 1-2 land.
+- [x] Add an `agent-ssh` row **only if** Phase 3's audit finds a real daemon
       and lands actual cutover work; if the audit instead concludes "no
       cutover needed" (Phase 3's own stated possible outcome), do NOT add a
       row implying adoption — note the audit conclusion in this effort's
@@ -426,6 +427,22 @@ substantial in its own right.
 _Pending._
 
 ## Journal
+
+### 2026-09-29 — Phase 4 documented in the pattern doc
+Closed the Phase 4 docs gap in the canonical pattern itself. Updated
+`docs/patterns/graceful-daemon-cutover.md` so its **Per-plugin adoption** table,
+**Cross-platform parity** guidance, and **Rollout sequencing** list now all
+explicitly reflect the already-landed `agent-worktrees` and `worktree-manager`
+cutover adopters rather than stopping at the earlier `agent-bridge` /
+`agent-dispatch` / `agent-index` set.
+
+Per Phase 3's completed audit, **no `agent-ssh` adoption row was added**. The
+pattern doc remains a list of real cutover adopters only; the "no persistent
+daemon, right-sized ephemeral-process reaping instead" conclusion stays recorded
+in this effort's Phase 3 journal entry rather than creating a misleading
+"non-adopter row" in the pattern doc. The detailed adopter inventory remains in
+`docs/patterns/graceful-daemon-cutover.md`; this effort journal records only
+that the canonical doc was updated and why.
 
 ### 2026-09-29 — Phase 3 audited in `agent-ssh`; no daemon cutover adopted
 Phase 3 closed with the audit-first conclusion the effort's review had already

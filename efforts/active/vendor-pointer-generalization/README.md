@@ -471,8 +471,9 @@ shape before committing to a design)_
                   canonical lib's OWN internal `[tool.uv.sources]` entry
                   for another vendored lib must ALSO carry
                   `editable = true` -- not just consumer-facing entries.
-            - [x] **`plugin-activation`'s re-conversion resolved for 7 of
-                  its consumers, permanently EXCLUDED for the remaining 2**
+            - [x] **`plugin-activation`'s re-conversion resolved for 6 of
+                  its 8 total consumers, blocked for 1, permanently
+                  excluded for 1**
                   (superseding an earlier, inaccurate draft of this
                   sub-item — corrected 2026-09-29 after a reviewer finding
                   caught the drift): `agent-dispatch`, `agent-logger`,

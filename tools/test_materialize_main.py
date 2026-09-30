@@ -1747,3 +1747,30 @@ def test_materialize_installer_engine_ref_into_refuses_an_escaping_reference(tmp
 
     assert any("is not libs/installer-engine/installer-engine.sh" in line for line in log)
     assert not (consumer / "scripts" / "installer-engine.sh").exists()
+
+
+def test_materialize_installer_engine_ref_into_refuses_a_symlinked_canonical_ancestor(
+    tmp_path: Path,
+):
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_engine = outside / "installer-engine"
+    real_engine.mkdir()
+    (real_engine / "installer-engine.sh").write_text("# canonical sh\n", encoding="utf-8")
+    (real_engine / "installer-engine.ps1").write_text("# canonical ps1\n", encoding="utf-8")
+    (root / "libs").mkdir(parents=True)
+    (root / "libs" / "installer-engine").symlink_to(real_engine, target_is_directory=True)
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("is a symlink -- refusing" in line for line in log)
+    assert not (consumer / "scripts" / "installer-engine.sh").exists()

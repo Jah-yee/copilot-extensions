@@ -101,6 +101,10 @@ def _has_escaping_ref(plugin: str) -> bool:
     )
 
 
+def _has_any_ref(plugin: str) -> bool:
+    return bool(ier.plugin_ref_map(_plugin_dir(plugin)))
+
+
 def unregistered_adopters() -> list[str]:
     """Plugins that vendor an installer-engine file but are absent from ``ADOPTERS``.
 
@@ -119,7 +123,7 @@ def unregistered_adopters() -> list[str]:
         if candidate.name not in ADOPTERS
         and (
             any((candidate / "scripts" / name).is_file() for name in FILES)
-            or _has_escaping_ref(candidate.name)
+            or _has_any_ref(candidate.name)
         )
     )
 

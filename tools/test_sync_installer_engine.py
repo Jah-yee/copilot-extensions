@@ -104,6 +104,22 @@ def test_verify_flags_unregistered_adopter_with_a_stray_copy(fake_repo):
     )
 
 
+def test_verify_flags_unregistered_adopter_with_local_ref_and_no_copy(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
+    (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+    (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
+
+    stray_scripts = _mk_plugin_scripts(fake_repo, "agent-unregistered")
+    _write_local_refs(stray_scripts)
+
+    problems = sync_installer_engine.verify()
+
+    assert any(
+        "agent-unregistered" in p and "not listed in ADOPTERS" in p for p in problems
+    )
+
+
 def test_verify_ignores_plugin_with_no_installer_engine_file(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
     _write_local_refs(scripts)

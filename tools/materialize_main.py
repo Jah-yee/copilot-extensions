@@ -689,6 +689,15 @@ def materialize_installer_engine_ref_into(
         ref = ier.find_engine_ref(source_script, ext)
         if ref is None or not ier.ref_escapes_plugin_root(ref, source_consumer_dir):
             continue
+        if canonical_root.is_symlink():
+            log.append(f"SKIP {dest_consumer_dir}: {canonical_root} is a symlink -- refusing")
+            continue
+        canonical_root_r = canonical_root.resolve()
+        canonical_unresolved = canonical_root_r / "libs" / "installer-engine" / ref.file_name
+        bad_ancestor = _find_symlinked_ancestor(canonical_unresolved, canonical_root_r)
+        if bad_ancestor is not None:
+            log.append(f"SKIP {dest_script}: {bad_ancestor} is a symlink -- refusing")
+            continue
         canonical = ier.canonical_file(ext, repo_root=canonical_root)
         if not canonical.is_file():
             log.append(

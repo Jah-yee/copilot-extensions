@@ -116,13 +116,19 @@ def ref_escapes_plugin_root(ref: EngineRef, plugin_dir: Path) -> bool:
 
 
 def is_canonical_ref(ref: EngineRef, plugin_dir: Path, *, repo_root: Path = REPO) -> bool:
-    return ref_escapes_plugin_root(ref, plugin_dir) and ref.resolved() == canonical_file(
-        ref.ext, repo_root=repo_root
-    ).resolve()
+    return (
+        ref.raw_path == canonical_raw_path(ref.ext)
+        and ref_escapes_plugin_root(ref, plugin_dir)
+        and ref.resolved() == canonical_file(ref.ext, repo_root=repo_root).resolve()
+    )
 
 
 def is_local_ref(ref: EngineRef, plugin_dir: Path) -> bool:
-    return (not ref_escapes_plugin_root(ref, plugin_dir)) and ref.resolved() == ref.local_path.resolve()
+    return (
+        ref.raw_path == ref.file_name
+        and (not ref_escapes_plugin_root(ref, plugin_dir))
+        and ref.resolved() == ref.local_path.resolve()
+    )
 
 
 def rewrite_to_local(script_path: Path, ext: str) -> bool:

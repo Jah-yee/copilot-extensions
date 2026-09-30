@@ -1809,3 +1809,25 @@ def test_rewrite_to_local_refuses_duplicate_source_lines(tmp_path: Path):
 
     assert ier.rewrite_to_local(script, "sh") is False
     assert script.read_text(encoding="utf-8").count("../../../libs/installer-engine") == 2
+
+
+def test_materialize_installer_engine_ref_into_skips_malformed_local_reference_for_registered_adopter(
+    tmp_path: Path,
+):
+    root = tmp_path / "repo"
+    engine = root / "libs" / "installer-engine"
+    engine.mkdir(parents=True)
+    (engine / "installer-engine.sh").write_text("# canonical sh\n", encoding="utf-8")
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n. "$SCRIPT_DIR/missing/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("neither the exact local form" in line for line in log)
+    assert not (consumer / "scripts" / "installer-engine.sh").exists()

@@ -687,6 +687,13 @@ def materialize_installer_engine_ref_into(
         source_script = source_consumer_dir / "scripts" / f"install.{ext}"
         dest_script = dest_consumer_dir / "scripts" / f"install.{ext}"
         match_count = ier.source_match_count(source_script, ext)
+        is_registered_adopter = source_consumer_dir.name in ier.ADOPTERS
+        if is_registered_adopter and match_count == 0:
+            log.append(
+                f"SKIP {dest_script}: registered adopter does not source installer-engine "
+                "in this language variant"
+            )
+            continue
         if match_count > 1:
             log.append(
                 f"SKIP {dest_script}: found {match_count} installer-engine source "
@@ -694,7 +701,22 @@ def materialize_installer_engine_ref_into(
             )
             continue
         ref = ier.find_engine_ref(source_script, ext)
-        if ref is None or not ier.ref_escapes_plugin_root(ref, source_consumer_dir):
+        if ref is None:
+            if is_registered_adopter:
+                log.append(
+                    f"SKIP {dest_script}: installer-engine source line is malformed or "
+                    "unrecognized"
+                )
+            continue
+        if not ier.ref_escapes_plugin_root(ref, source_consumer_dir):
+            if is_registered_adopter and not ier.is_local_ref(ref, source_consumer_dir):
+                log.append(
+                    f"SKIP {dest_script}: installer-engine reference {ref.raw_path} "
+                    f"(resolved {ref.resolved()}) is neither the exact local form "
+                    f"{ier.local_line(ext)!r} nor the canonical reference form"
+                )
+            if ier.is_local_ref(ref, source_consumer_dir):
+                continue
             continue
         if canonical_root.is_symlink():
             log.append(f"SKIP {dest_consumer_dir}: {canonical_root} is a symlink -- refusing")

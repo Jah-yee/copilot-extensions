@@ -34,11 +34,11 @@ _CANONICAL_RAW_PATHS = {
 }
 _SOURCE_PATTERNS = {
     "ps1": re.compile(
-        r"""^(?P<indent>\s*)\.\s*\(Join-Path\s+\$PSScriptRoot\s+['"](?P<path>[^'"]*installer-engine\.ps1)['"]\)\s*$""",
+        r"""^(?P<indent>\s*)\.\s*\(Join-Path\s+\$PSScriptRoot\s+['"](?P<path>[^'"]*installer-engine\.ps1)['"]\)\s*(?:#.*)?$""",
         re.MULTILINE,
     ),
     "sh": re.compile(
-        r"""^(?P<indent>\s*)(?:source|\.)\s+["']?\$SCRIPT_DIR/(?P<path>[^"'\s]*installer-engine\.sh)["']?\s*$""",
+        r"""^(?P<indent>\s*)(?:source|\.)\s+["']?\$SCRIPT_DIR/(?P<path>[^"'\s]*installer-engine\.sh)["']?\s*(?:#.*)?$""",
         re.MULTILINE,
     ),
 }
@@ -84,7 +84,11 @@ def canonical_line(ext: str) -> str:
 def source_match_count(script_path: Path, ext: str) -> int:
     if not script_path.is_file():
         return 0
-    return len(list(_SOURCE_PATTERNS[ext].finditer(script_path.read_text(encoding="utf-8"))))
+    return source_match_count_text(script_path.read_text(encoding="utf-8"), ext)
+
+
+def source_match_count_text(text: str, ext: str) -> int:
+    return len(list(_SOURCE_PATTERNS[ext].finditer(text)))
 
 
 def find_engine_ref(script_path: Path, ext: str) -> EngineRef | None:

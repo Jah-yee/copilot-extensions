@@ -8,6 +8,8 @@ confirms, abandons, or keeps waiting.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -117,7 +119,7 @@ def advance_submitted_verifications(
     bus: EventBus | None = None,
     limit: int = 200,
     current_machine: str | None = None,
-    current_env: str = "default",
+    current_env: str | None = None,
 ) -> dict[str, int]:
     """Evaluate every submitted, verification-gated task with a registered evaluator."""
     if current_machine is None:
@@ -164,6 +166,19 @@ def advance_submitted_verifications(
 
             def creator(title: str, **fields: Any) -> dict[str, Any]:
                 proposed = bool(fields.pop("proposed", False))
+                if "dedup_key" not in fields:
+                    stable_emit = json.dumps(
+                        {"task_id": task.id, "title": title, "fields": fields},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                        default=str,
+                    ).encode("utf-8")
+                    fields["dedup_key"] = (
+                        "verification:emit:"
+                        f"{task.id}:"
+                        f"{hashlib.sha256(stable_emit).hexdigest()[:16]}"
+                    )
                 outcome = (
                     queue.propose_outcome(title, **fields)
                     if proposed

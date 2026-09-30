@@ -149,6 +149,40 @@ def test_verification_pass_respects_repo_scoped_registrations(tmp_path):
     assert queue.get(untouched.id).status == Status.SUBMITTED
 
 
+def test_verification_pass_uses_environment_fallback(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'confirm'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    queue.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {
+                "scripts": {"review-loop": [sys.executable, str(script)]}
+            },
+        },
+        machine="lambda-core",
+        env="staging",
+    )
+    task_id = _submitted_task(
+        queue,
+        "staging task",
+        require_verification=True,
+        evaluator_ref="review-loop",
+    )
+
+    monkeypatch.setenv("AGENT_DISPATCH_ENV", "staging")
+    summary = advance_submitted_verifications(queue, current_machine="lambda-core")
+
+    assert summary["matched"] == 1
+    assert queue.get(task_id).status == Status.COMPLETED
+
+
 def test_verification_pass_rotates_past_earlier_noops(tmp_path):
     queue = TaskQueue(tmp_path / "tasks.db")
     script = tmp_path / "eval.py"
@@ -186,3 +220,39 @@ def test_verification_pass_rotates_past_earlier_noops(tmp_path):
     assert queue.list_verification_candidates(limit=3)[0].title in {"first", "second"}
     third = next(task for task in queue.list(status=Status.COMPLETED) if task.title == "third")
     assert third.status == Status.COMPLETED
+
+
+def test_verification_emit_without_dedup_key_stays_idempotent(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'emit', 'title': 'follow-up', 'fields': {}}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    queue.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {
+                "scripts": {"review-loop": [sys.executable, str(script)]}
+            },
+        },
+    )
+    task_id = _submitted_task(
+        queue,
+        "source task",
+        require_verification=True,
+        evaluator_ref="review-loop",
+    )
+
+    first = advance_submitted_verifications(queue)
+    second = advance_submitted_verifications(queue)
+
+    followups = [task for task in queue.list(status=Status.QUEUED) if task.title == "follow-up"]
+    assert first["emitted"] == 1
+    assert second["emitted"] == 1
+    assert len(followups) == 1
+    assert followups[0].dedup_key is not None
+    assert queue.get(task_id).status == Status.SUBMITTED

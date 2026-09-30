@@ -34,11 +34,11 @@ _CANONICAL_RAW_PATHS = {
 }
 _SOURCE_PATTERNS = {
     "ps1": re.compile(
-        r"""^(?P<indent>\s*)\.\s*\(Join-Path\s+\$PSScriptRoot\s+['"](?P<path>[^'"]*installer-engine\.ps1)['"]\)\s*(?:#.*)?$""",
+        r"""^(?P<indent>[ \t]*)\.[ \t]*\(Join-Path[ \t]+\$PSScriptRoot[ \t]+['"](?P<path>[^'"]*installer-engine\.ps1)['"]\)[ \t]*(?:#.*)?$""",
         re.MULTILINE,
     ),
     "sh": re.compile(
-        r"""^(?P<indent>\s*)(?:source|\.)\s+["']?\$SCRIPT_DIR/(?P<path>[^"'\s]*installer-engine\.sh)["']?\s*(?:#.*)?$""",
+        r"""^(?P<indent>[ \t]*)(?:source|\.)[ \t]+["']?\$SCRIPT_DIR/(?P<path>[^"'\s]*installer-engine\.sh)["']?[ \t]*(?:#.*)?$""",
         re.MULTILINE,
     ),
 }

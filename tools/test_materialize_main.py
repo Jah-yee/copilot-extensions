@@ -1811,6 +1811,32 @@ def test_rewrite_to_local_refuses_duplicate_source_lines(tmp_path: Path):
     assert script.read_text(encoding="utf-8").count("../../../libs/installer-engine") == 2
 
 
+def test_rewrite_to_local_preserves_following_comment_lines(tmp_path: Path):
+    sh_script = tmp_path / "install.sh"
+    sh_script.write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n'
+        "# keep me\n",
+        encoding="utf-8",
+    )
+    ps1_script = tmp_path / "install.ps1"
+    ps1_script.write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1')\n"
+        "# keep me\n",
+        encoding="utf-8",
+    )
+
+    assert ier.rewrite_to_local(sh_script, "sh") is True
+    assert ier.rewrite_to_local(ps1_script, "ps1") is True
+    assert sh_script.read_text(encoding="utf-8").splitlines() == [
+        '. "$SCRIPT_DIR/installer-engine.sh"',
+        "# keep me",
+    ]
+    assert ps1_script.read_text(encoding="utf-8").splitlines() == [
+        ". (Join-Path $PSScriptRoot 'installer-engine.ps1')",
+        "# keep me",
+    ]
+
+
 def test_materialize_installer_engine_ref_into_skips_malformed_local_reference_for_registered_adopter(
     tmp_path: Path,
 ):
@@ -1831,3 +1857,39 @@ def test_materialize_installer_engine_ref_into_skips_malformed_local_reference_f
 
     assert any("neither the exact local form" in line for line in log)
     assert not (consumer / "scripts" / "installer-engine.sh").exists()
+
+
+def test_materialize_installer_engine_ref_into_preserves_following_comment_lines(tmp_path: Path):
+    root = tmp_path / "repo"
+    engine = root / "libs" / "installer-engine"
+    engine.mkdir(parents=True)
+    (engine / "installer-engine.sh").write_text("# canonical sh\n", encoding="utf-8")
+    (engine / "installer-engine.ps1").write_text("# canonical ps1\n", encoding="utf-8")
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n'
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n'
+        "# keep me\n",
+        encoding="utf-8",
+    )
+    (consumer / "scripts" / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1')\n"
+        "# keep me\n",
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert sum(1 for line in log if line.startswith("OK")) == 2
+    assert (consumer / "scripts" / "install.sh").read_text(encoding="utf-8").splitlines() == [
+        "#!/usr/bin/env bash",
+        '. "$SCRIPT_DIR/installer-engine.sh"',
+        "# keep me",
+    ]
+    assert (consumer / "scripts" / "install.ps1").read_text(encoding="utf-8").splitlines() == [
+        ". (Join-Path $PSScriptRoot 'installer-engine.ps1')",
+        "# keep me",
+    ]

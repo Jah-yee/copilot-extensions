@@ -3361,7 +3361,7 @@ class Supervisor:
         try:
             terminal = self.client.list(
                 repo=self.repo,
-                status=[Status.SUBMITTED, Status.ABANDONED],
+                status=[Status.SUBMITTED, Status.COMPLETED, Status.ABANDONED],
                 evaluator_ref=self.evaluator_ref or "",
                 limit=self.evaluate_limit,
             )
@@ -3384,7 +3384,10 @@ class Supervisor:
             if status == Status.SUBMITTED and task.get("require_verification"):
                 continue
             event_type = "task.abandoned" if status == Status.ABANDONED else "task.submitted"
-            event = {"type": event_type, "task": task}
+            event_task = dict(task)
+            if status == Status.COMPLETED and not task.get("require_verification"):
+                event_task["status"] = Status.SUBMITTED
+            event = {"type": event_type, "task": event_task}
             try:
                 decisions = self.evaluator.evaluate(event)
                 results = apply_decisions(

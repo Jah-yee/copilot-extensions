@@ -44,6 +44,7 @@ EVENT_ABANDONED = "task.abandoned"
 EVENT_PROGRESS = "task.progress"
 
 log = logging.getLogger("agent-dispatch.evaluator")
+MAX_SCRIPT_EVALUATOR_TIMEOUT = 1800.0
 
 
 class EvaluatorError(ValueError):
@@ -363,6 +364,10 @@ class ScriptEvaluatorRegistry:
             raise EvaluatorError("'timeout_seconds' must be a number > 0") from exc
         if timeout_seconds <= 0:
             raise EvaluatorError("'timeout_seconds' must be > 0")
+        if timeout_seconds > MAX_SCRIPT_EVALUATOR_TIMEOUT:
+            raise EvaluatorError(
+                f"'timeout_seconds' must be <= {MAX_SCRIPT_EVALUATOR_TIMEOUT:g}"
+            )
         scripts = spec.get("scripts")
         if not isinstance(scripts, dict):
             raise EvaluatorError("script evaluator registry requires a 'scripts' object")

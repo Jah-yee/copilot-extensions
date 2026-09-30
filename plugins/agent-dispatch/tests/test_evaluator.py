@@ -43,6 +43,16 @@ def test_decision_decoder_rejects_unknown_keys():
         ev.decision_from_dict({"decision": "emit", "title": "x", "field": {}})
 
 
+def test_script_registry_rejects_timeouts_longer_than_verification_lease():
+    with pytest.raises(ev.EvaluatorError, match="timeout_seconds"):
+        ev.ScriptEvaluatorRegistry.from_spec(
+            {
+                "scripts": {"review-loop": ["python3", "x.py"]},
+                "timeout_seconds": ev.MAX_SCRIPT_EVALUATOR_TIMEOUT + 1,
+            }
+        )
+
+
 # -- matching ----------------------------------------------------------------
 
 

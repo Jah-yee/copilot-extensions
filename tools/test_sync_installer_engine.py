@@ -149,6 +149,42 @@ def test_verify_flags_an_escaping_noncanonical_reference(fake_repo):
     assert any("which is not libs/installer-engine/installer-engine.sh" in p for p in problems)
 
 
+def test_verify_rejects_malformed_local_reference_even_when_copies_exist(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot 'missing/installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/missing/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+    (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+    (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
+
+    problems = sync_installer_engine.verify()
+
+    assert any("neither" in p and "installer-engine.sh" in p for p in problems)
+    assert any("neither" in p and "installer-engine.ps1" in p for p in problems)
+
+
+def test_verify_rejects_mixed_local_and_canonical_forms(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot 'installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+    (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+
+    problems = sync_installer_engine.verify()
+
+    assert any("mixes installer-engine forms" in p for p in problems)
+
+
 def test_verify_flags_duplicate_engine_source_lines(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
     (scripts / "install.sh").write_text(

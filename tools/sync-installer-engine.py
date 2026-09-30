@@ -58,46 +58,103 @@ def _plugin_dir(plugin: str) -> Path:
     return REPO / "plugins" / plugin
 
 
-def _canonical_ref_problems(plugin: str) -> list[str]:
-    """Validity problems for a plugin using the dev-time canonical reference."""
+def _ref_state(plugin: str, ext: str) -> tuple[str, str | None]:
+    """Return the install-script state for one language variant.
+
+    States:
+    - ``none``: no installer-engine source line
+    - ``duplicate``: more than one source line
+    - ``canonical``: exact canonical-reference form
+    - ``local``: exact byte-vendored local-reference form
+    - ``malformed``: exactly one source line, but neither exact valid form
+    """
     plugin_dir = _plugin_dir(plugin)
+    script_path = plugin_dir / "scripts" / f"install.{ext}"
+    match_count = ier.source_match_count(script_path, ext)
+    if match_count == 0:
+        return ("none", f"plugins/{plugin}/scripts/install.{ext} does not source installer-engine")
+    if match_count > 1:
+        return (
+            "duplicate",
+            f"plugins/{plugin}/scripts/install.{ext} contains {match_count} "
+            "installer-engine source lines; expected exactly one",
+        )
+    ref = ier.find_engine_ref(script_path, ext)
+    if ref is None:
+        return (
+            "malformed",
+            f"plugins/{plugin}/scripts/install.{ext} does not contain exactly one "
+            "recognized installer-engine source line",
+        )
+    if ier.is_canonical_ref(ref, plugin_dir, repo_root=REPO):
+        return ("canonical", None)
+    if ier.is_local_ref(ref, plugin_dir):
+        return ("local", None)
+    return (
+        "malformed",
+        f"plugins/{plugin}/scripts/install.{ext} references {ref.raw_path} "
+        f"(resolved {ref.resolved()}) which is neither {ier.local_line(ext)!r} "
+        f"nor {ier.canonical_line(ext)!r}",
+    )
+
+
+def _adopter_problems(plugin: str) -> list[str]:
+    """Validate a registered adopter as exactly one complete form."""
     problems: list[str] = []
+    states: dict[str, str] = {}
     for ext in ("ps1", "sh"):
-        script_path = plugin_dir / "scripts" / f"install.{ext}"
-        match_count = ier.source_match_count(script_path, ext)
-        if match_count > 1:
-            problems.append(
-                f"plugins/{plugin}/scripts/install.{ext} contains {match_count} "
-                "installer-engine source lines; expected exactly one"
-            )
-            continue
-        ref = ier.find_engine_ref(script_path, ext)
-        if ref is None:
-            problems.append(f"plugins/{plugin}/scripts/install.{ext} does not source installer-engine")
-            continue
-        if not ier.ref_escapes_plugin_root(ref, plugin_dir):
-            problems.append(
-                f"plugins/{plugin}/scripts/install.{ext} still sources a plugin-local "
-                f"{ref.file_name}; canonical-reference adopters must remove the local copy on dev"
-            )
-            continue
-        canonical = ier.canonical_file(ext, repo_root=REPO)
-        if not canonical.is_file():
-            problems.append(f"canonical source missing: {canonical.relative_to(REPO)}")
-        elif ref.resolved() != canonical.resolve():
-            problems.append(
-                f"plugins/{plugin}/scripts/install.{ext} references {ref.raw_path} "
-                f"(resolved {ref.resolved()}) which is not {canonical.relative_to(REPO)}"
-            )
+        state, problem = _ref_state(plugin, ext)
+        states[ext] = state
+        if problem is not None:
+            problems.append(problem)
+    if problems:
+        return problems
+
+    if len(set(states.values())) != 1:
+        problems.append(
+            f"plugins/{plugin} mixes installer-engine forms across install.ps1/install.sh: "
+            f"ps1={states['ps1']}, sh={states['sh']}"
+        )
+        return problems
+
+    mode = states["ps1"]
+    plugin_dir = _plugin_dir(plugin)
+    if mode == "canonical":
+        for ext in ("ps1", "sh"):
+            canonical = ier.canonical_file(ext, repo_root=REPO)
+            if not canonical.is_file():
+                problems.append(f"canonical source missing: {canonical.relative_to(REPO)}")
+            destination = plugin_dir / "scripts" / f"installer-engine.{ext}"
+            if destination.exists() or destination.is_symlink():
+                problems.append(
+                    f"{destination.relative_to(REPO).as_posix()} should not exist in dev once "
+                    f"{plugin} uses the canonical reference"
+                )
+        return problems
+
+    if mode == "local":
+        for ext in ("ps1", "sh"):
+            source = ier.canonical_file(ext, repo_root=REPO)
+            destination = plugin_dir / "scripts" / f"installer-engine.{ext}"
+            relative = destination.relative_to(REPO).as_posix()
+            if not source.is_file():
+                problems.append(f"canonical source missing: {source.relative_to(REPO)}")
+            elif not destination.is_file():
+                problems.append(f"{relative} is missing")
+            elif destination.read_bytes() != source.read_bytes():
+                problems.append(f"{relative} differs from {source.relative_to(REPO)}")
+            elif os.name != "nt" and stat.S_IMODE(destination.stat().st_mode) != stat.S_IMODE(
+                source.stat().st_mode
+            ):
+                problems.append(f"{relative} mode differs from {source.relative_to(REPO)}")
+        return problems
+
+    problems.append(f"plugins/{plugin} is in unexpected installer-engine state: {mode}")
     return problems
 
 
 def _uses_canonical_ref(plugin: str) -> bool:
-    plugin_dir = _plugin_dir(plugin)
-    refs = ier.plugin_ref_map(plugin_dir)
-    return bool(refs) and all(
-        ref is not None and ier.is_canonical_ref(ref, plugin_dir) for ref in refs.values()
-    )
+    return _ref_state(plugin, "ps1")[0] == "canonical" and _ref_state(plugin, "sh")[0] == "canonical"
 
 
 def _has_escaping_ref(plugin: str) -> bool:
@@ -141,48 +198,26 @@ def unregistered_adopters() -> list[str]:
 
 def verify() -> list[str]:
     problems: list[str] = []
-    canonical_ref_plugins = {
-        plugin for plugin in ADOPTERS if _has_escaping_ref(plugin)
-    }
     for plugin in unregistered_adopters():
         problems.append(
             f"plugins/{plugin} uses installer-engine but is not listed in "
             "ADOPTERS, so the tool does not track its expected dev-time form"
         )
-    for plugin in canonical_ref_plugins:
-        problems.extend(_canonical_ref_problems(plugin))
-        for name in FILES:
-            destination = REPO / "plugins" / plugin / "scripts" / name
-            relative = destination.relative_to(REPO).as_posix()
-            if destination.exists() or destination.is_symlink():
-                problems.append(
-                    f"{relative} should not exist in dev once {plugin} uses the canonical reference"
-                )
-    for source, destination in vendor_pairs():
-        plugin = destination.parts[-3]
-        if plugin in canonical_ref_plugins:
-            continue
-        relative = destination.relative_to(REPO).as_posix()
-        if not source.is_file():
-            problems.append(f"canonical source missing: {source.relative_to(REPO)}")
-        elif not destination.is_file():
-            problems.append(f"{relative} is missing")
-        elif destination.read_bytes() != source.read_bytes():
-            problems.append(f"{relative} differs from {source.relative_to(REPO)}")
-        elif os.name != "nt" and stat.S_IMODE(destination.stat().st_mode) != stat.S_IMODE(
-            source.stat().st_mode
-        ):
-            problems.append(f"{relative} mode differs from {source.relative_to(REPO)}")
+    for plugin in ADOPTERS:
+        problems.extend(_adopter_problems(plugin))
     return problems
 
 
 def sync() -> list[str]:
     written: list[str] = []
-    canonical_ref_plugins = {
-        plugin for plugin in ADOPTERS if _has_escaping_ref(plugin) and not _canonical_ref_problems(plugin)
-    }
     for plugin in ADOPTERS:
-        if plugin in canonical_ref_plugins:
+        adopter_problems = _adopter_problems(plugin)
+        if adopter_problems:
+            raise RuntimeError(
+                "installer-engine adopter is not in a complete recognized form:\n  - "
+                + "\n  - ".join(adopter_problems)
+            )
+        if _uses_canonical_ref(plugin):
             for name in FILES:
                 destination = REPO / "plugins" / plugin / "scripts" / name
                 if destination.exists() or destination.is_symlink():

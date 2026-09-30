@@ -206,6 +206,7 @@ class Task:
     lease_expires_at: float | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
+    verification_checked_at: float | None = None
     claimed_at: float | None = None
     started_at: float | None = None
     completed_at: float | None = None
@@ -267,6 +268,11 @@ class Task:
             lease_expires_at=row["lease_expires_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            verification_checked_at=(
+                row["verification_checked_at"]
+                if "verification_checked_at" in columns
+                else None
+            ),
             claimed_at=row["claimed_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],
@@ -419,6 +425,7 @@ _COLUMNS: dict[str, str] = {
     "lease_expires_at": "REAL",
     "created_at": "REAL NOT NULL DEFAULT 0",
     "updated_at": "REAL NOT NULL DEFAULT 0",
+    "verification_checked_at": "REAL",
     "claimed_at": "REAL",
     "started_at": "REAL",
     "completed_at": "REAL",

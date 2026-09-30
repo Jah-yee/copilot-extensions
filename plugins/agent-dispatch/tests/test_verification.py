@@ -142,8 +142,47 @@ def test_verification_pass_respects_repo_scoped_registrations(tmp_path):
     queue.start(untouched.id, "worker-1")
     queue.complete(untouched.id, "worker-1")
 
-    summary = advance_submitted_verifications(queue)
+    summary = advance_submitted_verifications(queue, current_machine="lambda-core")
 
     assert summary["checked"] == 1
     assert summary["matched"] == 0
     assert queue.get(untouched.id).status == Status.SUBMITTED
+
+
+def test_verification_pass_rotates_past_earlier_noops(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "title = json.load(sys.stdin)['task']['title']\n"
+        "decision = {'decision': 'confirm'} if title == 'third' else {'decision': 'noop'}\n"
+        "json.dump(decision, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    queue.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {
+                "scripts": {"review-loop": [sys.executable, str(script)]}
+            },
+        },
+    )
+    for title in ("first", "second", "third"):
+        tid = _submitted_task(
+            queue,
+            title,
+            require_verification=True,
+            evaluator_ref="review-loop",
+        )
+        assert queue.get(tid).status == Status.SUBMITTED
+
+    first = advance_submitted_verifications(queue, limit=2)
+    second = advance_submitted_verifications(queue, limit=2)
+
+    assert first["matched"] == 2
+    assert second["matched"] == 2
+    assert queue.list_verification_candidates(limit=3)[0].title in {"first", "second"}
+    third = next(task for task in queue.list(status=Status.COMPLETED) if task.title == "third")
+    assert third.status == Status.COMPLETED

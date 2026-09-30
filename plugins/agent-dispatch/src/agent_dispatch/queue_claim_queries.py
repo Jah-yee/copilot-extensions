@@ -309,10 +309,18 @@ class QueueClaimQueriesMixin:
             rows = conn.execute(
                 f"SELECT {_TASK_BULK_SELECT} FROM tasks "
                 "WHERE status = ? AND require_verification = 1 AND evaluator_ref IS NOT NULL "
-                "ORDER BY updated_at ASC LIMIT ?",
+                "ORDER BY COALESCE(verification_checked_at, 0) ASC, updated_at ASC LIMIT ?",
                 (Status.SUBMITTED, limit),
             ).fetchall()
         return [Task._from_row(r) for r in rows]
+
+    def mark_verification_checked(self, task_id: str, *, now: float | None = None) -> None:
+        """Record that ``task_id`` was considered by the verification pass."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET verification_checked_at = ? WHERE id = ?",
+                (self._now(now), task_id),
+            )
 
     def find(self, text: str, *, repo: str | None = None, limit: int = 50) -> list[Task]:
         """Substring search over title/prompt."""

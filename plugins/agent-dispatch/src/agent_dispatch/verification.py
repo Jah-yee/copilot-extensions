@@ -14,6 +14,7 @@ from typing import Any
 
 from . import telemetry
 from .events import EventBus
+from . import remote_dispatch
 from .producers.evaluator import (
     EvaluatorError,
     apply_decisions,
@@ -41,12 +42,21 @@ def _publish(bus: EventBus | None, event_type: str, task: dict[str, Any]) -> Non
     telemetry.emit(telemetry.task_lifecycle_event(event_type, event_task))
 
 
-def _active_evaluators(queue: TaskQueue) -> list[tuple[dict[str, Any], Any]]:
+def _active_evaluators(
+    queue: TaskQueue,
+    *,
+    current_machine: str | None,
+    current_env: str,
+) -> list[tuple[dict[str, Any], Any]]:
     registry: list[tuple[dict[str, Any], Any]] = []
     for record in queue.list_registrations(
         kind=RegistrationKind.EVALUATOR,
         include_paused=False,
     ):
+        if record.machine not in (None, current_machine):
+            continue
+        if str(record.env or "default") != current_env:
+            continue
         spec = record.spec or {}
         evaluator_ref = spec.get("evaluator_ref")
         if not isinstance(evaluator_ref, str) or not evaluator_ref:
@@ -105,9 +115,17 @@ def advance_submitted_verifications(
     *,
     bus: EventBus | None = None,
     limit: int = 200,
+    current_machine: str | None = None,
+    current_env: str = "default",
 ) -> dict[str, int]:
     """Evaluate every submitted, verification-gated task with a registered evaluator."""
-    registrations = _active_evaluators(queue)
+    if current_machine is None:
+        current_machine = remote_dispatch.local_machine()
+    registrations = _active_evaluators(
+        queue,
+        current_machine=current_machine,
+        current_env=current_env,
+    )
     summary = {
         "checked": 0,
         "matched": 0,
@@ -127,49 +145,54 @@ def advance_submitted_verifications(
             repo=task.repo,
             evaluator_ref=evaluator_ref,
         )
-        if evaluator is None:
-            continue
-        summary["matched"] += 1
-        event = {"type": "task.submitted", "task": asdict(task)}
-
-        def creator(title: str, **fields: Any) -> dict[str, Any]:
-            proposed = bool(fields.pop("proposed", False))
-            outcome = (
-                queue.propose_outcome(title, **fields)
-                if proposed
-                else queue.create_outcome(title, **fields)
-            )
-            created = asdict(outcome.task)
-            if outcome.event_type is not None:
-                _publish(bus, outcome.event_type, created)
-            return created
-
-        def confirmer(task_id: str, *, actor: str | None = None, **_kwargs: Any) -> dict[str, Any]:
-            current = queue.get(task_id)
-            if current is not None and current.status == Status.COMPLETED:
-                return asdict(current)
-            confirmed = asdict(queue.confirm(task_id, actor=actor))
-            _publish(bus, "task.completed", confirmed)
-            return confirmed
-
-        def abandoner(
-            task_id: str,
-            *,
-            reason: str | None = None,
-            **_kwargs: Any,
-        ) -> dict[str, Any]:
-            outcome = queue.abandon_with_outcome(
-                task_id,
-                permitted=True,
-                reason=reason,
-                expected_status=Status.SUBMITTED,
-            )
-            abandoned = asdict(outcome.task)
-            if outcome.event_type is not None:
-                _publish(bus, outcome.event_type, abandoned)
-            return abandoned
-
         try:
+            if evaluator is None:
+                continue
+            summary["matched"] += 1
+            event = {"type": "task.submitted", "task": asdict(task)}
+
+            def creator(title: str, **fields: Any) -> dict[str, Any]:
+                proposed = bool(fields.pop("proposed", False))
+                outcome = (
+                    queue.propose_outcome(title, **fields)
+                    if proposed
+                    else queue.create_outcome(title, **fields)
+                )
+                created = asdict(outcome.task)
+                if outcome.event_type is not None:
+                    _publish(bus, outcome.event_type, created)
+                return created
+
+            def confirmer(
+                task_id: str,
+                *,
+                actor: str | None = None,
+                **_kwargs: Any,
+            ) -> dict[str, Any]:
+                current = queue.get(task_id)
+                if current is not None and current.status == Status.COMPLETED:
+                    return asdict(current)
+                confirmed = asdict(queue.confirm(task_id, actor=actor))
+                _publish(bus, "task.completed", confirmed)
+                return confirmed
+
+            def abandoner(
+                task_id: str,
+                *,
+                reason: str | None = None,
+                **_kwargs: Any,
+            ) -> dict[str, Any]:
+                outcome = queue.abandon_with_outcome(
+                    task_id,
+                    permitted=True,
+                    reason=reason,
+                    expected_status=Status.SUBMITTED,
+                )
+                abandoned = asdict(outcome.task)
+                if outcome.event_type is not None:
+                    _publish(bus, outcome.event_type, abandoned)
+                return abandoned
+
             results = apply_decisions(
                 evaluator.evaluate(event),
                 creator=creator,
@@ -185,6 +208,8 @@ def advance_submitted_verifications(
                 task.evaluator_ref,
             )
             continue
+        finally:
+            queue.mark_verification_checked(task.id)
         for result in results:
             match result.get("decision"):
                 case "emit":

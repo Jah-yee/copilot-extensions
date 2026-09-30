@@ -9,6 +9,7 @@ confirms, abandons, or keeps waiting.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import asdict
 from typing import Any
 
@@ -121,6 +122,7 @@ def advance_submitted_verifications(
     """Evaluate every submitted, verification-gated task with a registered evaluator."""
     if current_machine is None:
         current_machine = remote_dispatch.local_machine()
+    current_env = current_env or os.environ.get("AGENT_DISPATCH_ENV") or "default"
     registrations = _active_evaluators(
         queue,
         current_machine=current_machine,
@@ -137,7 +139,16 @@ def advance_submitted_verifications(
     if not registrations:
         return summary
 
-    for task in queue.list_verification_candidates(limit=limit):
+    seen_task_ids: set[str] = set()
+    for _ in range(limit):
+        claim = queue.claim_verification_candidate()
+        if claim is None:
+            break
+        task, claim_token = claim
+        if task.id in seen_task_ids:
+            queue.release_verification_claim(task.id, claim_token)
+            break
+        seen_task_ids.add(task.id)
         summary["checked"] += 1
         evaluator_ref = task.evaluator_ref or ""
         evaluator = _evaluator_for_task(
@@ -209,7 +220,7 @@ def advance_submitted_verifications(
             )
             continue
         finally:
-            queue.mark_verification_checked(task.id)
+            queue.release_verification_claim(task.id, claim_token)
         for result in results:
             match result.get("decision"):
                 case "emit":

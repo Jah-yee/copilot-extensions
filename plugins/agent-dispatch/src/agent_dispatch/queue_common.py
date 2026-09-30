@@ -426,6 +426,8 @@ _COLUMNS: dict[str, str] = {
     "created_at": "REAL NOT NULL DEFAULT 0",
     "updated_at": "REAL NOT NULL DEFAULT 0",
     "verification_checked_at": "REAL",
+    "verification_claim_token": "TEXT",
+    "verification_claim_expires_at": "REAL",
     "claimed_at": "REAL",
     "started_at": "REAL",
     "completed_at": "REAL",

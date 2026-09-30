@@ -3381,6 +3381,8 @@ class Supervisor:
                 continue
             self._evaluated.add(tid)  # fire once per process, success or not
             status = task.get("status")
+            if status == Status.SUBMITTED and task.get("require_verification"):
+                continue
             event_type = "task.abandoned" if status == Status.ABANDONED else "task.submitted"
             event = {"type": event_type, "task": task}
             try:
@@ -3391,6 +3393,12 @@ class Supervisor:
                     repo=self.repo,
                     task_id=tid,
                     confirmer=self.client.confirm,
+                    abandoner=lambda task_id, **kwargs: self.client.abandon(
+                        task_id,
+                        permitted=True,
+                        reason=kwargs.get("reason"),
+                        expected_status=Status.SUBMITTED,
+                    ),
                 )
             except Exception:  # a domain evaluator/create must never crash the loop
                 log.exception("evaluator pass: advancing task %s failed", tid)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 from collections.abc import Iterable, Sequence
 
@@ -320,6 +321,54 @@ class QueueClaimQueriesMixin:
             conn.execute(
                 "UPDATE tasks SET verification_checked_at = ? WHERE id = ?",
                 (self._now(now), task_id),
+            )
+
+    def claim_verification_candidate(
+        self,
+        *,
+        now: float | None = None,
+        lease_seconds: float = 300.0,
+    ) -> tuple[Task, str] | None:
+        """Atomically reserve one submitted verification candidate."""
+        ts = self._now(now)
+        token = secrets.token_urlsafe(18)
+        expires_at = ts + max(1.0, float(lease_seconds))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"SELECT {_TASK_BULK_SELECT} FROM tasks "
+                "WHERE status = ? AND require_verification = 1 AND evaluator_ref IS NOT NULL "
+                "AND (verification_claim_expires_at IS NULL OR verification_claim_expires_at <= ?) "
+                "ORDER BY COALESCE(verification_checked_at, 0) ASC, updated_at ASC LIMIT 1",
+                (Status.SUBMITTED, ts),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            claimed = conn.execute(
+                "UPDATE tasks SET verification_checked_at = ?, "
+                "verification_claim_token = ?, verification_claim_expires_at = ? "
+                "WHERE id = ? AND status = ? AND require_verification = 1 "
+                "AND evaluator_ref IS NOT NULL "
+                "AND (verification_claim_expires_at IS NULL OR verification_claim_expires_at <= ?)",
+                (ts, token, expires_at, row["id"], Status.SUBMITTED, ts),
+            )
+            if claimed.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return None
+            task = self._fetch(conn, row["id"])
+            conn.execute("COMMIT")
+        assert task is not None
+        return task, token
+
+    def release_verification_claim(self, task_id: str, token: str) -> None:
+        """Release a verification reservation when this pass finishes."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET verification_claim_token = NULL, "
+                "verification_claim_expires_at = NULL "
+                "WHERE id = ? AND verification_claim_token = ?",
+                (task_id, token),
             )
 
     def find(self, text: str, *, repo: str | None = None, limit: int = 50) -> list[Task]:

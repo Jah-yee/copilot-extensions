@@ -1675,3 +1675,75 @@ def test_materialize_nested_uv_editable_refs_refuses_stale_mismatched_content(tm
     assert any("does not match canonical" in line for line in log), log
     # The stale content is untouched, not silently overwritten.
     assert (stale_dir / "__init__.py").read_text() == "stale = True\n"
+
+
+def test_materialize_installer_engine_ref_into_copies_and_rewrites(tmp_path: Path):
+    root = tmp_path / "repo"
+    engine = root / "libs" / "installer-engine"
+    engine.mkdir(parents=True)
+    (engine / "installer-engine.sh").write_text("# canonical sh\n", encoding="utf-8")
+    (engine / "installer-engine.ps1").write_text("# canonical ps1\n", encoding="utf-8")
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+    (consumer / "scripts" / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert sum(1 for line in log if line.startswith("OK")) == 2
+    assert (consumer / "scripts" / "installer-engine.sh").read_text() == "# canonical sh\n"
+    assert (consumer / "scripts" / "installer-engine.ps1").read_text() == "# canonical ps1\n"
+    assert (consumer / "scripts" / "install.sh").read_text(encoding="utf-8").splitlines() == [
+        "#!/usr/bin/env bash",
+        '. "$SCRIPT_DIR/installer-engine.sh"',
+    ]
+    assert (consumer / "scripts" / "install.ps1").read_text(encoding="utf-8").splitlines() == [
+        ". (Join-Path $PSScriptRoot 'installer-engine.ps1')"
+    ]
+
+
+def test_materialize_installer_engine_ref_into_reports_missing_canonical(tmp_path: Path):
+    root = tmp_path / "repo"
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("canonical source missing" in line for line in log)
+    assert not (consumer / "scripts" / "installer-engine.sh").exists()
+
+
+def test_materialize_installer_engine_ref_into_refuses_an_escaping_reference(tmp_path: Path):
+    root = tmp_path / "repo"
+    engine = root / "libs" / "installer-engine"
+    engine.mkdir(parents=True)
+    (engine / "installer-engine.sh").write_text("# canonical sh\n", encoding="utf-8")
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n. "$SCRIPT_DIR/../../../outside/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+    (root / "outside").mkdir()
+    (root / "outside" / "installer-engine.sh").write_text("# nope\n", encoding="utf-8")
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("is not libs/installer-engine/installer-engine.sh" in line for line in log)
+    assert not (consumer / "scripts" / "installer-engine.sh").exists()

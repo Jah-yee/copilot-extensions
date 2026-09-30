@@ -1,0 +1,9 @@
+{
+  "comment": "Switch installer-engine to canonical dev reference",
+  "changes": [
+    {
+      "plugin": "agent-pull-requests",
+      "type": "patch"
+    }
+  ]
+}

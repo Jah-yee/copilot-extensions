@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Vendor the canonical installer-engine files into opted-in adopter plugins.
+"""Keep installer-engine adopters consistent with canonical.
 
 The installer engine is a **vendored** source surface, not a runtime
 cross-plugin dependency: every adopting plugin ships its own byte-identical
 copy under ``scripts/installer-engine.*`` because marketplace plugins are
 installed independently. The canonical sources live under
-``libs/installer-engine/`` and this tool keeps adopters in sync.
+``libs/installer-engine/``.
+
+Adopters can now exist in one of two valid dev-time forms:
+
+* the older byte-vendored copy under ``scripts/installer-engine.*``; or
+* the Phase-2 canonical-reference form, where ``install.sh``/``install.ps1``
+  source ``libs/installer-engine/installer-engine.{sh,ps1}`` directly and no
+  plugin-local copy exists on ``dev`` at all.
+
+This tool's ``--check`` verifies both forms correctly. Its write mode keeps
+vendored adopters byte-identical and removes stale local copies from
+canonical-reference adopters.
 
 Usage::
 
@@ -21,12 +32,15 @@ import stat
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-CANONICAL_DIR = REPO / "libs" / "installer-engine"
-FILES = ("installer-engine.ps1", "installer-engine.sh")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import installer_engine_ref as ier
+
+REPO = ier.REPO
+CANONICAL_DIR = ier.CANONICAL_DIR
+FILES = ier.FILES
 # Add future adopters here as later rollout phases land. The list stays explicit
 # so the canonical engine can migrate one plugin at a time.
-ADOPTERS = ("agent-pull-requests",)
+ADOPTERS = ier.ADOPTERS
 
 
 def vendor_pairs() -> list[tuple[Path, Path]]:
@@ -38,6 +52,53 @@ def vendor_pairs() -> list[tuple[Path, Path]]:
         for plugin in ADOPTERS
         for name in FILES
     ]
+
+
+def _plugin_dir(plugin: str) -> Path:
+    return REPO / "plugins" / plugin
+
+
+def _canonical_ref_problems(plugin: str) -> list[str]:
+    """Validity problems for a plugin using the dev-time canonical reference."""
+    plugin_dir = _plugin_dir(plugin)
+    refs = ier.plugin_ref_map(plugin_dir)
+    problems: list[str] = []
+    for ext in ("ps1", "sh"):
+        ref = refs.get(ext)
+        if ref is None:
+            problems.append(f"plugins/{plugin}/scripts/install.{ext} does not source installer-engine")
+            continue
+        if not ier.ref_escapes_plugin_root(ref, plugin_dir):
+            problems.append(
+                f"plugins/{plugin}/scripts/install.{ext} still sources a plugin-local "
+                f"{ref.file_name}; canonical-reference adopters must remove the local copy on dev"
+            )
+            continue
+        canonical = ier.canonical_file(ext, repo_root=REPO)
+        if not canonical.is_file():
+            problems.append(f"canonical source missing: {canonical.relative_to(REPO)}")
+        elif ref.resolved() != canonical.resolve():
+            problems.append(
+                f"plugins/{plugin}/scripts/install.{ext} references {ref.raw_path} "
+                f"(resolved {ref.resolved()}) which is not {canonical.relative_to(REPO)}"
+            )
+    return problems
+
+
+def _uses_canonical_ref(plugin: str) -> bool:
+    plugin_dir = _plugin_dir(plugin)
+    refs = ier.plugin_ref_map(plugin_dir)
+    return bool(refs) and all(
+        ref is not None and ier.is_canonical_ref(ref, plugin_dir) for ref in refs.values()
+    )
+
+
+def _has_escaping_ref(plugin: str) -> bool:
+    plugin_dir = _plugin_dir(plugin)
+    return any(
+        ier.ref_escapes_plugin_root(ref, plugin_dir)
+        for ref in ier.plugin_ref_map(plugin_dir).values()
+    )
 
 
 def unregistered_adopters() -> list[str]:
@@ -56,18 +117,36 @@ def unregistered_adopters() -> list[str]:
         candidate.name
         for candidate in plugins_root.iterdir()
         if candidate.name not in ADOPTERS
-        and any((candidate / "scripts" / name).is_file() for name in FILES)
+        and (
+            any((candidate / "scripts" / name).is_file() for name in FILES)
+            or _has_escaping_ref(candidate.name)
+        )
     )
 
 
 def verify() -> list[str]:
     problems: list[str] = []
+    canonical_ref_plugins = {
+        plugin for plugin in ADOPTERS if _has_escaping_ref(plugin)
+    }
     for plugin in unregistered_adopters():
         problems.append(
-            f"plugins/{plugin} vendors an installer-engine file but is not "
-            "listed in ADOPTERS, so its copy never receives canonical updates"
+            f"plugins/{plugin} uses installer-engine but is not listed in "
+            "ADOPTERS, so the tool does not track its expected dev-time form"
         )
+    for plugin in canonical_ref_plugins:
+        problems.extend(_canonical_ref_problems(plugin))
+        for name in FILES:
+            destination = REPO / "plugins" / plugin / "scripts" / name
+            relative = destination.relative_to(REPO).as_posix()
+            if destination.exists() or destination.is_symlink():
+                problems.append(
+                    f"{relative} should not exist in dev once {plugin} uses the canonical reference"
+                )
     for source, destination in vendor_pairs():
+        plugin = destination.parts[-3]
+        if plugin in canonical_ref_plugins:
+            continue
         relative = destination.relative_to(REPO).as_posix()
         if not source.is_file():
             problems.append(f"canonical source missing: {source.relative_to(REPO)}")
@@ -84,22 +163,35 @@ def verify() -> list[str]:
 
 def sync() -> list[str]:
     written: list[str] = []
-    for source, destination in vendor_pairs():
-        if not source.is_file():
-            raise FileNotFoundError(f"canonical source missing: {source}")
-        content_matches = destination.is_file() and destination.read_bytes() == source.read_bytes()
-        mode_matches = destination.is_file() and (
-            os.name == "nt"
-            or stat.S_IMODE(destination.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)
-        )
-        if content_matches and mode_matches:
+    canonical_ref_plugins = {
+        plugin for plugin in ADOPTERS if _has_escaping_ref(plugin) and not _canonical_ref_problems(plugin)
+    }
+    for plugin in ADOPTERS:
+        if plugin in canonical_ref_plugins:
+            for name in FILES:
+                destination = REPO / "plugins" / plugin / "scripts" / name
+                if destination.exists() or destination.is_symlink():
+                    destination.unlink()
+                    written.append(f"removed {destination.relative_to(REPO).as_posix()}")
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not content_matches:
-            shutil.copyfile(source, destination)
-        if os.name != "nt":
-            shutil.copymode(source, destination)
-        written.append(destination.relative_to(REPO).as_posix())
+        for name in FILES:
+            source = CANONICAL_DIR / name
+            destination = REPO / "plugins" / plugin / "scripts" / name
+            if not source.is_file():
+                raise FileNotFoundError(f"canonical source missing: {source}")
+            content_matches = destination.is_file() and destination.read_bytes() == source.read_bytes()
+            mode_matches = destination.is_file() and (
+                os.name == "nt"
+                or stat.S_IMODE(destination.stat().st_mode) == stat.S_IMODE(source.stat().st_mode)
+            )
+            if content_matches and mode_matches:
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not content_matches:
+                shutil.copyfile(source, destination)
+            if os.name != "nt":
+                shutil.copymode(source, destination)
+            written.append(destination.relative_to(REPO).as_posix())
     return written
 
 

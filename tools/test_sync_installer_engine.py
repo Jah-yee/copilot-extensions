@@ -33,16 +33,47 @@ def _mk_plugin_scripts(repo: Path, name: str) -> Path:
     return scripts
 
 
+def _write_canonical_refs(scripts: Path) -> None:
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+
+def _write_local_refs(scripts: Path) -> None:
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot 'installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+
 def test_verify_passes_when_adopter_is_byte_identical(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
     (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
     (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
 
     assert sync_installer_engine.verify() == []
 
 
+def test_verify_accepts_a_canonical_reference_with_no_local_copy(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_canonical_refs(scripts)
+
+    assert sync_installer_engine.verify() == []
+
+
 def test_verify_flags_drifted_registered_adopter(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
     (scripts / "installer-engine.ps1").write_text("drifted content\n", encoding="utf-8")
     (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
 
@@ -59,6 +90,7 @@ def test_verify_flags_missing_registered_adopter(fake_repo):
 def test_verify_flags_unregistered_adopter_with_a_stray_copy(fake_repo):
     # The registered adopter is in sync...
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
     (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
     (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
     # ...but a second plugin has its own copy without being added to ADOPTERS.
@@ -74,8 +106,28 @@ def test_verify_flags_unregistered_adopter_with_a_stray_copy(fake_repo):
 
 def test_verify_ignores_plugin_with_no_installer_engine_file(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
     (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
     (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
     _mk_plugin_scripts(fake_repo, "agent-unrelated")
 
     assert sync_installer_engine.verify() == []
+
+
+def test_verify_flags_an_escaping_noncanonical_reference(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/../../../outside/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+    outside = fake_repo / "outside"
+    outside.mkdir()
+    (outside / "installer-engine.sh").write_text("nope\n", encoding="utf-8")
+
+    problems = sync_installer_engine.verify()
+
+    assert any("which is not libs/installer-engine/installer-engine.sh" in p for p in problems)

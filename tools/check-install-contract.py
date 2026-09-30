@@ -257,13 +257,16 @@ def _uses_installer_engine(text: str, ext: str) -> bool:
     if ext == "ps1":
         return any(
             re.search(
-                r"""\.\s*\(Join-Path\s+\$PSScriptRoot\s+['"]installer-engine\.ps1['"]\)""",
+                r"""\.\s*\(Join-Path\s+\$PSScriptRoot\s+['"][^'"]*installer-engine\.ps1['"]\)""",
                 line,
             )
             for line in _non_comment_lines(text)
         )
     return any(
-        re.search(r"""(?:^|\s)(?:source|\.)\s+["']?\$SCRIPT_DIR/installer-engine\.sh["']?""", line)
+        re.search(
+            r"""(?:^|\s)(?:source|\.)\s+["']?\$SCRIPT_DIR/[^"'\s]*installer-engine\.sh["']?""",
+            line,
+        )
         for line in _non_comment_lines(text)
     )
 

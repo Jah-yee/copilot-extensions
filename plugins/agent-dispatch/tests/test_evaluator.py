@@ -38,6 +38,11 @@ def test_load_evaluator_rejects_mixed_rules_and_scripts():
         ev.load_evaluator({"rules": [], "scripts": {"review-loop": ["python3", "x.py"]}})
 
 
+def test_decision_decoder_rejects_unknown_keys():
+    with pytest.raises(ev.EvaluatorError, match="unknown key"):
+        ev.decision_from_dict({"decision": "emit", "title": "x", "field": {}})
+
+
 # -- matching ----------------------------------------------------------------
 
 

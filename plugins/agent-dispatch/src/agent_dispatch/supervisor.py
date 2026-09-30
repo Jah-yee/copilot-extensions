@@ -3395,6 +3395,7 @@ class Supervisor:
                     confirmer=self.client.confirm,
                     abandoner=lambda task_id, **kwargs: self.client.abandon(
                         task_id,
+                        worker_id=kwargs.get("actor"),
                         permitted=True,
                         reason=kwargs.get("reason"),
                         expected_status=Status.SUBMITTED,

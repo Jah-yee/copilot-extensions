@@ -205,11 +205,13 @@ def advance_submitted_verifications(
             def abandoner(
                 task_id: str,
                 *,
+                actor: str | None = None,
                 reason: str | None = None,
                 **_kwargs: Any,
             ) -> dict[str, Any]:
                 outcome = queue.abandon_with_outcome(
                     task_id,
+                    worker_id=actor,
                     permitted=True,
                     reason=reason,
                     expected_status=Status.SUBMITTED,

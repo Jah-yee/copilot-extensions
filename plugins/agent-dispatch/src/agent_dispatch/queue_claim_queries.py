@@ -327,7 +327,7 @@ class QueueClaimQueriesMixin:
         self,
         *,
         now: float | None = None,
-        lease_seconds: float = 300.0,
+        lease_seconds: float = 3600.0,
     ) -> tuple[Task, str] | None:
         """Atomically reserve one submitted verification candidate."""
         ts = self._now(now)

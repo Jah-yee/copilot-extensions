@@ -234,6 +234,9 @@ def decision_from_dict(value: object) -> Decision:
         raise EvaluatorError("script evaluator output must be a JSON object")
     decision = value.get("decision")
     if decision == "emit":
+        extra = sorted(set(value) - {"decision", "title", "fields"})
+        if extra:
+            raise EvaluatorError(f"emit decision has unknown key(s): {extra}")
         title = value.get("title")
         fields = value.get("fields", {})
         if not isinstance(title, str) or not title:
@@ -242,16 +245,25 @@ def decision_from_dict(value: object) -> Decision:
             raise EvaluatorError("emit decision 'fields' must be an object")
         return Emit(title=title, fields=dict(fields))
     if decision == "noop":
+        extra = sorted(set(value) - {"decision", "reason"})
+        if extra:
+            raise EvaluatorError(f"noop decision has unknown key(s): {extra}")
         reason = value.get("reason")
         if reason is not None and not isinstance(reason, str):
             raise EvaluatorError("noop decision 'reason' must be a string")
         return NoOp(reason=reason)
     if decision == "confirm":
+        extra = sorted(set(value) - {"decision", "reason"})
+        if extra:
+            raise EvaluatorError(f"confirm decision has unknown key(s): {extra}")
         reason = value.get("reason")
         if reason is not None and not isinstance(reason, str):
             raise EvaluatorError("confirm decision 'reason' must be a string")
         return Confirm(reason=reason)
     if decision == "abandon":
+        extra = sorted(set(value) - {"decision", "reason"})
+        if extra:
+            raise EvaluatorError(f"abandon decision has unknown key(s): {extra}")
         reason = value.get("reason")
         if reason is not None and not isinstance(reason, str):
             raise EvaluatorError("abandon decision 'reason' must be a string")

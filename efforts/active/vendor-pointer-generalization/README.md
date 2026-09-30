@@ -640,14 +640,18 @@ shape before committing to a design)_
       `src-passthrough` lacked.
 
 ### Phase 2 — Canonical-reference form for the shared installer engine
-> **Note (2026-09-27, updated):** libs' mechanism pivoted away to
+> **Status note (2026-09-30, updated):** libs' mechanism pivoted away to
 > `src-passthrough` on 2026-09-26, then reverted back to `uv`-editable on
 > 2026-09-27 (see both "course correction" Journal entries) — Phase 2's
 > live-reference idea (this phase's own corollary of the SAME mechanism)
-> is therefore valid again, though it still hasn't been formally executed
-> or re-confirmed against the current libs design. Revisit and confirm
-> before executing this phase, rather than assuming it's settled purely
-> because libs' mechanism happens to match again.
+> is therefore valid again. That evaluation has now been formally executed
+> for the proof adopter `agent-pull-requests`: the operator-approved
+> cross-effort decision is recorded in both effort Journals below, the
+> canonical-reference + promotion-materialize-back mechanism is implemented,
+> and the Phase 2 checklist items for materialize/preview/check-contract
+> support are complete. Future resumptions should treat Phase 2 as
+> demonstrated on the proof adopter, with only later adopter rollouts still
+> remaining.
 - [x] **Scope correction (from review, still holds): this applies only to
       `vendored-installer-engine`'s shared engine files**
       (`scripts/installer-engine.{sh,ps1}`), never to a whole plugin's

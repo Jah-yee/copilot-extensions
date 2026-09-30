@@ -185,6 +185,22 @@ def test_verify_rejects_mixed_local_and_canonical_forms(fake_repo):
     assert any("mixes installer-engine forms" in p for p in problems)
 
 
+def test_verify_rejects_symlinked_canonical_engine(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_canonical_refs(scripts)
+    real = fake_repo / "outside"
+    real.mkdir()
+    (real / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+    (real / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
+    for name in ("installer-engine.ps1", "installer-engine.sh"):
+        (fake_repo / "libs" / "installer-engine" / name).unlink()
+        (fake_repo / "libs" / "installer-engine" / name).symlink_to(real / name)
+
+    problems = sync_installer_engine.verify()
+
+    assert any("is a symlink -- refusing" in p for p in problems)
+
+
 def test_verify_flags_duplicate_engine_source_lines(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
     (scripts / "install.sh").write_text(

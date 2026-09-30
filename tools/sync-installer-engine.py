@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import installer_engine_ref as ier
+import uv_editable_ref as uer
 
 REPO = ier.REPO
 CANONICAL_DIR = ier.CANONICAL_DIR
@@ -152,6 +153,10 @@ def _canonical_copy_problems(plugin: str) -> list[str]:
     plugin_dir = _plugin_dir(plugin)
     for ext in ("ps1", "sh"):
         canonical = ier.canonical_file(ext, repo_root=REPO)
+        bad_ancestor = uer._find_symlinked_ancestor(canonical, REPO.resolve())
+        if bad_ancestor is not None:
+            problems.append(f"{bad_ancestor} is a symlink -- refusing")
+            continue
         if not canonical.is_file():
             problems.append(f"canonical source missing: {canonical.relative_to(REPO)}")
         destination = plugin_dir / "scripts" / f"installer-engine.{ext}"

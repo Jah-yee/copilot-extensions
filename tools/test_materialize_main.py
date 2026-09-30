@@ -1837,6 +1837,28 @@ def test_rewrite_to_local_preserves_following_comment_lines(tmp_path: Path):
     ]
 
 
+def test_rewrite_to_local_preserves_trailing_same_line_comments(tmp_path: Path):
+    sh_script = tmp_path / "install.sh"
+    sh_script.write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh" # keep me\n',
+        encoding="utf-8",
+    )
+    ps1_script = tmp_path / "install.ps1"
+    ps1_script.write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1') # keep me\n",
+        encoding="utf-8",
+    )
+
+    assert ier.rewrite_to_local(sh_script, "sh") is True
+    assert ier.rewrite_to_local(ps1_script, "ps1") is True
+    assert sh_script.read_text(encoding="utf-8").splitlines() == [
+        '. "$SCRIPT_DIR/installer-engine.sh" # keep me'
+    ]
+    assert ps1_script.read_text(encoding="utf-8").splitlines() == [
+        ". (Join-Path $PSScriptRoot 'installer-engine.ps1') # keep me"
+    ]
+
+
 def test_materialize_installer_engine_ref_into_skips_malformed_local_reference_for_registered_adopter(
     tmp_path: Path,
 ):

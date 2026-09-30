@@ -34,11 +34,11 @@ _CANONICAL_RAW_PATHS = {
 }
 _SOURCE_PATTERNS = {
     "ps1": re.compile(
-        r"""^(?P<indent>[ \t]*)\.[ \t]*\(Join-Path[ \t]+\$PSScriptRoot[ \t]+['"](?P<path>[^'"]*installer-engine\.ps1)['"]\)[ \t]*(?:#.*)?$""",
+        r"""^(?P<indent>[ \t]*)\.[ \t]*\(Join-Path[ \t]+\$PSScriptRoot[ \t]+(?P<quote>['"])(?P<path>[^'"]*installer-engine\.ps1)(?P=quote)\)(?P<suffix>[ \t]*(?:#.*)?)$""",
         re.MULTILINE,
     ),
     "sh": re.compile(
-        r"""^(?P<indent>[ \t]*)(?:source|\.)[ \t]+["']?\$SCRIPT_DIR/(?P<path>[^"'\s]*installer-engine\.sh)["']?[ \t]*(?:#.*)?$""",
+        r"""^(?P<indent>[ \t]*)(?:source|\.)[ \t]+(?P<quote>["']?)\$SCRIPT_DIR/(?P<path>[^"'\s]*installer-engine\.sh)(?P=quote)(?P<suffix>[ \t]*(?:#.*)?)$""",
         re.MULTILINE,
     ),
 }
@@ -138,7 +138,8 @@ def rewrite_to_local(script_path: Path, ext: str) -> bool:
         return False
     replacement = local_line(ext)
     rewritten, count = _SOURCE_PATTERNS[ext].subn(
-        lambda match: f"{match.group('indent')}{replacement}",
+        lambda match: f"{match.group('indent')}{replacement}"
+        f"{match.group('suffix')}",
         text,
         count=1,
     )

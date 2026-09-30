@@ -210,6 +210,22 @@ def test_verify_rejects_normalized_local_reference_with_missing_intermediate(fak
     assert any("neither" in p and "missing\\..\\installer-engine.ps1" in p for p in problems)
 
 
+def test_verify_rejects_mismatched_powershell_quotes(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1\")\n",
+        encoding="utf-8",
+    )
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+    problems = sync_installer_engine.verify()
+
+    assert any("does not source installer-engine" in p for p in problems)
+
+
 def test_verify_rejects_mixed_local_and_canonical_forms(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
     (scripts / "install.ps1").write_text(

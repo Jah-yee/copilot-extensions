@@ -665,8 +665,9 @@ shape before committing to a design)_
       in `dev`) matches libs' own current mechanism again as of the second
       course correction above. Left `[x]` for the underlying dot-source-
       preservation ANALYSIS (still holds regardless of which pointer
-      mechanism is in play) — but this phase itself has NOT been formally
-      executed or re-confirmed; do not treat this as "Phase 2 is done."
+      mechanism is in play) — and that premise is now concretely exercised
+      by the proof-adopter execution recorded below, not an unexecuted
+      caution against treating Phase 2 as already demonstrated.
 - [x] At promotion, `materialize_main.py` (extended the same way as the
       libs case) rewrites that `source`/`.` line to reference (or fully
       inline) a freshly-copied-in local `scripts/installer-engine.{sh,ps1}`

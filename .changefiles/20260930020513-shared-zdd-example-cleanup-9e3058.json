@@ -1,0 +1,13 @@
+{
+  "comment": "Shared zdd example cleanup",
+  "changes": [
+    {
+      "plugin": "agent-index",
+      "type": "patch"
+    },
+    {
+      "plugin": "agent-vault",
+      "type": "patch"
+    }
+  ]
+}

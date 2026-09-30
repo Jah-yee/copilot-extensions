@@ -524,8 +524,8 @@ async def _verification_loop(
             continue
         counts = await run_supervised_cycle(
             health,
-            lambda: advance_submitted_verifications(queue, bus=bus),
-            cycle_timeout=cycle_timeout or min(interval, 120.0),
+            lambda: advance_submitted_verifications(queue, bus=bus, limit=25),
+            cycle_timeout=cycle_timeout or 900.0,
         )
         counts = counts or {}
         if counts.get("confirmed") or counts.get("abandoned") or counts.get("emitted"):

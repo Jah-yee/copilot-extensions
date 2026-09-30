@@ -33,6 +33,11 @@ def test_spec_requires_rules_list():
         ev.SpecEvaluator({"rules": "nope"})
 
 
+def test_load_evaluator_rejects_mixed_rules_and_scripts():
+    with pytest.raises(ev.EvaluatorError, match="both 'rules' and 'scripts'"):
+        ev.load_evaluator({"rules": [], "scripts": {"review-loop": ["python3", "x.py"]}})
+
+
 # -- matching ----------------------------------------------------------------
 
 

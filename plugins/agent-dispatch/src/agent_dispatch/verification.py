@@ -41,9 +41,8 @@ def _publish(bus: EventBus | None, event_type: str, task: dict[str, Any]) -> Non
     telemetry.emit(telemetry.task_lifecycle_event(event_type, event_task))
 
 
-def _active_evaluators(queue: TaskQueue) -> dict[str, Any]:
-    registry: dict[str, Any] = {}
-    duplicates: set[str] = set()
+def _active_evaluators(queue: TaskQueue) -> list[tuple[dict[str, Any], Any]]:
+    registry: list[tuple[dict[str, Any], Any]] = []
     for record in queue.list_registrations(
         kind=RegistrationKind.EVALUATOR,
         include_paused=False,
@@ -62,17 +61,43 @@ def _active_evaluators(queue: TaskQueue) -> dict[str, Any]:
                 exc,
             )
             continue
-        if evaluator_ref in registry:
-            duplicates.add(evaluator_ref)
-            registry.pop(evaluator_ref, None)
+        registry.append((spec, loaded))
+    return registry
+
+
+def _evaluator_for_task(
+    registrations: list[tuple[dict[str, Any], Any]],
+    *,
+    repo: str | None,
+    evaluator_ref: str,
+) -> Any | None:
+    exact: list[Any] = []
+    global_matches: list[Any] = []
+    for spec, loaded in registrations:
+        if spec.get("evaluator_ref") != evaluator_ref:
             continue
-        registry[evaluator_ref] = loaded
-    for evaluator_ref in sorted(duplicates):
+        if spec.get("all_repos"):
+            global_matches.append(loaded)
+            continue
+        if spec.get("repo") == repo:
+            exact.append(loaded)
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
         log.warning(
-            "skipping verification for evaluator_ref %s: multiple active evaluator registrations",
+            "skipping verification for evaluator_ref %s in repo %s: multiple repo-scoped registrations",
+            evaluator_ref,
+            repo,
+        )
+        return None
+    if len(global_matches) == 1:
+        return global_matches[0]
+    if len(global_matches) > 1:
+        log.warning(
+            "skipping verification for evaluator_ref %s: multiple all-repos registrations",
             evaluator_ref,
         )
-    return registry
+    return None
 
 
 def advance_submitted_verifications(
@@ -82,7 +107,7 @@ def advance_submitted_verifications(
     limit: int = 200,
 ) -> dict[str, int]:
     """Evaluate every submitted, verification-gated task with a registered evaluator."""
-    evaluators = _active_evaluators(queue)
+    registrations = _active_evaluators(queue)
     summary = {
         "checked": 0,
         "matched": 0,
@@ -91,12 +116,17 @@ def advance_submitted_verifications(
         "abandoned": 0,
         "noop": 0,
     }
-    if not evaluators:
+    if not registrations:
         return summary
 
     for task in queue.list_verification_candidates(limit=limit):
         summary["checked"] += 1
-        evaluator = evaluators.get(task.evaluator_ref or "")
+        evaluator_ref = task.evaluator_ref or ""
+        evaluator = _evaluator_for_task(
+            registrations,
+            repo=task.repo,
+            evaluator_ref=evaluator_ref,
+        )
         if evaluator is None:
             continue
         summary["matched"] += 1

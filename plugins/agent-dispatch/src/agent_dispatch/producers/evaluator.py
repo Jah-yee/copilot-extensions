@@ -380,6 +380,8 @@ def load_evaluator(
     runner: Callable[..., Any] = subprocess.run,
 ) -> Any:
     """Load a declarative or trusted-script evaluator from JSON spec data."""
+    if "rules" in spec and "scripts" in spec:
+        raise EvaluatorError("evaluator spec cannot define both 'rules' and 'scripts'")
     if "rules" in spec:
         return SpecEvaluator(spec)
     registry = ScriptEvaluatorRegistry.from_spec(spec)

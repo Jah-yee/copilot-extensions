@@ -111,3 +111,39 @@ def test_verification_pass_applies_confirm_abandon_and_leaves_others_alone(tmp_p
         "task.completed",
         "task.abandoned",
     ]
+
+
+def test_verification_pass_respects_repo_scoped_registrations(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'confirm'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    queue.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {
+                "scripts": {"review-loop": [sys.executable, str(script)]}
+            },
+        },
+    )
+    other_repo = "example.com/other/project"
+    untouched = queue.create(
+        "other repo",
+        repo=other_repo,
+        require_verification=True,
+        evaluator_ref="review-loop",
+    )
+    queue.claim_one("worker-1", repo=other_repo, task_id=untouched.id)
+    queue.start(untouched.id, "worker-1")
+    queue.complete(untouched.id, "worker-1")
+
+    summary = advance_submitted_verifications(queue)
+
+    assert summary["checked"] == 1
+    assert summary["matched"] == 0
+    assert queue.get(untouched.id).status == Status.SUBMITTED

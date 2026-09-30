@@ -435,16 +435,17 @@ class QueueStorageMixin:
             pre_exclusive_fields = dict(request_fields)
             pre_exclusive_fields.pop("exclusive_key")
             compatible_request_hashes.add(self._producer_request_hash(pre_exclusive_fields))
-            legacy_verification_fields = dict(request_fields)
-            legacy_verification_fields.pop("require_verification")
-            compatible_request_hashes.add(
-                self._producer_request_hash(legacy_verification_fields)
-            )
-            legacy_verification_pre_exclusive = dict(legacy_verification_fields)
-            legacy_verification_pre_exclusive.pop("exclusive_key")
-            compatible_request_hashes.add(
-                self._producer_request_hash(legacy_verification_pre_exclusive)
-            )
+            if not require_verification:
+                legacy_verification_fields = dict(request_fields)
+                legacy_verification_fields.pop("require_verification")
+                compatible_request_hashes.add(
+                    self._producer_request_hash(legacy_verification_fields)
+                )
+                legacy_verification_pre_exclusive = dict(legacy_verification_fields)
+                legacy_verification_pre_exclusive.pop("exclusive_key")
+                compatible_request_hashes.add(
+                    self._producer_request_hash(legacy_verification_pre_exclusive)
+                )
             raw_requires = sorted(set(requires or ()))
             raw_excludes = sorted(set(excludes or ()))
             if (
@@ -457,16 +458,17 @@ class QueueStorageMixin:
                 compatible_request_hashes.add(self._producer_request_hash(legacy_fields))
                 legacy_fields.pop("exclusive_key")
                 compatible_request_hashes.add(self._producer_request_hash(legacy_fields))
-                legacy_fields_no_verification = dict(legacy_verification_fields)
-                legacy_fields_no_verification["requires"] = raw_requires
-                legacy_fields_no_verification["excludes"] = raw_excludes
-                compatible_request_hashes.add(
-                    self._producer_request_hash(legacy_fields_no_verification)
-                )
-                legacy_fields_no_verification.pop("exclusive_key")
-                compatible_request_hashes.add(
-                    self._producer_request_hash(legacy_fields_no_verification)
-                )
+                if not require_verification:
+                    legacy_fields_no_verification = dict(legacy_verification_fields)
+                    legacy_fields_no_verification["requires"] = raw_requires
+                    legacy_fields_no_verification["excludes"] = raw_excludes
+                    compatible_request_hashes.add(
+                        self._producer_request_hash(legacy_fields_no_verification)
+                    )
+                    legacy_fields_no_verification.pop("exclusive_key")
+                    compatible_request_hashes.add(
+                        self._producer_request_hash(legacy_fields_no_verification)
+                    )
         ts = self._now(now)
         task_id = uuid.uuid4().hex
         spill_content = (

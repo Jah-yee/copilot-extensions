@@ -82,6 +82,7 @@ class CreateBody(BaseModel):
     source: str | None = None
     origin_ref: str | None = None
     evaluator_ref: str | None = None
+    require_verification: bool = False
     dedup_key: str | None = None
     producer_scope: ProducerScopeBody | None = None
     producer_id: str | None = None
@@ -315,7 +316,7 @@ def register_task_routes(
             msg = str(exc)
             status = 404 if msg.startswith("no such task") else 409
             raise HTTPException(status_code=status, detail=msg) from exc
-        if event_type in ("task.submitted", "task.abandoned"):
+        if event_type in ("task.submitted", "task.completed", "task.abandoned"):
             # A shared terminal-transition hook: every caller that reaches a
             # genuine (not idempotent-retry) completion or an abandon funnels
             # through this same _guard, whether over HTTP (the CLI's own

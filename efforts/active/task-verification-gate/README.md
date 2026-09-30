@@ -127,13 +127,13 @@ Design decisions locked via follow-up (2026-09-29):
 ## Plan
 
 ### Phase 1 -- `require_verification` flag + state-machine gating
-- [ ] Add `require_verification BOOLEAN NOT NULL DEFAULT 0` to `tasks`
+- [x] Add `require_verification BOOLEAN NOT NULL DEFAULT 0` to `tasks`
       (schema migration). **Every existing row defaults to `false`** --
       this migration alone does *not* opt any historical task into
       verification; see Phase 2's explicit backfill note.
-- [ ] `create`/`propose` CLI + API accept `--require-verification` /
+- [x] `create`/`propose` CLI + API accept `--require-verification` /
       `require_verification` kwarg.
-- [ ] `complete()` behavior, reconciled with *verify-the-completion-claim*'s
+- [x] `complete()` behavior, reconciled with *verify-the-completion-claim*'s
       existing self-tracked-task language rather than contradicting it:
       today `complete()` always lands a task at `SUBMITTED`
       (`plugins/agent-dispatch/tests/test_queue.py`) and requires a
@@ -147,26 +147,26 @@ Design decisions locked via follow-up (2026-09-29):
       lands at `SUBMITTED` only; an explicit `confirm()`/`abandon()`
       (evaluator or manual) is required to leave that state, and no
       auto-attestation ever happens.
-- [ ] **Revise `visions/plugins/agent-dispatch/README.md`'s
+- [x] **Revise `visions/plugins/agent-dispatch/README.md`'s
       *verify-the-completion-claim* section** to name this explicit
       `require_verification` flag and its two paths, rather than leaving
       the self-tracked-task path implicit prose only -- this is a
       vision-extending change (new stated intent), not a silent
       reinterpretation.
-- [ ] Recipe/producer-level default inheritance: a producer (e.g. a
+- [x] Recipe/producer-level default inheritance: a producer (e.g. a
       `repository-issue-loop`/`reviewer-loop` recipe declaration) may set a
       default `require_verification` for every task it creates, so a caller
       doesn't need to pass the flag on every dispatch.
-- [ ] Tests: state-machine transition tests for both flag values; schema
+- [x] Tests: state-machine transition tests for both flag values; schema
       migration test (confirms the default is `false` and no existing
       behavior for unflagged tasks changes); CLI flag tests.
 
 ### Phase 2 -- Generalized evaluator invocation
-- [ ] _(agent-recommended, necessary to satisfy the request)_ Add an
+- [x] _(agent-recommended, necessary to satisfy the request)_ Add an
       **`Abandon`** decision type to `producers/evaluator.py` (parallel to
       the existing `Confirm`), and wire it through `apply_decisions`
       (`abandoner` callable, `client.abandon`-shaped).
-- [ ] _(agent-recommended)_ Add a **command/script evaluator kind**
+- [x] _(agent-recommended)_ Add a **command/script evaluator kind**
       alongside the existing declarative `SpecEvaluator`, matching the
       operator's own "a task itself may be assigned to a script, not an
       agent" precedent -- with an explicit safety boundary: `evaluator_ref`
@@ -180,7 +180,7 @@ Design decisions locked via follow-up (2026-09-29):
       strict schema before applying any decision. Design the interface so a
       *future* agent-backed evaluator is a drop-in third kind, without
       over-building that future today.
-- [ ] The coordinator runs every **`SUBMITTED` task that has both
+- [x] The coordinator runs every **`SUBMITTED` task that has both
       `require_verification=true` and a registered `evaluator_ref`**
       through that evaluator on a bounded interval (not just at the
       `task.submitted` transition) -- scoped strictly to `SUBMITTED`
@@ -194,7 +194,7 @@ Design decisions locked via follow-up (2026-09-29):
       specific rows a consumer wants reconciled -- a consumer's own
       concern, not something this repo's mechanism performs automatically
       on any task that was never flagged).
-- [ ] Tests: script-evaluator invocation (stdin/stdout contract, timeout,
+- [x] Tests: script-evaluator invocation (stdin/stdout contract, timeout,
       malformed-output handling, no-shell/fixed-argv enforcement), interval
       scoping (never touches non-`SUBMITTED` or unflagged tasks), `Abandon`
       decision end-to-end.
@@ -215,20 +215,20 @@ Design decisions locked via follow-up (2026-09-29):
 
 ## Validation Plan
 
-- [ ] Full `agent-dispatch` plugin suite green
+- [x] Full `agent-dispatch` plugin suite green
       (`test-supervisor -- python3 tools/run-plugin-tests.py agent-dispatch`).
-- [ ] A `require_verification=false` task's `complete()` still reaches
+- [x] A `require_verification=false` task's `complete()` still reaches
       `COMPLETED` in one call, unchanged from today's *external* behavior
       (internally it now also performs the self-attested corroboration
       step explicitly, per Phase 1's vision reconciliation).
-- [ ] A `require_verification=true` task's `complete()` lands at
+- [x] A `require_verification=true` task's `complete()` lands at
       `SUBMITTED` only, and stays there until an evaluator or manual action
       resolves it.
-- [ ] A registered script evaluator is invoked, via its trusted
+- [x] A registered script evaluator is invoked, via its trusted
       registration (never via caller-supplied `evaluator_ref` content), for
       a `require_verification` `SUBMITTED` task, and its
       `Confirm`/`Abandon`/`NoOp` decision is applied correctly.
-- [ ] The recurring interval never touches a `queued`/`claimed`/`started`
+- [x] The recurring interval never touches a `queued`/`claimed`/`started`
       task, and never touches a task with `require_verification=false` or
       no registered evaluator -- confirmed by a fixture covering all four
       cases (fresh-open target left alone; a target that merged ->
@@ -269,3 +269,24 @@ _Pending review._
   split into distinct fixture cases), a broken sidecar reference (removed;
   the verbatim Request above is short enough to keep inline), and a wrong
   doc path in Phase 4 (fixed).
+
+### 2026-09-29 -- Phase 1-2 implemented
+- Landed the `require_verification` queue flag end to end: additive migration,
+  task snapshot/storage plumbing, create/propose CLI + HTTP/MCP surfaces,
+  remote-dispatch passthrough, and the split `complete()` behavior
+  (self-attested immediate completion by default; explicit `submitted`
+  waiting state only when flagged).
+- Added producer/recipe inheritance points so a trusted declaration can stamp
+  `require_verification` by default without every caller remembering the flag:
+  recipes, command emitters, and repository-issue-loop tasks all propagate it.
+- Added the generalized evaluator runtime: `Abandon` decisions, a trusted
+  script-evaluator registry/loader, strict JSON decision validation, and
+  fail-closed `NoOp` handling for malformed output, non-zero exit, or timeout.
+- Added the coordinator-side recurring verification loop
+  (`AGENT_DISPATCH_VERIFICATION_INTERVAL`) that revisits only
+  `submitted` + `require_verification=true` + evaluator-bound tasks, applies
+  confirm/abandon/noop decisions, and deliberately leaves unflagged/legacy rows
+  untouched.
+- Covered the new behavior with queue, evaluator, recipe, repository-issue,
+  MCP, remote-dispatch, and supervisor tests. Phase 3's Tasks-pivot manual
+  override and Phase 4's README/cross-link follow-ups remain open by design.

@@ -19,6 +19,7 @@ from .events import EventBus
 from .loop_governance import LoopGovernance
 from .procutil import run_agent_worktrees_capture
 from .queue import Status, Task, TaskQueue, machine_matches
+from .verification import advance_submitted_verifications
 from .worktree_status_relay import WorktreeStatusRelayStore
 
 log = logging.getLogger("agent-dispatch.coordinator")
@@ -493,6 +494,48 @@ async def _orphan_reap_loop(
                 reaped,
             )
             bus.publish({"type": "task.reaped", "reaped": reaped})
+
+
+async def _verification_loop(
+    queue: TaskQueue,
+    interval: float,
+    bus: EventBus,
+    *,
+    health: LoopHealth,
+    cycle_timeout: float | None = None,
+    governance: LoopGovernance | None = None,
+    run_supervised_cycle: Callable[..., Any] = _run_supervised_cycle,
+    governance_backoff: Callable[..., Any] = _governance_backoff,
+) -> None:
+    """Periodically evaluate submitted verification-gated tasks."""
+    while True:
+        await asyncio.sleep(health.current_interval)
+        if await governance_backoff(
+            governance,
+            "iteration-boundary:verification",
+            loop_name="verification",
+        ):
+            continue
+        if await governance_backoff(
+            governance,
+            "pre-mutation:verification",
+            loop_name="verification",
+        ):
+            continue
+        counts = await run_supervised_cycle(
+            health,
+            lambda: advance_submitted_verifications(queue, bus=bus),
+            cycle_timeout=cycle_timeout or min(interval, 120.0),
+        )
+        counts = counts or {}
+        if counts.get("confirmed") or counts.get("abandoned") or counts.get("emitted"):
+            log.info(
+                "verification pass checked %d task(s): %d confirmed, %d abandoned, %d emitted",
+                counts.get("matched", 0),
+                counts.get("confirmed", 0),
+                counts.get("abandoned", 0),
+                counts.get("emitted", 0),
+            )
 
 
 def _local_machine_name() -> str | None:

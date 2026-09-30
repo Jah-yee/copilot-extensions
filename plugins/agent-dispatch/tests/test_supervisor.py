@@ -7637,6 +7637,7 @@ _REVIEWER_DONE_RULE = {
 
 
 def _complete(q, title, *, labels=None, **fields):
+    fields.setdefault("require_verification", True)
     t = q.create(title, labels=labels or [], **fields)
     q.claim_one("m/wt-1", task_id=t.id, machine="m", worktree="wt-1")
     q.start(t.id, "m/wt-1")

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -182,6 +185,23 @@ def test_apply_confirm_without_task_id_is_skipped_not_raised():
     assert out[0]["skipped"] is True
 
 
+def test_apply_abandon_calls_abandoner_with_task_id():
+    calls = []
+
+    def abandoner(task_id, **kwargs):
+        calls.append((task_id, kwargs))
+        return {"id": task_id, "status": "abandoned"}
+
+    out = ev.apply_decisions(
+        [ev.Abandon(reason="stale")],
+        creator=lambda *a, **k: {},
+        task_id="t-1",
+        abandoner=abandoner,
+    )
+    assert calls == [("t-1", {"actor": "evaluator", "reason": "stale"})]
+    assert out[0] == {"decision": "abandon", "abandoned": {"id": "t-1", "status": "abandoned"}}
+
+
 def test_evaluate_and_apply_threads_task_id_to_confirmer():
     calls = []
     spec = ev.SpecEvaluator({"rules": [{"on": "task.submitted", "confirm": True}]})
@@ -206,6 +226,79 @@ def test_evaluate_and_apply_dry_run_creates_nothing():
     )
     assert "applied" not in report
     assert report["decisions"][0]["decision"] == "emit"
+
+
+def test_script_evaluator_reads_stdin_and_returns_a_decision(tmp_path):
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "event = json.load(sys.stdin)\n"
+        "json.dump({'decision': 'confirm', 'reason': event['task']['origin_ref']}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    evaluator = ev.load_evaluator(
+        {"scripts": {"review-loop": [sys.executable, str(script)]}},
+        evaluator_ref="review-loop",
+    )
+
+    [decision] = evaluator.evaluate(_completed_event())
+
+    assert isinstance(decision, ev.Confirm)
+    assert decision.reason == "o/n#42"
+
+
+def test_script_evaluator_uses_fixed_argv_and_shell_false():
+    captured = {}
+
+    def runner(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout='{"decision":"confirm"}', stderr="")
+
+    evaluator = ev.load_evaluator(
+        {"scripts": {"review-loop": ["python3", "/tmp/eval.py"]}},
+        evaluator_ref="review-loop",
+        runner=runner,
+    )
+
+    [decision] = evaluator.evaluate(_completed_event())
+
+    assert isinstance(decision, ev.Confirm)
+    assert captured["argv"] == ["python3", "/tmp/eval.py"]
+    assert captured["kwargs"]["shell"] is False
+    assert json.loads(captured["kwargs"]["input"])["task"]["id"] == "t-1"
+
+
+def test_script_evaluator_timeout_returns_noop():
+    def runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    evaluator = ev.load_evaluator(
+        {"scripts": {"review-loop": ["python3", "/tmp/eval.py"]}},
+        evaluator_ref="review-loop",
+        runner=runner,
+    )
+
+    [decision] = evaluator.evaluate(_completed_event())
+
+    assert isinstance(decision, ev.NoOp)
+    assert "timed out" in (decision.reason or "")
+
+
+def test_script_evaluator_malformed_output_returns_noop():
+    def runner(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="not-json", stderr="")
+
+    evaluator = ev.load_evaluator(
+        {"scripts": {"review-loop": ["python3", "/tmp/eval.py"]}},
+        evaluator_ref="review-loop",
+        runner=runner,
+    )
+
+    [decision] = evaluator.evaluate(_completed_event())
+
+    assert isinstance(decision, ev.NoOp)
+    assert "invalid" in (decision.reason or "")
 
 
 # -- CLI ---------------------------------------------------------------------

@@ -1918,7 +1918,7 @@ class Supervisor:
         simple deferred-completion contract.
         """
         status = task.get("status")
-        if status != Status.SUBMITTED or not task.get("goal"):
+        if status not in {Status.SUBMITTED, Status.COMPLETED} or not task.get("goal"):
             return f"task {status}"
         if task.get("result_ref"):
             return "task completed (result-ref recorded)"
@@ -2241,7 +2241,7 @@ class Supervisor:
                     session_override=str(acp_session),
                 )
                 return True, outcome
-            if task.get("status") == Status.SUBMITTED and task.get("completed_by"):
+            if task.get("status") in {Status.SUBMITTED, Status.COMPLETED} and task.get("completed_by"):
                 try:
                     if self.local_body_activity_fn(local_sid) == "IDLE":
                         return True, None

@@ -257,7 +257,7 @@ def test_client_completes_suspended_task_without_wake(client, monkeypatch):
         task["id"], owner, result_ref="condition:satisfied"
     )
 
-    assert done["status"] == Status.SUBMITTED
+    assert done["status"] == Status.COMPLETED
     assert done["result_ref"] == "condition:satisfied"
     assert done["owner"] is None
 
@@ -634,7 +634,7 @@ def test_full_lifecycle_over_http(api):
     done = api.post(
         f"/tasks/{tid}/complete", json={"worker_id": "w1", "result_ref": "pr/1"}
     ).json()
-    assert done["status"] == Status.SUBMITTED
+    assert done["status"] == Status.COMPLETED
 
 
 def test_complete_over_http_releases_handoff_claim(api, monkeypatch):
@@ -664,7 +664,7 @@ def test_complete_over_http_releases_handoff_claim(api, monkeypatch):
     done = api.post(
         f"/tasks/{tid}/complete", json={"worker_id": "m/wt-9", "result_ref": "pr/1"}
     ).json()
-    assert done["status"] == Status.SUBMITTED
+    assert done["status"] == Status.COMPLETED
     assert released == [(tid, "wt-9")]
 
 
@@ -1287,9 +1287,15 @@ def test_client_round_trip(client):
     assert claimed["id"] == t["id"]
     client.start(t["id"], "w1")
     done = client.complete(t["id"], "w1", result_ref="pr/9")
-    assert done["status"] == Status.SUBMITTED
+    assert done["status"] == Status.COMPLETED
     trail = [e["to_status"] for e in client.events(t["id"])]
-    assert trail == [Status.QUEUED, Status.CLAIMED, Status.STARTED, Status.SUBMITTED]
+    assert trail == [
+        Status.QUEUED,
+        Status.CLAIMED,
+        Status.STARTED,
+        Status.SUBMITTED,
+        Status.COMPLETED,
+    ]
 
 
 def test_client_tasks_for_session_round_trip(client):
@@ -1387,14 +1393,12 @@ def test_sse_stream_distinguishes_retry_recorded_result(server_url):
     types = [e["type"] for e in received]
     assert "task.created" in types
     assert "task.claimed" in types
-    assert "task.submitted" in types
     assert "task.completed" in types
     assert "task.result_recorded" in types
-    assert types.count("task.submitted") == 1
     assert types.count("task.completed") == 1
     created = next(e for e in received if e["type"] == "task.created")
     assert created["task"]["id"] == tid
-    completed = next(e for e in received if e["type"] == "task.submitted")
+    completed = next(e for e in received if e["type"] == "task.completed")
     assert completed["task"]["has_result"] is False
     assert "result" not in completed["task"]
     recorded = next(
@@ -1816,7 +1820,7 @@ def test_cli_consume_completes_and_prints_payload(server_url, client, monkeypatc
     assert __main__._cmd_consume(args) == 0
     assert "BRIEF-BODY" in capsys.readouterr().out
     done = client.get(tid)
-    assert done["status"] == Status.SUBMITTED
+    assert done["status"] == Status.COMPLETED
     # owner is cleared on completion (the lease is released); the result_ref
     # proves the successor's identity owned it through the complete transition.
     assert done["result_ref"] == "consumed:wt-1"
@@ -1827,7 +1831,7 @@ def test_cli_consume_completes_and_prints_payload(server_url, client, monkeypatc
     out = capsys.readouterr().out
     assert "already spent" in out
     assert "BRIEF-BODY" not in out
-    assert client.get(tid)["status"] == Status.SUBMITTED
+    assert client.get(tid)["status"] == Status.COMPLETED
 
 
 # -- satellite presence registry ---------------------------------------------

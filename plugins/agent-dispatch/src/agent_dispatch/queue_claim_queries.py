@@ -243,6 +243,7 @@ class QueueClaimQueriesMixin:
         target_repo: str | None = None,
         label: str | None = None,
         evaluator_ref: str | None = None,
+        require_verification: bool | None = None,
         source: str | None = None,
         origin_ref: str | None = None,
         exclusive_key: str | None = None,
@@ -273,6 +274,9 @@ class QueueClaimQueriesMixin:
                 params.append(evaluator_ref)
             else:
                 clauses.append("evaluator_ref IS NULL")
+        if require_verification is not None:
+            clauses.append("require_verification = ?")
+            params.append(1 if require_verification else 0)
         if source is not None:
             clauses.append("source = ?")
             params.append(source)
@@ -296,6 +300,17 @@ class QueueClaimQueriesMixin:
             rows = conn.execute(
                 f"SELECT {_TASK_BULK_SELECT} FROM tasks {where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
                 params,
+            ).fetchall()
+        return [Task._from_row(r) for r in rows]
+
+    def list_verification_candidates(self, *, limit: int = 200) -> list[Task]:
+        """Submitted tasks explicitly awaiting evaluator-driven verification."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {_TASK_BULK_SELECT} FROM tasks "
+                "WHERE status = ? AND require_verification = 1 AND evaluator_ref IS NOT NULL "
+                "ORDER BY updated_at ASC LIMIT ?",
+                (Status.SUBMITTED, limit),
             ).fetchall()
         return [Task._from_row(r) for r in rows]
 

@@ -13,6 +13,10 @@ lone dev box or against a designated coordinator host on a shared network:
   held task only when its owner worktree is *confirmed gone* -- not on elapsed
   time. ``AGENT_DISPATCH_SWEEP_INTERVAL`` is a **deprecated alias** kept for one
   release (the recovery mechanism moved from lease expiry to liveness).
+- ``AGENT_DISPATCH_VERIFICATION_INTERVAL`` -- seconds between automatic
+  verification passes over ``submitted`` tasks that explicitly opted into
+  evaluator-gated completion (``require_verification=true`` + a registered
+  ``evaluator_ref``). ``0`` disables the recurring pass.
 - ``AGENT_DISPATCH_URL`` -- the coordinator base URL the CLI talks to (defaults to
   ``http://<host>:<port>``); set this to point the CLI at a remote coordinator.
 - ``AGENT_DISPATCH_SHARED_URL`` -- the **shared/elected coordinator** endpoint used
@@ -62,6 +66,7 @@ from .install_paths import install_dir
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9847
 DEFAULT_SWEEP_INTERVAL = 60.0
+DEFAULT_VERIFICATION_INTERVAL = 60.0
 
 #: Minimum age (seconds) before an UNOWNED proposed/queued task pinned to a
 #: no-longer-live target worktree is reaped by the liveness GC (see
@@ -173,6 +178,7 @@ class Config:
     token: str | None = None
     control_token: str | None = None
     sweep_interval: float = DEFAULT_SWEEP_INTERVAL
+    verification_interval: float = DEFAULT_VERIFICATION_INTERVAL
     orphan_grace: float = DEFAULT_ORPHAN_GRACE
     handoff_fallback_enabled: bool = False
     handoff_fallback_grace: float = DEFAULT_HANDOFF_FALLBACK_GRACE
@@ -198,6 +204,10 @@ def load_config() -> Config:
             os.environ.get("AGENT_DISPATCH_GC_INTERVAL")
             or os.environ.get("AGENT_DISPATCH_SWEEP_INTERVAL")
             or str(DEFAULT_SWEEP_INTERVAL)
+        ),
+        verification_interval=float(
+            os.environ.get("AGENT_DISPATCH_VERIFICATION_INTERVAL")
+            or str(DEFAULT_VERIFICATION_INTERVAL)
         ),
         orphan_grace=float(
             os.environ.get("AGENT_DISPATCH_ORPHAN_GRACE") or str(DEFAULT_ORPHAN_GRACE)

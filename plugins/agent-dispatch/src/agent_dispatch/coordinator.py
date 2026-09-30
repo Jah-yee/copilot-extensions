@@ -40,6 +40,7 @@ from .coordinator_loops import (
     _gc_loop as _loops_gc_loop,
     _handoff_fallback_loop as _loops_handoff_fallback_loop,
     _orphan_reap_loop as _loops_orphan_reap_loop,
+    _verification_loop as _loops_verification_loop,
     _reconcile_handoff_fallback,
     _resolve_owner_session_id,
     _run_supervised_cycle,
@@ -74,6 +75,7 @@ __all__ = [
     "_gc_loop",
     "_handoff_fallback_loop",
     "_orphan_reap_loop",
+    "_verification_loop",
     "_worktree_status_relay_loop",
     "_reconcile_handoff_fallback",
     "_resolve_owner_session_id",
@@ -97,6 +99,15 @@ async def _gc_loop(*args, **kwargs):
 
 async def _orphan_reap_loop(*args, **kwargs):
     return await _loops_orphan_reap_loop(
+        *args,
+        **kwargs,
+        run_supervised_cycle=_run_supervised_cycle,
+        governance_backoff=_governance_backoff,
+    )
+
+
+async def _verification_loop(*args, **kwargs):
+    return await _loops_verification_loop(
         *args,
         **kwargs,
         run_supervised_cycle=_run_supervised_cycle,
@@ -136,6 +147,7 @@ def create_app(
     token: str | None = None,
     control_token: str | None = None,
     sweep_interval: float = 0.0,
+    verification_interval: float = 0.0,
     orphan_grace: float = DEFAULT_ORPHAN_GRACE,
     handoff_fallback_enabled: bool = False,
     handoff_fallback_grace: float = DEFAULT_HANDOFF_FALLBACK_GRACE,
@@ -243,6 +255,9 @@ def create_app(
         )
         sweeper_health = LoopHealth(name="liveness_gc", base_interval=sweep_interval or 0.0)
         orphan_health = LoopHealth(name="orphan_reap", base_interval=sweep_interval or 0.0)
+        verification_health = LoopHealth(
+            name="verification", base_interval=verification_interval or 0.0
+        )
         handoff_fallback_health = LoopHealth(
             name="handoff_fallback", base_interval=sweep_interval or 0.0
         )
@@ -252,6 +267,7 @@ def create_app(
         _app.state.loop_health = {
             sweeper_health.name: sweeper_health,
             orphan_health.name: orphan_health,
+            verification_health.name: verification_health,
             handoff_fallback_health.name: handoff_fallback_health,
             worktree_status_health.name: worktree_status_health,
         }
@@ -280,6 +296,19 @@ def create_app(
                 )
             )
             if sweep_interval and sweep_interval > 0
+            else None
+        )
+        verifier = (
+            asyncio.create_task(
+                _verification_loop(
+                    queue,
+                    verification_interval,
+                    bus,
+                    health=verification_health,
+                    governance=governance,
+                )
+            )
+            if verification_interval and verification_interval > 0
             else None
         )
         handoff_fallback_reconciler = (
@@ -685,6 +714,12 @@ def create_app(
                     orphan_reaper.cancel()
                     try:
                         await orphan_reaper
+                    except asyncio.CancelledError:
+                        pass
+                if verifier is not None:
+                    verifier.cancel()
+                    try:
+                        await verifier
                     except asyncio.CancelledError:
                         pass
                 if handoff_fallback_reconciler is not None:

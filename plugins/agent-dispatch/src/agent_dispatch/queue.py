@@ -317,6 +317,30 @@ class TaskQueue(
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+            verification_flag = "2026-09-29-require-verification-flag"
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                migrated = conn.execute(
+                    "SELECT 1 FROM queue_migrations WHERE name = ?",
+                    (verification_flag,),
+                ).fetchone()
+                if migrated is None:
+                    try:
+                        conn.execute(
+                            "ALTER TABLE tasks ADD COLUMN require_verification "
+                            "INTEGER NOT NULL DEFAULT 0"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column name" not in str(exc).lower():
+                            raise
+                    conn.execute(
+                        "INSERT INTO queue_migrations(name, applied_at) VALUES (?, ?)",
+                        (verification_flag, self._now(None)),
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
             # Rows completed before ``completed_by`` existed retain their
             # original completing identity when the durable audit trail proves
             # exactly one owner.  A completion retry is a completed->completed

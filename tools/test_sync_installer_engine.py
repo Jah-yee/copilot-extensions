@@ -200,3 +200,29 @@ def test_verify_flags_duplicate_engine_source_lines(fake_repo):
     problems = sync_installer_engine.verify()
 
     assert any("contains 2 installer-engine source lines" in p for p in problems)
+
+
+def test_sync_repairs_missing_local_copy_when_wrappers_are_local(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
+
+    written = sync_installer_engine.sync()
+
+    assert "plugins/agent-registered/scripts/installer-engine.ps1" in written
+    assert "plugins/agent-registered/scripts/installer-engine.sh" in written
+    assert (scripts / "installer-engine.ps1").read_text(encoding="utf-8") == "canonical ps1\n"
+    assert (scripts / "installer-engine.sh").read_text(encoding="utf-8") == "canonical sh\n"
+
+
+def test_sync_removes_stale_local_copy_when_wrappers_are_canonical(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_canonical_refs(scripts)
+    (scripts / "installer-engine.ps1").write_text("stale\n", encoding="utf-8")
+    (scripts / "installer-engine.sh").write_text("stale\n", encoding="utf-8")
+
+    written = sync_installer_engine.sync()
+
+    assert "removed plugins/agent-registered/scripts/installer-engine.ps1" in written
+    assert "removed plugins/agent-registered/scripts/installer-engine.sh" in written
+    assert not (scripts / "installer-engine.ps1").exists()
+    assert not (scripts / "installer-engine.sh").exists()

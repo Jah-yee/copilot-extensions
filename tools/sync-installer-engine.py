@@ -61,10 +61,17 @@ def _plugin_dir(plugin: str) -> Path:
 def _canonical_ref_problems(plugin: str) -> list[str]:
     """Validity problems for a plugin using the dev-time canonical reference."""
     plugin_dir = _plugin_dir(plugin)
-    refs = ier.plugin_ref_map(plugin_dir)
     problems: list[str] = []
     for ext in ("ps1", "sh"):
-        ref = refs.get(ext)
+        script_path = plugin_dir / "scripts" / f"install.{ext}"
+        match_count = ier.source_match_count(script_path, ext)
+        if match_count > 1:
+            problems.append(
+                f"plugins/{plugin}/scripts/install.{ext} contains {match_count} "
+                "installer-engine source lines; expected exactly one"
+            )
+            continue
+        ref = ier.find_engine_ref(script_path, ext)
         if ref is None:
             problems.append(f"plugins/{plugin}/scripts/install.{ext} does not source installer-engine")
             continue
@@ -102,7 +109,11 @@ def _has_escaping_ref(plugin: str) -> bool:
 
 
 def _has_any_ref(plugin: str) -> bool:
-    return bool(ier.plugin_ref_map(_plugin_dir(plugin)))
+    plugin_dir = _plugin_dir(plugin)
+    return any(
+        ier.source_match_count(plugin_dir / "scripts" / f"install.{ext}", ext) > 0
+        for ext in ("ps1", "sh")
+    )
 
 
 def unregistered_adopters() -> list[str]:

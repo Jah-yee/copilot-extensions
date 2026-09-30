@@ -81,12 +81,19 @@ def canonical_line(ext: str) -> str:
     return f'. "$SCRIPT_DIR/{canonical_raw_path(ext)}"'
 
 
+def source_match_count(script_path: Path, ext: str) -> int:
+    if not script_path.is_file():
+        return 0
+    return len(list(_SOURCE_PATTERNS[ext].finditer(script_path.read_text(encoding="utf-8"))))
+
+
 def find_engine_ref(script_path: Path, ext: str) -> EngineRef | None:
     if not script_path.is_file():
         return None
-    match = _SOURCE_PATTERNS[ext].search(script_path.read_text(encoding="utf-8"))
-    if match is None:
+    matches = list(_SOURCE_PATTERNS[ext].finditer(script_path.read_text(encoding="utf-8")))
+    if len(matches) != 1:
         return None
+    match = matches[0]
     return EngineRef(ext=ext, script_path=script_path, raw_path=match.group("path"))
 
 
@@ -116,6 +123,9 @@ def is_local_ref(ref: EngineRef, plugin_dir: Path) -> bool:
 
 def rewrite_to_local(script_path: Path, ext: str) -> bool:
     text = script_path.read_text(encoding="utf-8")
+    matches = list(_SOURCE_PATTERNS[ext].finditer(text))
+    if len(matches) != 1:
+        return False
     replacement = local_line(ext)
     rewritten, count = _SOURCE_PATTERNS[ext].subn(
         lambda match: f"{match.group('indent')}{replacement}",

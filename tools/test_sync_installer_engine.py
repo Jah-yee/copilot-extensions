@@ -147,3 +147,20 @@ def test_verify_flags_an_escaping_noncanonical_reference(fake_repo):
     problems = sync_installer_engine.verify()
 
     assert any("which is not libs/installer-engine/installer-engine.sh" in p for p in problems)
+
+
+def test_verify_flags_duplicate_engine_source_lines(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    (scripts / "install.sh").write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n'
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+    (scripts / "install.ps1").write_text(
+        ". (Join-Path $PSScriptRoot '..\\..\\..\\libs\\installer-engine\\installer-engine.ps1')\n",
+        encoding="utf-8",
+    )
+
+    problems = sync_installer_engine.verify()
+
+    assert any("contains 2 installer-engine source lines" in p for p in problems)

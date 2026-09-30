@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import installer_engine_ref as ier
 import materialize_main as mm
 import uv_editable_ref as uer
 
@@ -1774,3 +1775,37 @@ def test_materialize_installer_engine_ref_into_refuses_a_symlinked_canonical_anc
 
     assert any("is a symlink -- refusing" in line for line in log)
     assert not (consumer / "scripts" / "installer-engine.sh").exists()
+
+
+def test_materialize_installer_engine_ref_into_refuses_duplicate_source_lines(tmp_path: Path):
+    root = tmp_path / "repo"
+    engine = root / "libs" / "installer-engine"
+    engine.mkdir(parents=True)
+    (engine / "installer-engine.sh").write_text("# canonical sh\n", encoding="utf-8")
+    consumer = root / "plugins" / "agent-pull-requests"
+    (consumer / "scripts").mkdir(parents=True)
+    (consumer / "scripts" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n'
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n'
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+    log = mm.materialize_installer_engine_ref_into(
+        source_consumer_dir=consumer, dest_consumer_dir=consumer, canonical_root=root,
+    )
+
+    assert any("expected exactly one" in line for line in log)
+    assert not (consumer / "scripts" / "installer-engine.sh").exists()
+
+
+def test_rewrite_to_local_refuses_duplicate_source_lines(tmp_path: Path):
+    script = tmp_path / "install.sh"
+    script.write_text(
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n'
+        '. "$SCRIPT_DIR/../../../libs/installer-engine/installer-engine.sh"\n',
+        encoding="utf-8",
+    )
+
+    assert ier.rewrite_to_local(script, "sh") is False
+    assert script.read_text(encoding="utf-8").count("../../../libs/installer-engine") == 2

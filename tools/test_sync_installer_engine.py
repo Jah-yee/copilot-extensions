@@ -259,6 +259,24 @@ def test_verify_rejects_symlinked_canonical_engine(fake_repo):
     assert any("is a symlink -- refusing" in p for p in problems)
 
 
+def test_verify_rejects_symlinked_canonical_engine_in_local_mode(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
+    (scripts / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+    (scripts / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
+    real = fake_repo / "outside"
+    real.mkdir()
+    (real / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+    (real / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
+    for name in ("installer-engine.ps1", "installer-engine.sh"):
+        (fake_repo / "libs" / "installer-engine" / name).unlink()
+        (fake_repo / "libs" / "installer-engine" / name).symlink_to(real / name)
+
+    problems = sync_installer_engine.verify()
+
+    assert any("is a symlink -- refusing" in p for p in problems)
+
+
 def test_verify_flags_duplicate_engine_source_lines(fake_repo):
     scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
     (scripts / "install.sh").write_text(
@@ -300,3 +318,18 @@ def test_sync_removes_stale_local_copy_when_wrappers_are_canonical(fake_repo):
     assert "removed plugins/agent-registered/scripts/installer-engine.sh" in written
     assert not (scripts / "installer-engine.ps1").exists()
     assert not (scripts / "installer-engine.sh").exists()
+
+
+def test_sync_refuses_symlinked_canonical_engine_in_local_mode(fake_repo):
+    scripts = _mk_plugin_scripts(fake_repo, "agent-registered")
+    _write_local_refs(scripts)
+    real = fake_repo / "outside"
+    real.mkdir()
+    (real / "installer-engine.ps1").write_text("canonical ps1\n", encoding="utf-8")
+    (real / "installer-engine.sh").write_text("canonical sh\n", encoding="utf-8")
+    for name in ("installer-engine.ps1", "installer-engine.sh"):
+        (fake_repo / "libs" / "installer-engine" / name).unlink()
+        (fake_repo / "libs" / "installer-engine" / name).symlink_to(real / name)
+
+    with pytest.raises(RuntimeError, match="symlink -- refusing"):
+        sync_installer_engine.sync()

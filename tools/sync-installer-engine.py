@@ -133,6 +133,10 @@ def _local_copy_problems(plugin: str) -> list[str]:
     plugin_dir = _plugin_dir(plugin)
     for ext in ("ps1", "sh"):
         source = ier.canonical_file(ext, repo_root=REPO)
+        bad_ancestor = uer._find_symlinked_ancestor(source, REPO.resolve())
+        if bad_ancestor is not None:
+            problems.append(f"{bad_ancestor} is a symlink -- refusing")
+            continue
         destination = plugin_dir / "scripts" / f"installer-engine.{ext}"
         relative = destination.relative_to(REPO).as_posix()
         if not source.is_file():
@@ -253,6 +257,9 @@ def sync() -> list[str]:
         if mode == "canonical":
             for name in FILES:
                 source = CANONICAL_DIR / name
+                bad_ancestor = uer._find_symlinked_ancestor(source, REPO.resolve())
+                if bad_ancestor is not None:
+                    raise RuntimeError(f"{bad_ancestor} is a symlink -- refusing")
                 if not source.is_file():
                     raise FileNotFoundError(f"canonical source missing: {source}")
                 destination = REPO / "plugins" / plugin / "scripts" / name
@@ -262,6 +269,9 @@ def sync() -> list[str]:
             continue
         for name in FILES:
             source = CANONICAL_DIR / name
+            bad_ancestor = uer._find_symlinked_ancestor(source, REPO.resolve())
+            if bad_ancestor is not None:
+                raise RuntimeError(f"{bad_ancestor} is a symlink -- refusing")
             destination = REPO / "plugins" / plugin / "scripts" / name
             if not source.is_file():
                 raise FileNotFoundError(f"canonical source missing: {source}")

@@ -1,9 +1,0 @@
-{
-  "comment": "Carry the persisted model/effort/context-tier preference as explicit CLI flags at every worktree launch, since Copilot CLI ignores the persisted settings.json values at startup.",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

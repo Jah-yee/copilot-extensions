@@ -1,9 +1,0 @@
-{
-  "comment": "Vendor plugin-activation fully in agent-worktrees to avoid staged-install passthrough breakage",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

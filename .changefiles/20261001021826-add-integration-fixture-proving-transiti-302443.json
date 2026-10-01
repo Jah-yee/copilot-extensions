@@ -1,9 +1,0 @@
-{
-  "comment": "Add integration fixture proving transitive finalize propagation (single-hop, multi-hop, cross-machine) end-to-end",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

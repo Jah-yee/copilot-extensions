@@ -98,6 +98,63 @@ def test_posix_binstub_resolves_only_active_or_complete_slots() -> None:
     assert '_aw_exec_resolved "$@"' in sh
 
 
+def _stub_direct_install(home: Path, dir_name: str) -> Path:
+    """Write a stub install.sh under a `_direct` installed-plugins layout
+    (``<owner>--<repo>--<subpath-with-dashes>``, no nested agent-worktrees/
+    segment) that just announces it ran, so a test can prove the binstub's
+    own glob resolution located and invoked THIS file specifically."""
+    scripts = home / ".copilot" / "installed-plugins" / "_direct" / dir_name / "scripts"
+    scripts.mkdir(parents=True)
+    install = scripts / "install.sh"
+    install.write_text("#!/bin/sh\necho DIRECT_INSTALL_SENTINEL\nexit 0\n", encoding="utf-8")
+    install.chmod(install.stat().st_mode | stat.S_IEXEC)
+    return install
+
+
+def test_posix_binstub_self_provisions_from_a_direct_install_layout(tmp_path: Path) -> None:
+    """Regression test for a direct (non-marketplace) `copilot plugin
+    install <repo>:<path>` install, whose `_direct/<owner>--<repo>--
+    <subpath>/` layout has no nested `agent-worktrees/` path segment --
+    the marketplace-shaped glob never matches it (copilot-extensions
+    issue: agent-worktrees self-provisioning binstub fails on a `_direct`
+    install), silently skipping self-provisioning and falling through to a
+    guaranteed-to-fail `python -m agent_worktrees` last resort."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _stub_direct_install(home, "SomeOwner--some-repo--plugins-agent-worktrees")
+    # An unrelated direct-installed plugin whose name merely contains the
+    # substring "agent-worktrees" (but doesn't end with it) must never be
+    # selected instead -- the glob is anchored on the trailing path segment.
+    _stub_direct_install(home, "SomeOrg--agent-worktrees-extra-tool--plugins-foo")
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["AGENT_WORKTREES_NO_SELFPROVISION"] = ""
+    env.pop("AGENT_RT_ROOT", None)
+
+    proc = subprocess.run(
+        ["sh", str(PLUGIN / "bin" / "agent-worktrees"), "--version"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    # install.sh's own stdout is redirected to the parent's stderr
+    # (`bash "$_awinstall" provision >&2`).
+    assert "DIRECT_INSTALL_SENTINEL" in proc.stderr, proc.stderr
+
+
+def test_windows_binstub_direct_install_match_anchors_on_trailing_segment() -> None:
+    """The PowerShell binstub's `_direct` fallback must mirror the POSIX
+    one's anchoring: match a directory name ENDING in `-agent-worktrees`
+    (the subpath's own final segment), never the substring anywhere, so an
+    unrelated direct-installed plugin can never be selected."""
+    ps1 = (PLUGIN / "bin" / "agent-worktrees.ps1").read_text(encoding="utf-8")
+
+    assert "_direct" in ps1
+    assert r"[^\\/]*-agent-worktrees[\\/]scripts[\\/]install\.ps1$" in ps1
+
+
 def test_direct_posix_payload_entrypoints_are_tracked_executable() -> None:
     repo = PLUGIN.parents[1]
     paths = (

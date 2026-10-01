@@ -1,0 +1,9 @@
+{
+  "comment": "Fix self-provisioning binstub to also resolve install.sh for a _direct (non-marketplace) plugin install layout",
+  "changes": [
+    {
+      "plugin": "agent-worktrees",
+      "type": "patch"
+    }
+  ]
+}

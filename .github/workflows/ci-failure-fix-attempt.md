@@ -84,16 +84,15 @@ on:
 # shapes are accepted for the same `engine: copilot` value).
 engine: copilot
 
-# Real review finding (PR #4770): the newly-allowed
-# `python tools/run-plugin-tests.py *` command gets past the shell
-# allowlist check, but `run-plugin-tests.py` builds a fresh per-plugin venv
-# and `uv pip install`s that plugin's declared dependencies (e.g.
-# agent-containers' `pyyaml`/`uv run --extra dev <test tool>` extras) --
-# without PyPI reachable inside the sandboxed firewall, that install step
-# fails before the test command ever runs, so the allowlist entry alone
-# cannot verify a fix. `defaults` keeps the existing cert/OS-infra
-# allowance; `python` adds pypi.org/files.pythonhosted.org so the venv
-# build can actually complete.
+# `python tools/run-plugin-tests.py *` (the sandboxed test runner, allowed
+# below under `tools.bash`) builds a fresh per-plugin venv and
+# `uv pip install`s that plugin's declared dependencies (e.g.
+# agent-containers' `pyyaml`/`uv run --extra dev <test tool>` extras) before
+# running tests -- without PyPI reachable inside the sandboxed firewall,
+# that install step fails before the test command ever runs, so the
+# allowlist entry alone cannot verify a fix. `defaults` keeps the existing
+# cert/OS-infra allowance; `python` adds pypi.org/files.pythonhosted.org so
+# the venv build can actually complete.
 network:
   allowed:
     - defaults

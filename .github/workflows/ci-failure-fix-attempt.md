@@ -492,6 +492,7 @@ tools:
     - "git diff *"
     - "git blame *"
     - "uv run --extra dev pytest *"
+    - "python tools/run-plugin-tests.py *"
     - "python tools/changefile.py add *"
 
 safe-outputs:

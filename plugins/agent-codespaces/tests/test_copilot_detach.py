@@ -134,6 +134,7 @@ def test_detach_success_reports_exact_session_and_keeps_forwards(seams, capsys):
     }
     launch = seams.ssh[0]
     assert launch["settle"] is False  # claim stays active while the session runs
+    assert launch["ns"].timeout == 1200.0
     remote = launch["remote"]
     assert remote.startswith("cd /workspaces/example-web && " + detach._VENUE_TOOLING + " && python3 -c ")
     assert detach.trust_folder_command("/workspaces/example-web") in remote
@@ -145,6 +146,7 @@ def test_detach_success_reports_exact_session_and_keeps_forwards(seams, capsys):
     assert "--copilot-arg=--plugin-dir=/stage/example-agent" in argv
     assert "--copilot-arg=--no-ask-user" in argv
     assert argv[argv.index("--seed") + 1] == "do the task"
+    assert argv[argv.index("--seed-ready-timeout") + 1] == "180.0"
     assert launch["ns"].auth_cache_warmup is True and launch["ns"].no_provision is False
 
 
@@ -177,14 +179,22 @@ def test_detach_rejoin_of_running_session_does_not_reseed(seams, capsys):
     assert seams.remote == []  # nothing killed
 
 
-def test_seed_never_submitted_tears_down_and_releases(seams, capsys):
+def test_seed_never_submitted_but_registered_is_delivered_over_bridge(seams, monkeypatch, capsys):
+    from venue_copilot import refs as venue_refs
+
+    sent = []
+    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
     unready = json.dumps({"ok": True, "created": True, "seed_submitted": False,
                           "seed_reason": "prompt not ready"})
     rc = detach.cmd_detach(_args(), ssh_session=_ssh(seams, stdout=unready))
-    assert rc == 1
-    assert "seed was not submitted" in capsys.readouterr().err
-    assert any("kill-session" in c for c in seams.remote)
-    assert seams.releases and seams.releases[0][0] == ("cs-1", "cli:anchor-example-web@cs-1")
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["seed_delivery"] == "bridge"
+    assert out["seeded"] is True
+    assert sent == [("sid-42", "do the task")]
+    assert not any("kill-session" in c for c in seams.remote)
+    assert seams.holds[-1][1]["confirmed"] is True
+    assert seams.releases == []
     assert seams.release_res == [("anchor-example-web@cs-1", "r1")]
 
 
@@ -586,6 +596,7 @@ def test_failed_fresh_launch_after_a_dead_session_releases(seams, monkeypatch, c
     prior = {"mux_session": "wt-anchor-example-web", "confirmed": True, "generation": "g-old"}
     held = types.SimpleNamespace(sessions={"cli:anchor-example-web@cs-1": prior})
     monkeypatch.setattr(owner, "get_hold", lambda *a, **k: held)
+    seams.claim_rows.clear()
     created_but_unseeded = _CREATED.replace('"seed_submitted": true', '"seed_submitted": false')
     assert detach.cmd_detach(_args(), ssh_session=_ssh(seams, stdout=created_but_unseeded)) == 1
     assert seams.releases

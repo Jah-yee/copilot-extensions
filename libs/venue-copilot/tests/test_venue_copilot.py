@@ -621,7 +621,41 @@ class TestDetachedRunner:
         assert "reference files" in payload["error"]
         assert "launch" not in [kind for kind, _ in adapter.calls]
 
-    def test_launch_failure_stops_created_unrepresented_session(self, monkeypatch) -> None:
+    def test_unsubmitted_seed_on_registered_session_is_delivered_over_bridge(self, monkeypatch) -> None:
+        from venue_copilot import detached, refs
+
+        adapter = _Adapter({"ok": True, "created": True, "seed_submitted": False})
+        sent = []
+        monkeypatch.setattr("venue_copilot.detached.resolve_daemon_port", lambda: 41234)
+        monkeypatch.setattr("venue_copilot.detached.resolve_local_auth_token", lambda: "tok")
+        monkeypatch.setattr(
+            "venue_copilot.detached.reserve_with_retry",
+            lambda scope, venue, **kw: {"reservation_id": "r1"},
+        )
+        monkeypatch.setattr("venue_copilot.detached.await_claim", lambda scope, rid, timeout: "sid-42")
+        monkeypatch.setattr(refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
+        monkeypatch.setattr("venue_copilot.detached.release_cli_mode", lambda *a, **k: 1)
+
+        rc, payload = detached.launch_detached(
+            adapter,
+            self._plan(),
+            seed="do it",
+            driver="d",
+            copilot_args=[],
+            ensure_mux=True,
+            register_timeout=0.0,
+            progress=lambda *a: None,
+        )
+
+        assert rc == 0
+        assert payload["session_id"] == "sid-42"
+        assert payload["seed_delivery"] == "bridge"
+        assert payload["seeded"] is True
+        assert sent == [("sid-42", "do it")]
+        assert adapter.keeper_stopped is False
+        assert not any("tmux kill-session" in command for kind, command in adapter.calls if kind == "run")
+
+    def test_unsubmitted_seed_without_registration_stops_created_session(self, monkeypatch) -> None:
         from venue_copilot import detached
 
         adapter = _Adapter({"ok": True, "created": True, "seed_submitted": False})
@@ -631,6 +665,7 @@ class TestDetachedRunner:
             "venue_copilot.detached.reserve_with_retry",
             lambda scope, venue, **kw: {"reservation_id": "r1"},
         )
+        monkeypatch.setattr("venue_copilot.detached.await_claim", lambda scope, rid, timeout: None)
         monkeypatch.setattr("venue_copilot.detached.release_cli_mode", lambda *a, **k: 1)
 
         rc, payload = detached.launch_detached(
@@ -645,7 +680,7 @@ class TestDetachedRunner:
         )
 
         assert rc == 1
-        assert "seed was not submitted" in payload["error"]
+        assert "never registered" in payload["error"]
         assert adapter.keeper_stopped is True
         assert any("tmux kill-session" in command for kind, command in adapter.calls if kind == "run")
 
@@ -654,6 +689,14 @@ class TestDetachedRunner:
 
         self._patch_bridge(monkeypatch)
         adapter = _Adapter()
+        launch_timeouts = []
+        original_launch = adapter.launch
+
+        def launch(command: str, *, timeout: float) -> tuple[int, str, str]:
+            launch_timeouts.append(timeout)
+            return original_launch(command, timeout=timeout)
+
+        adapter.launch = launch
 
         rc, _payload = detached.launch_detached(
             adapter,
@@ -669,6 +712,7 @@ class TestDetachedRunner:
         assert rc == 0
         launch = next(command for kind, command in adapter.calls if kind == "launch")
         assert "--seed-ready-timeout 180.0" in launch
+        assert launch_timeouts == [1200.0]
 
     def test_detached_launch_uses_register_timeout_when_larger(self, monkeypatch) -> None:
         from venue_copilot import detached

@@ -62,6 +62,10 @@ _RUNNER_CONFIG_KEYS = frozenset({
     "launch_detail",
 })
 
+# Mirrors agent-worktrees' mux seed hard cap. The remote launch timeout must
+# stay above it because readiness can slide while Copilot is visibly busy.
+_SEED_READY_HARD_CAP = 900.0
+
 
 def public_plan(plan: dict[str, Any]) -> dict[str, Any]:
     """``plan`` without the runner-configuration keys (for handles and dry runs)."""
@@ -218,16 +222,20 @@ def launch_detached(
                 return 1, _payload(False, plan, error="could not copy the reference files to the venue")
             seed = f"{seed.rstrip()}\n\n{notes}" if seed else notes
         progress("launch", _venue_text(plan, "launch_detail", "`agent-worktrees embody` on the venue"))
+        seed_ready_timeout = max(register_timeout, 180.0)
+        launch_timeout = register_timeout + 300.0
+        if seed:
+            launch_timeout = max(launch_timeout, _SEED_READY_HARD_CAP + 300.0)
         rc, stdout, stderr = adapter.launch(
             _launch_command(
                 plan,
                 seed=seed,
-                seed_ready_timeout=max(register_timeout, 180.0),
+                seed_ready_timeout=seed_ready_timeout,
                 driver=driver,
                 copilot_args=copilot_args,
                 ensure_mux=ensure_mux,
             ),
-            timeout=register_timeout + 300.0,
+            timeout=launch_timeout,
         )
         embodied = last_json(stdout)
         if "agent-worktrees: command not found" in stderr + stdout:
@@ -266,17 +274,11 @@ def launch_detached(
         if actual_mux and actual_mux != plan["mux_session"]:
             plan["mux_session"] = actual_mux
             plan["venue"]["mux_session_name"] = actual_mux
-        if created and seed and not embodied.get("seed_submitted"):
-            reason = embodied.get("seed_reason")
-            suffix = f" ({reason})" if reason else ""
-            return 1, _payload(
-                False,
-                plan,
-                error=(
-                    "Copilot never reached a ready prompt, so the seed was not "
-                    f"submitted{suffix}"
-                ),
-            )
+        seed_delivery_status: str | None = None
+        seed_typed = bool(created and seed and embodied.get("seed_submitted"))
+        seed_needs_bridge = bool(created and seed and not embodied.get("seed_submitted"))
+        if seed_typed:
+            seed_delivery_status = "typed"
         progress("register", "waiting for the session to register with the host bridge")
         session_id = await_claim(plan["scope_id"], reservation["reservation_id"], register_timeout)
         if not session_id:
@@ -286,25 +288,42 @@ def launch_detached(
                 error="the session is running but never registered with the host bridge",
             )
         ok = True
-        refs_extra: dict[str, Any] = {}
-        if notes:
-            # A new session got the note in its seed; a running one is told now.
+        if seed_needs_bridge:
             from .refs import deliver_note
 
+            reason = embodied.get("seed_reason")
+            detail = f"typed seed was not submitted ({reason}); delivering over bridge" if reason else (
+                "typed seed was not submitted; delivering over bridge"
+            )
+            progress("seed-bridge", detail)
+            seed_delivery_status = "bridge" if deliver_note(session_id, seed) else "failed"
+        refs_extra: dict[str, Any] = {}
+        if notes:
+            # A typed new session got the note in its seed; a running one (or a
+            # new session whose typed seed missed readiness) is told by message.
+            from .refs import deliver_note
+
+            refs_delivered = "failed"
+            if created and seed_delivery_status == "typed":
+                refs_delivered = "seed"
+            elif seed_needs_bridge and seed_delivery_status == "bridge":
+                refs_delivered = "message"
+            elif not created:
+                refs_delivered = "message" if deliver_note(session_id, notes) else "failed"
             refs_extra = {
                 "ref_files": notes.splitlines()[1:],
-                "refs_delivered": "seed" if created else (
-                    "message" if deliver_note(session_id, notes) else "failed"
-                ),
+                "refs_delivered": refs_delivered,
             }
+        seed_extra = {"seed_delivery": seed_delivery_status} if created and seed else {}
         return 0, _payload(
             True,
             plan,
             session_id=session_id,
             created=created,
             resumed=not created,
-            seeded=bool(created and seed),
+            seeded=bool(created and seed and seed_delivery_status in {"typed", "bridge"}),
             keeper=keeper,
+            **seed_extra,
             **refs_extra,
             commands={
                 **observe_commands(session_id),

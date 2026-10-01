@@ -19,9 +19,10 @@ composes existing machinery rather than adding a parallel path:
   (``<identity>@<codespace>``) and carrying the venue descriptor, tells the
   launcher exactly which live session registered.
 
-Success is reported only once the session is represented on the host bridge
-(the reservation was claimed) and, when seeded, the seed was submitted; a
-launch that cannot reach that point tears down what it started.
+Success is reported once the session is represented on the host bridge (the
+reservation was claimed). If the TTY seed could not be typed before that, the
+same bridge message lane used for reference-file notes delivers it after
+registration; only an unregistered created session is torn down.
 """
 from __future__ import annotations
 
@@ -55,6 +56,7 @@ _BUSY_EXIT = 75
 _COORDINATION_EXIT = 78
 _RESERVATION_TTL = 900.0  # generous: venue prep + first-run provisioning + seed wait
 _RESERVE_RETRY_WINDOW = 90.0
+_SEED_READY_HARD_CAP = 900.0
 
 
 def _progress(stage: str, detail: str = "") -> None:
@@ -447,12 +449,14 @@ def cmd_detach(
 
         captured: dict[str, Any] = {}
         typed_seed, seed_prefix = seed_delivery(seed, plan["scope_id"])
+        seed_ready_timeout = max(args.register_timeout, 180.0)
 
         def builder(plugin_dirs: list[str]) -> str:
             extra = [f"--plugin-dir={d}" for d in plugin_dirs] + copilot_args
             captured["plugin_dirs"] = list(plugin_dirs)
             command = seed_prefix + build_copilot_remote_command(
                 plan["identity"], anchor=plan["anchor"], driver=args.driver, seed=typed_seed,
+                seed_ready_timeout=seed_ready_timeout,
                 ensure_mux=args.ensure_mux, detach=True, bridge_scope_id=plan["scope_id"],
                 copilot_args=extra, login_shell=False,
             )
@@ -486,8 +490,11 @@ def cmd_detach(
         for attempt in range(_LAUNCH_ATTEMPTS):
             captured.pop("result", None)
             try:
+                launch_timeout = args.register_timeout + 300.0
+                if seed:
+                    launch_timeout = max(launch_timeout, _SEED_READY_HARD_CAP + 300.0)
                 rc = ssh_session(
-                    _ssh_namespace(args, "agent-worktrees embody", timeout=args.register_timeout + 300.0),
+                    _ssh_namespace(args, "agent-worktrees embody", timeout=launch_timeout),
                     remote_cmd_builder=builder, result_sink=sink, settle_on_disconnect=False,
                 )
             except ContextRefused as exc:
@@ -541,12 +548,11 @@ def cmd_detach(
             plan["mux_session"] = actual_mux
             plan["venue"]["mux_session_name"] = actual_mux
             owner.hold(args.name, plan["tenant"], daemon_port=daemon_port, mux_session=actual_mux)
-        if created and seed and not embodied.get("seed_submitted"):
-            return _fail(
-                "Copilot never reached a ready prompt, so the seed was not submitted "
-                f"({embodied.get('seed_reason') or 'unknown'})",
-                plan, pane_tail=_pane_tail(args.name, plan["mux_session"]),
-            )
+        seed_delivery_status = None
+        seed_typed = bool(created and seed and embodied.get("seed_submitted"))
+        seed_needs_bridge = bool(created and seed and not embodied.get("seed_submitted"))
+        if seed_typed:
+            seed_delivery_status = "typed"
         _progress("register", "waiting for the session to register with the host bridge")
         session_id = _await_claim(plan["scope_id"], reservation["reservation_id"], args.register_timeout)
         if not session_id:
@@ -560,14 +566,29 @@ def cmd_detach(
             args.name, plan["tenant"], daemon_port=daemon_port,
             mux_session=plan["mux_session"], confirmed=True,
         )
-        refs_delivered = None
-        if refs_note_text:
-            # A new session got the note in its seed; a running one is told now.
+        if seed_needs_bridge:
             from venue_copilot.refs import deliver_note
 
-            refs_delivered = "seed" if created else (
-                "message" if deliver_note(session_id, refs_note_text) else "failed"
+            reason = embodied.get("seed_reason")
+            detail = f"typed seed was not submitted ({reason}); delivering over bridge" if reason else (
+                "typed seed was not submitted; delivering over bridge"
             )
+            _progress("seed-bridge", detail)
+            seed_delivery_status = "bridge" if deliver_note(session_id, seed) else "failed"
+        refs_delivered = None
+        if refs_note_text:
+            # A typed new session got the note in its seed; a running one (or a
+            # new session whose typed seed missed readiness) is told by message.
+            from venue_copilot.refs import deliver_note
+
+            if created and seed_delivery_status == "typed":
+                refs_delivered = "seed"
+            elif seed_needs_bridge and seed_delivery_status == "bridge":
+                refs_delivered = "message"
+            elif not created:
+                refs_delivered = "message" if deliver_note(session_id, refs_note_text) else "failed"
+            else:
+                refs_delivered = "failed"
         ok = True
         if created:  # a rejoin of a running session applied none of its flags
             launch_memory.remember(args.name, plan["tenant"], copilot_args, args.driver, session_id)
@@ -579,7 +600,9 @@ def cmd_detach(
             "ok": True, **plan, "session_id": session_id, "created": created,
             **({"ref_files": refs_note_text.splitlines()[1:], "refs_delivered": refs_delivered}
                if refs_note_text else {}),
-            "resumed": not created, "seeded": bool(created and seed),
+            "resumed": not created,
+            "seeded": bool(created and seed and seed_delivery_status in {"typed", "bridge"}),
+            **({"seed_delivery": seed_delivery_status} if created and seed else {}),
             # A rejoin of a running session applied none of them: nothing was recalled.
             **({"recalled": recalled} if recalled and created else {}),
             "plugin_dirs": captured.get("plugin_dirs", []),

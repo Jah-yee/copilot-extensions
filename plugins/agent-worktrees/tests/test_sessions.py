@@ -1296,18 +1296,19 @@ def test_seed_pane_not_ready_never_submits():
 def test_seed_pane_requires_two_consecutive_cues():
     # A single transient caret frame (then gone) is NOT enough; a flapping cue
     # keeps stability from reaching 2, so seeding still degrades to not-ready.
-    driver = _SeedDriver(ready_caps=["❯", "", "❯", "", "❯", ""], echo_caps=[])
+    cue = "press esc to interrupt"
+    driver = _SeedDriver(ready_caps=[cue, "", cue, "", cue, ""], echo_caps=[])
     result = _run_seed(driver)
     assert result["ready"] is False
     assert driver.sends == []
 
 
 def test_seed_pane_happy_path_submits():
-    # Stable caret (2 in a row) -> type -> the echo shows the seed head -> Enter.
+    # Stable live input footer (2 in a row) -> type -> echo shows seed head -> Enter.
     seed = "Continue: build multi-account effort"
     driver = _SeedDriver(
-        ready_caps=["❯", "❯"],
-        echo_caps=[f"❯ {seed}"],
+        ready_caps=["press esc to interrupt", "press esc to interrupt"],
+        echo_caps=[f"press esc to interrupt\n{seed}"],
     )
     result = _run_seed(driver, seed=seed)
     assert result["ready"] is True
@@ -1350,6 +1351,48 @@ def test_seed_pane_boxed_input_is_ready():
     assert result["submitted"] is True
 
 
+def test_seed_pane_waits_through_resuming_transcript_then_seeds():
+    # A resumed session redraws transcript history that can contain old caret
+    # glyphs. The live footer is still busy, so readiness must wait until a real
+    # input box appears at the bottom.
+    seed = "Continue: do the thing"
+    resuming_1 = (
+        " ❯ Thought\n"
+        " ● old transcript output\n"
+        " /work/repo                         Session: 0 AIC used\n"
+        " ◉ Resuming session...\n"
+    )
+    resuming_2 = resuming_1.replace("◉", "○")
+    driver = _SeedDriver(
+        ready_caps=[resuming_1, resuming_2, _BOXED_INPUT, _BOXED_INPUT],
+        echo_caps=[_BOXED_INPUT.replace("┃\n", f"┃ {seed}\n")],
+    )
+    result = _run_seed(driver, seed=seed)
+    assert result["ready"] is True
+    assert result["submitted"] is True
+
+
+def test_seed_pane_resuming_transcript_history_is_not_ready():
+    cap = (
+        " ❯ Thought\n"
+        " ● old transcript output\n"
+        " /work/repo                         Session: 0 AIC used\n"
+        " ◉ Resuming session...\n"
+    )
+    driver = _SeedDriver(ready_caps=[cap] * 6, echo_caps=[])
+    result = _run_seed(driver)
+    assert result["reason"] == "not-ready-timeout"
+    assert driver.sends == []
+
+
+def test_seed_pane_bare_shell_prompt_is_not_ready():
+    # A shell theme can use the same caret glyph as Copilot's old prompt.
+    driver = _SeedDriver(ready_caps=["/tmp\n❯"] * 6, echo_caps=[])
+    result = _run_seed(driver)
+    assert result["ready"] is False
+    assert driver.sends == []
+
+
 def test_seed_pane_never_types_into_a_selection_dialog():
     # A trust / extension-permission prompt shows its own "❯ 1. Yes" caret;
     # typing the seed there would pick options, so it is never "ready".
@@ -1386,7 +1429,10 @@ def test_seed_pane_not_echoed_skips_enter():
     # Ready + typed, but the seed never echoes back -> do NOT press Enter, so a
     # partially-eaten seed is never submitted as a bogus turn.
     seed = "Continue: build multi-account effort"
-    driver = _SeedDriver(ready_caps=["❯", "❯"], echo_caps=[])
+    driver = _SeedDriver(
+        ready_caps=["press esc to interrupt", "press esc to interrupt"],
+        echo_caps=[],
+    )
     result = _run_seed(driver, seed=seed)
     assert result["ready"] is True
     assert result["sent"] is True
@@ -1411,8 +1457,8 @@ def test_seed_pane_dismisses_desktop_app_nudge_then_seeds():
     # container (agent-dispatch-worker-operating-procedures Phase 3).
     seed = "Continue: build multi-account effort"
     driver = _SeedDriver(
-        ready_caps=[_DESKTOP_APP_NUDGE, "❯", "❯"],
-        echo_caps=[f"❯ {seed}"],
+        ready_caps=[_DESKTOP_APP_NUDGE, "press esc to interrupt", "press esc to interrupt"],
+        echo_caps=[f"press esc to interrupt\n{seed}"],
     )
     result = _run_seed(driver, seed=seed)
     assert result["ready"] is True

@@ -2095,6 +2095,7 @@ def mux_seed_pane(
     *,
     mux: str | None = None,
     ready_timeout: float = 20.0,
+    hard_timeout: float = 900.0,
     poll_interval: float = 0.5,
     settle: float = 0.6,
 ) -> dict:
@@ -2116,8 +2117,10 @@ def mux_seed_pane(
     :mod:`agent_worktrees.pane_nudges`) -- e.g. Copilot's first-run desktop-app
     nudge, which otherwise deadlocks a detached launch forever.
 
-    Returns ``{ok, pane, ready, sent, submitted, reason}`` -- ``ok`` is true only
-    when the seed was actually delivered as a turn (``submitted``).
+    ``ready_timeout`` is the idle window: visibly busy/changing panes keep the
+    wait alive, capped by ``hard_timeout``. Returns ``{ok, pane, ready, sent,
+    submitted, reason}`` -- ``ok`` is true only when the seed was actually
+    delivered as a turn (``submitted``).
     """
     import re
     import subprocess
@@ -2137,29 +2140,70 @@ def mux_seed_pane(
         except (OSError, subprocess.TimeoutExpired):
             return ""
 
-    def _is_copilot_ready(cap: str) -> bool:
-        low = cap.lower()
-        # Caret, interrupt footer, or 1.0.89's boxed input; never a selection dialog's caret.
-        return "enter to select" not in low and (
-            "❯" in cap or ("esc" in low and "interrupt" in low) or ("╻▄" in cap and "╹▀" in cap))
+    def _input_region(cap: str) -> str:
+        """Bottom live-input region, not scrollback transcript history."""
+        lines = [line.rstrip() for line in cap.splitlines() if line.strip()]
+        return "\n".join(lines[-8:])
+
+    def _busy(region: str) -> bool:
+        low = region.lower()
+        return any(
+            phrase in low
+            for phrase in (
+                "resuming session",
+                "loading",
+                "starting",
+                "initializing",
+                "authenticating",
+                "connecting",
+            )
+        )
+
+    def _ready_signature(cap: str) -> str | None:
+        region = _input_region(cap)
+        low = region.lower()
+        if "enter to select" in low or _busy(region):
+            return None
+        # Copilot CLI >= 1.0.89 boxed input. Both box rails must be in the live
+        # bottom region so an old transcript drawing cannot satisfy readiness.
+        if "╻▄" in region and "╹▀" in region:
+            return "boxed-input"
+        # Older Copilot builds expose a footer while the input is live. Require
+        # the footer in the bottom region; a bare shell prompt that happens to
+        # use the same caret glyph is not enough.
+        if "esc" in low and "interrupt" in low:
+            return "interrupt-footer"
+        return None
 
     # Readiness must be STABLE (two polls) so a transient banner/spinner frame
     # can't trip it. A known blocking dialog is dismissed at most once per call.
     ready = False
     stable, dismissed_nudge = 0, False
-    deadline = time.monotonic() + ready_timeout
-    while time.monotonic() < deadline:
+    last_ready_sig: str | None = None
+    last_region: str | None = None
+    start = time.monotonic()
+    idle_window = max(0.0, ready_timeout)
+    hard_window = max(idle_window, hard_timeout)
+    idle_deadline = start + idle_window
+    hard_deadline = start + hard_window
+    while time.monotonic() < min(idle_deadline, hard_deadline):
         cap = _cap()
-        if _is_copilot_ready(cap):
-            stable += 1
+        region = _input_region(cap)
+        ready_sig = _ready_signature(cap)
+        if ready_sig:
+            stable = stable + 1 if ready_sig == last_ready_sig else 1
+            last_ready_sig = ready_sig
             if stable >= 2:
                 ready = True
                 break
         elif not dismissed_nudge and pane_nudges.is_desktop_app_nudge(cap):
-            dismissed_nudge, stable = True, 0
+            dismissed_nudge, stable, last_ready_sig = True, 0, None
             pane_nudges.dismiss(mux_bin, pane_id)
         else:
-            stable = 0
+            stable, last_ready_sig = 0, None
+        if (_busy(region) or region != last_region) and idle_window > 0:
+            idle_deadline = min(hard_deadline, time.monotonic() + idle_window)
+        last_region = region
         time.sleep(poll_interval)
 
     # Safety gate: without a confirmed-ready Copilot we do NOT type or submit --

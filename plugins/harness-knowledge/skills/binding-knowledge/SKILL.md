@@ -70,22 +70,22 @@ does not prove that a missing checkout is valid.
 
 ## 1. Confirm the knowledge repo
 
-Use the ask-user affordance with **Use my private dotfiles repo** preselected.
-Explain that `dotfiles` is the conventional knowledge repo: if the operator
-does not already recognize a reason to choose something else, the default is
-correct.
+Use the ask-user affordance with the consuming harness's documented
+conventional candidate preselected. Repeat that harness's short explanation of
+when the default is appropriate. If the harness supplies no candidate, ask
+without inventing one.
 
 | Option | What you need | Then |
 |--------|---------------|------|
-| **Use private `dotfiles` (default)** | its registered or local checkout | verify it is the intended private repo |
+| **Use the harness default** | its registered or local checkout | verify it is the intended private repo |
 | **Use another repo or provider (advanced)** | its path or remote URL | verify or clone it |
 | **Create a new private repo** | a name (+ owner/visibility) | create it (below) and clone |
 
-For the default, resolve the registered/local repo named `dotfiles`. If it does
-not resolve, ask for its existing checkout or clone URL; do not silently create
-a repository. The advanced option is for operators who already maintain a
-separate state home, such as a dedicated private GitHub repo or an Azure DevOps
-developer repo. Do not infer that exception from an unrelated checkout.
+For the default, resolve the exact repo named by the consuming harness. If it
+does not resolve, ask for its existing checkout or clone URL; do not silently
+create a repository. The advanced option is for operators who already maintain
+a separate state home, such as a dedicated private GitHub repo or another
+provider. Do not infer that exception from an unrelated checkout.
 
 ### Creating a new knowledge repo (option 3)
 

@@ -514,6 +514,21 @@ def _resolve_live_fork_owner(prcfg, token: str | None) -> str | None:
         return None
 
 
+def _non_default_gh_host() -> str:
+    """Ambient ``GH_HOST``, if pinning ``gh`` to a non-default (non-
+    github.com) authority -- empty string otherwise. ``pr.fork``'s durable
+    confirmation registry is keyed by repo+account only, not by GitHub
+    authority/host, so the same ``owner/repo`` slug could otherwise
+    identify two unrelated repositories (github.com vs. a GitHub Enterprise
+    host) and silently reuse a confirmation across that boundary. Until the
+    registry is host-scoped, this is used to refuse ``pr.fork`` entirely
+    against a non-default host rather than risk that cross-host reuse.
+    """
+    import os
+    host = (os.environ.get("GH_HOST") or "").strip().lower()
+    return host if host and host != "github.com" else ""
+
+
 def _ensure_fork_and_remote(
     worktree_path: str, repo_slug: str, prcfg, *, token: str | None,
 ) -> dict:
@@ -533,6 +548,14 @@ def _ensure_fork_and_remote(
         return {"error": (
             f"pr.fork is only supported for provider 'github' today "
             f"(this repo is configured for provider {prcfg.provider!r})."
+        )}
+    non_default_host = _non_default_gh_host()
+    if non_default_host:
+        return {"error": (
+            f"pr.fork does not support a non-default GH_HOST "
+            f"('{non_default_host}') today -- its durable confirmation "
+            f"registry is not scoped by authority. Unset GH_HOST (or "
+            f"point it at github.com) to use pr.fork for this repo."
         )}
     from . import providers
     try:
@@ -896,6 +919,25 @@ def create_pr(
     if prcfg.fork.enabled:
         from . import fork_registry
 
+        # pr.fork's durable confirmation registry is not scoped by GitHub
+        # authority (host) -- the same owner/repo slug can identify
+        # unrelated repositories on github.com vs. a GitHub Enterprise host
+        # pinned via ambient GH_HOST, and reusing a confirmation across that
+        # boundary would silently authorize a fork/push against a DIFFERENT
+        # real repository. Until the registry is host-scoped, restrict
+        # pr.fork to the default github.com host entirely -- this check
+        # runs BEFORE any registry lookup, so a confirmation recorded under
+        # github.com can never be silently reused once GH_HOST later points
+        # elsewhere.
+        non_default_host = _non_default_gh_host()
+        if non_default_host:
+            return {**base, "error": (
+                f"pr.fork does not support a non-default GH_HOST "
+                f"('{non_default_host}') today -- its durable confirmation "
+                f"registry is not scoped by authority. Unset GH_HOST (or "
+                f"point it at github.com) to use pr.fork for this repo."
+            )}
+
         # Resolve the credential ONCE: the same (token, scope) pair both
         # gates the confirmation decision and authenticates the actual fork
         # operation below -- see _resolve_fork_credential's docstring.
@@ -926,20 +968,27 @@ def create_pr(
         # discovering the approved owner no longer matches. An explicit
         # confirm_fork=True this call is itself a fresh, live approval of
         # whatever the real owner turns out to be, and skips this pre-check.
+        # A FAILED/inconclusive lookup (live_owner is None, e.g. a transient
+        # API error) must ALSO fail closed -- an unverifiable owner must
+        # never silently reuse a stored approval, since ensure_fork's own
+        # (separate) lookup moments later could legitimately resolve a
+        # DIFFERENT owner and persist it without this call ever having
+        # confirmed that was intended.
         if already_confirmed and not confirm_fork and not prcfg.fork.owner:
             live_owner = _resolve_live_fork_owner(prcfg, fork_token)
-            if live_owner and live_owner != confirmed_entry.owner:
+            if live_owner != confirmed_entry.owner:
                 return {
                     **base, "success": False,
                     "needs_confirmation": "fork_setup",
                     "repo": default_pr_repo,
                     "fork_remote": prcfg.fork.remote,
                     "message": (
-                        f"The previously confirmed fork owner for '{default_pr_repo}' "
-                        f"('{confirmed_entry.owner}') no longer matches the actual "
-                        f"resolved fork owner ('{live_owner}'). Ask the user to confirm "
-                        f"publishing to '{live_owner}', then re-run create-pr with "
-                        f"--confirm-fork (or confirm_fork=True)."
+                        f"Could not verify the previously confirmed fork owner "
+                        f"for '{default_pr_repo}' ('{confirmed_entry.owner}') "
+                        f"still matches the actual resolved fork owner "
+                        f"({live_owner!r}). Ask the user to confirm publishing "
+                        f"there, then re-run create-pr with --confirm-fork "
+                        f"(or confirm_fork=True)."
                     ),
                 }
         if not confirm_fork and not already_confirmed:

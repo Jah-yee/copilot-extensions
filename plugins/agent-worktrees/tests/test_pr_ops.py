@@ -882,6 +882,26 @@ class TestResolveLiveForkOwner:
         assert pr_ops._resolve_live_fork_owner(self._cfg(), None) is None
 
 
+class TestNonDefaultGhHost:
+    """pr.fork's durable registry isn't scoped by GitHub authority (host),
+    so it must refuse to operate at all when GH_HOST pins a non-default
+    host -- rather than risk a confirmation recorded under github.com
+    silently authorizing a fork/push against an unrelated same-named repo
+    on a GitHub Enterprise instance."""
+
+    def test_unset_returns_empty(self, monkeypatch):
+        monkeypatch.delenv("GH_HOST", raising=False)
+        assert pr_ops._non_default_gh_host() == ""
+
+    def test_github_com_is_default_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("GH_HOST", "GitHub.com")
+        assert pr_ops._non_default_gh_host() == ""
+
+    def test_enterprise_host_is_non_default(self, monkeypatch):
+        monkeypatch.setenv("GH_HOST", "github.example.com")
+        assert pr_ops._non_default_gh_host() == "github.example.com"
+
+
 class TestCreatePRForkFlow:
     def _fork_config(self, config, tmp_path: Path, **fork_overrides):
         import dataclasses
@@ -919,6 +939,24 @@ class TestCreatePRForkFlow:
         assert not git_ops.local_branch_exists(
             "feature/work-2-aaaa", cwd=str(wt_path)
         )
+
+    def test_fork_mode_rejects_non_default_gh_host(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """pr.fork's durable registry isn't scoped by GitHub authority, so a
+        non-default GH_HOST must be refused outright -- even on a caller's
+        very first, explicitly-confirmed call -- rather than risk a later
+        confirmation silently reusing across github.com vs. an Enterprise
+        host with the same owner/repo slug."""
+        config, wid, wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)
+        monkeypatch.setenv("GH_HOST", "github.example.com")
+
+        res = pr_ops.create_pr(wid, config, confirm_fork=True)
+
+        assert res["success"] is False, res
+        assert "non-default GH_HOST" in res["error"]
+        assert not git_ops.has_remote("fork", cwd=str(wt_path))
 
     def test_fork_mode_confirmed_pushes_to_fork_not_origin(
         self, pr_repo, tmp_path, monkeypatch,
@@ -1189,6 +1227,45 @@ class TestCreatePRForkFlow:
         )
         assert "needs_confirmation" not in res3, res3
         assert res3["success"] is True, res3
+
+    def test_inconclusive_live_owner_check_fails_closed(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """A FAILED/inconclusive non-mutating owner lookup (e.g. a transient
+        API error) must ALSO fail closed, not silently trust the stored
+        approval -- ensure_fork's own (separate) lookup moments later could
+        legitimately resolve a DIFFERENT owner and persist it without this
+        call ever having actually confirmed that was intended."""
+        config, wid, _wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)  # no owner override
+
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "inconclusive-login"),
+        )
+        # The non-mutating pre-check is inconclusive (simulates a transient
+        # failure), regardless of what ensure_fork's own lookup might do.
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_live_fork_owner", lambda prcfg, token: None,
+        )
+
+        from agent_worktrees import fork_registry
+        repo = "acme/inconclusive-owner-repo"
+        fork_registry.record_confirmation(
+            repo, "stored-owner", account="inconclusive-login",
+        )
+
+        res = pr_ops.create_pr(
+            wid, config, target_repo=repo,
+        )  # no confirm_fork -- an unverifiable owner must still re-prompt
+
+        assert res["success"] is False, res
+        assert res["needs_confirmation"] == "fork_setup", res
+        assert not git_ops.has_remote("fork", cwd=str(_wt_path))
 
     def test_forks_set_default_scope_matches_create_pr_gate(
         self, pr_repo, tmp_path, monkeypatch,

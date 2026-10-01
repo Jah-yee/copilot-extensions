@@ -181,6 +181,76 @@ def test_shell_git_fetch_from_anchor_cwd_allows(tmp_path, anchor):
                         env={}, home=tmp_path, anchors=anchor) is None
 
 
+def test_shell_git_merge_base_from_anchor_cwd_allows(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    assert guard.decide(_shell("git merge-base main HEAD", gp),
+                        env={}, home=tmp_path, anchors=anchor) is None
+
+
+@pytest.mark.parametrize("separator", ["\n", "; ", " && "])
+def test_shell_git_readonly_batch_from_anchor_cwd_allows(
+    tmp_path, anchor, separator,
+):
+    gp = anchor[0]["path"]
+    command = separator.join([
+        "git pull --ff-only origin main",
+        "git fetch origin refs/pull/42/head",
+        "git merge-base main HEAD",
+    ])
+    assert guard.decide(_shell(command, gp), env={}, home=tmp_path,
+                        anchors=anchor) is None
+
+
+def test_shell_git_fetch_and_powershell_merge_base_assignment_allows(
+    tmp_path, anchor,
+):
+    gp = anchor[0]["path"]
+    command = (
+        "git fetch origin refs/pull/42/head\n"
+        "$base = (git merge-base main HEAD).Trim()"
+    )
+    assert guard.decide(_shell(command, gp), env={}, home=tmp_path,
+                        anchors=anchor) is None
+
+
+@pytest.mark.parametrize("separator", ["\n", "; ", " && "])
+def test_shell_git_readonly_batch_with_dashC_allows(
+    tmp_path, anchor, separator,
+):
+    gp = anchor[0]["path"]
+    command = separator.join([
+        f'git --no-pager -C "{gp}" pull --ff-only origin main',
+        f'git --no-pager -C "{gp}" fetch origin refs/pull/42/head',
+        f'git --no-pager -C "{gp}" merge-base main HEAD',
+    ])
+    assert guard.decide(_shell(command, tmp_path), env={}, home=tmp_path,
+                        anchors=anchor) is None
+
+
+def test_shell_git_write_with_global_options_still_denies(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    command = (
+        f'git --no-pager -c color.ui=false -C "{gp}" commit -m example'
+    )
+    d = guard.decide(_shell(command, tmp_path), env={}, home=tmp_path,
+                     anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("separator", ["\n", "; ", " && "])
+def test_shell_git_batch_with_real_mutation_still_denies(
+    tmp_path, anchor, separator,
+):
+    gp = anchor[0]["path"]
+    command = separator.join([
+        "git fetch origin refs/pull/42/head",
+        "git commit -m example",
+    ])
+    d = guard.decide(_shell(command, gp), env={}, home=tmp_path,
+                     anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_shell_git_bare_pull_without_ff_only_from_anchor_cwd_denies(
     tmp_path, anchor,
 ):

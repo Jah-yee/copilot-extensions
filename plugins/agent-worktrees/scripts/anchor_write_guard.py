@@ -92,12 +92,9 @@ PATH_ARG_KEYS = ("path", "file_path", "filePath", "filename", "fileName",
                  "target_file", "targetFile")
 CMD_ARG_KEYS = ("command", "cmd", "script", "commandLine", "commandline", "input")
 
-# Write-ish verbs (PowerShell cmdlets + POSIX + git mutations); presence
-# alongside an anchor-path literal in a shell command flips a read into a
-# suspected write. Mirrors cross_repo_guard. ``pull`` stays in this cheap
-# early-out list -- an unsafe (non-``--ff-only``) pull must still reach the
-# precise per-segment analysis below, which is where the real ``--ff-only``
-# exemption lives (see ``_GIT_FF_ONLY_FLAG``).
+# Write-ish verbs (PowerShell cmdlets + POSIX commands) plus any Git invocation.
+# Git is classified precisely per segment below because its global options make
+# a safe regex-only early-out prone to both false positives and false negatives.
 _WRITE_VERBS = re.compile(
     "|".join([
         "Set-Content", "Add-Content", "Out-File", "New-Item", "Remove-Item",
@@ -106,9 +103,7 @@ _WRITE_VERBS = re.compile(
         ">>?",
         r"\btee\b", r"\bsed\b\s+-i", r"\bcp\b", r"\bmv\b", r"\brm\b",
         r"\btouch\b", r"\bmkdir\b", r"\bdd\b", r"\btruncate\b", r"\bpatch\b",
-        r"git\s+(?:-C\s+\S+\s+)?(?:apply|commit|checkout|switch|reset|"
-        r"restore|clean|rm|mv|stash|merge|rebase|pull|cherry-pick|revert|"
-        r"add|init)",
+        r"\bgit\b",
     ]),
     re.IGNORECASE,
 )
@@ -144,11 +139,15 @@ _WRITE_CMD_START = re.compile(
 )
 # A git command at segment start, and the write subcommands that mutate a repo.
 _GIT_START = re.compile(r"^\s*[\"']?git\b", re.IGNORECASE)
-_GIT_WRITE_SUB = re.compile(
-    r"\b(?:add|commit|apply|checkout|switch|reset|restore|clean|rm|mv|stash|"
-    r"merge|rebase|pull|cherry-pick|revert|init)\b",
-    re.IGNORECASE,
-)
+_GIT_WRITE_SUBCOMMANDS = frozenset({
+    "add", "commit", "apply", "checkout", "switch", "reset", "restore",
+    "clean", "rm", "mv", "stash", "merge", "rebase", "pull", "cherry-pick",
+    "revert", "init",
+})
+_GIT_TOKEN = re.compile(r""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+""")
+_GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
+    "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+})
 # ``pull`` is the one write-sub verb with a narrow, precise exemption: this
 # guard's invariant is "no agent-authored content lands in the anchor" (a
 # stray commit, an edit that never goes through the worktree/PR flow) -- and
@@ -164,20 +163,9 @@ _GIT_WRITE_SUB = re.compile(
 # independent copy of this list (different guard, different repo-delegation
 # reasoning) and is unaffected either way.
 #
-# The exemption must identify the actual git SUBCOMMAND, not merely search
-# the segment for the word ``pull`` -- a bare substring search would
-# misclassify ``git commit -m 'pull --ff-only'`` (a real commit, quoting
-# unrelated text) as an exempt pull. This anchors on ``git`` (+ optional
-# ``-C <path>``) followed immediately by the subcommand word.
-_GIT_SUBCOMMAND = re.compile(
-    r"""^\s*["']?git\b(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+([A-Za-z][\w-]*)""",
-    re.IGNORECASE,
-)
 _GIT_FF_ONLY_FLAG = re.compile(
     r"""(?:^|\s)["']?--ff-only["']?(?=\s|$)""", re.IGNORECASE,
 )
-# A ``-C`` (git change-directory) flag anywhere in a git segment.
-_GIT_DASH_C_FLAG = re.compile(r"(?:^|\s)-C\b", re.IGNORECASE)
 
 # Leading benign prefixes to strip so a write verb after them is still seen at
 # "command position": env-assignments (``VAR=val``) and wrapper commands
@@ -199,6 +187,59 @@ def _effective_seg(seg: str) -> str:
         prev = seg
         seg = _SEG_STRIP.sub("", seg, count=1)
     return seg
+
+
+def _unquote_shell_token(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _git_invocation(seg: str) -> tuple[str | None, bool]:
+    """Return the actual git subcommand and whether global ``-C`` is present.
+
+    Git accepts global options before the subcommand. Parse only that prefix;
+    arguments after the subcommand cannot change which operation is running.
+    """
+    tokens = [_unquote_shell_token(token) for token in _GIT_TOKEN.findall(seg)]
+    if not tokens:
+        return None, False
+    first = tokens[0].lstrip("\"'")
+    if first.lower() != "git":
+        return None, False
+
+    has_dash_c = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        lower = token.lower()
+        if token == "--":
+            index += 1
+            break
+        if token in {"-C", "-c"} or lower in _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE:
+            has_dash_c = has_dash_c or token == "-C"
+            index += 2
+            continue
+        if token.startswith("-C") and token != "-C":
+            has_dash_c = True
+            index += 1
+            continue
+        if token.startswith("-c") and token != "-c":
+            index += 1
+            continue
+        if any(
+            lower.startswith(option + "=")
+            for option in _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE
+        ):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return lower, has_dash_c
+    if index < len(tokens):
+        return tokens[index].lower(), has_dash_c
+    return None, has_dash_c
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An
@@ -509,17 +550,16 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         eff = _effective_seg(seg)
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))
         is_git = bool(_GIT_START.match(eff))
-        git_write = is_git and bool(_GIT_WRITE_SUB.search(seg))
+        subcmd, has_dash_c = _git_invocation(eff) if is_git else (None, False)
+        git_write = subcmd in _GIT_WRITE_SUBCOMMANDS
         # A ``pull`` invocation is exempt from ``git_write`` ONLY when its
         # actual SUBCOMMAND (not merely the word ``pull`` anywhere in the
-        # segment -- see ``_GIT_SUBCOMMAND``'s comment) is ``pull`` and the
+        # segment) is ``pull`` and the
         # segment also explicitly carries ``--ff-only``. Any other write-sub
         # verb (or a pull lacking that flag) is untouched.
-        subcmd = _GIT_SUBCOMMAND.match(eff)
-        is_pull = bool(subcmd and subcmd.group(1).lower() == "pull")
+        is_pull = subcmd == "pull"
         if git_write and is_pull and _GIT_FF_ONLY_FLAG.search(seg):
             git_write = False
-        has_dash_c = is_git and bool(_GIT_DASH_C_FLAG.search(seg))
         for a in anchors:
             gp = a.get("path")
             if not gp:

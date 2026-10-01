@@ -619,6 +619,8 @@ async def post_live_message(
         )
     db = _db(request)
     now = time.time()
+    target = db.get_live_session(session_id)
+    target_session_id = target["session_id"] if target is not None else session_id
 
     # Freshness lease (#2906): validate the target registration's heartbeat
     # lease and enqueue *atomically* -- the check + insert run under one write
@@ -633,11 +635,11 @@ async def post_live_message(
         # rejected send must not leak a permanent LiveEventStore log for a
         # stale/absent id. get_or_create is deferred until after the enqueue
         # succeeds below.
-        existing_log = _store(request).get(session_id)
+        existing_log = _store(request).get(target_session_id)
         after = existing_log.latest_id if existing_log is not None else 0
 
     message_id, reason = db.enqueue_live_message_if_fresh(
-        session_id,
+        target_session_id,
         sender=body.sender,
         body=body.body,
         now=now,
@@ -653,7 +655,7 @@ async def post_live_message(
         raise HTTPException(
             status_code=409,
             detail=(
-                f"live session {session_id} is no longer fresh (it ended, was "
+                f"live session {target_session_id} is no longer fresh (it ended, was "
                 "reaped, or was taken over); refusing delivery"
             ),
         )
@@ -688,16 +690,16 @@ async def post_live_message(
         raise HTTPException(status_code=500, detail="enqueue produced no id")
 
     if not body.wait:
-        return SendMessageResult(session_id=session_id, message_id=message_id)
+        return SendMessageResult(session_id=target_session_id, message_id=message_id)
 
     store = _store(request)
-    registration = db.get_live_session(session_id) or {}
+    registration = db.get_live_session(target_session_id) or {}
     log = store.get_or_create(
-        session_id, worktree_id=registration.get("worktree_id")
+        target_session_id, worktree_id=registration.get("worktree_id")
     )
     reply = await await_turn_reply(log, after=after, timeout=body.wait_timeout)
     return SendMessageResult(
-        session_id=session_id,
+        session_id=target_session_id,
         message_id=message_id,
         replied=bool(reply["replied"]),
         reply=reply["reply"],
@@ -725,8 +727,10 @@ async def set_live_mode(
     on briefly for its outcome, else reported ``in_flight`` (it may still apply).
     """
     db = _db(request)
+    target = db.get_live_session(session_id)
+    target_session_id = target["session_id"] if target is not None else session_id
     control_id, reason = db.enqueue_live_message_if_fresh(
-        session_id,
+        target_session_id,
         sender=body.sender,
         body=body.mode,
         now=time.time(),
@@ -742,12 +746,12 @@ async def set_live_mode(
             detail=f"live session {session_id} can't take a mode change now ({reason})",
         )
     def settled() -> SetModeResult | None:
-        outcome = (db.live_control_state(session_id, control_id) or {}).get("outcome")
+        outcome = (db.live_control_state(target_session_id, control_id) or {}).get("outcome")
         if outcome == "applied":
-            return SetModeResult(session_id=session_id, mode=body.mode, applied=True, state="applied")
+            return SetModeResult(session_id=target_session_id, mode=body.mode, applied=True, state="applied")
         if outcome is not None:
             return SetModeResult(
-                session_id=session_id, mode=body.mode, applied=False, state="rejected",
+                session_id=target_session_id, mode=body.mode, applied=False, state="rejected",
                 detail="the session couldn't apply it",
             )
         return None
@@ -757,9 +761,9 @@ async def set_live_mode(
         if (result := settled()) is not None:
             return result
         await asyncio.sleep(MODE_POLL_SECONDS)
-    if db.withdraw_live_control(session_id, control_id, time.time()):
+    if db.withdraw_live_control(target_session_id, control_id, time.time()):
         return SetModeResult(
-            session_id=session_id, mode=body.mode, applied=False, state="withdrawn",
+            session_id=target_session_id, mode=body.mode, applied=False, state="withdrawn",
             detail=(
                 "the session didn't take it in time: its agent-bridge extension may "
                 "predate mode changes, or the session isn't responding"
@@ -774,7 +778,7 @@ async def set_live_mode(
             break
         await asyncio.sleep(MODE_POLL_SECONDS)
     return SetModeResult(
-        session_id=session_id, mode=body.mode, applied=None, state="in_flight",
+        session_id=target_session_id, mode=body.mode, applied=None, state="in_flight",
         detail="the session took the change but hasn't reported it applied; it may still apply",
     )
 
@@ -787,9 +791,11 @@ async def list_live_controls(
     extension's control poll. Each is returned once; the extension applies it
     and reports the outcome through ``/controls/ack``."""
     db = _db(request)
-    if db.get_live_session(session_id) is None:
+    row = db.get_live_session(session_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
-    rows = db.claim_live_controls(session_id, time.time(), CONTROL_MAX_AGE_SECONDS)
+    target_session_id = row["session_id"]
+    rows = db.claim_live_controls(target_session_id, time.time(), CONTROL_MAX_AGE_SECONDS)
     return LiveMessageListResponse(
         messages=[
             LiveMessage(
@@ -809,10 +815,12 @@ async def ack_live_controls(
     Only controls are settled here, and only once claimed; unlike a message
     ack, it doesn't mark the session busy: a mode change starts no turn."""
     db = _db(request)
-    if db.get_live_session(session_id) is None:
+    row = db.get_live_session(session_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
+    target_session_id = row["session_id"]
     acked = db.ack_live_messages(
-        session_id, body.ids, now=time.time(), controls=True,
+        target_session_id, body.ids, now=time.time(), controls=True,
         outcome="applied" if body.applied else "rejected",
     )
     return AckMessagesResult(acked=acked)
@@ -828,9 +836,11 @@ async def list_live_messages(
     ``session.send``, then acks. 404 if the session is not registered.
     """
     db = _db(request)
-    if db.get_live_session(session_id) is None:
+    row = db.get_live_session(session_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
-    rows = db.list_pending_live_messages(session_id)
+    target_session_id = row["session_id"]
+    rows = db.list_pending_live_messages(target_session_id)
     return LiveMessageListResponse(
         messages=[
             LiveMessage(
@@ -857,16 +867,18 @@ async def ack_live_messages(
     is a no-op, so a redelivered ack never errors or double-counts.
     """
     db = _db(request)
-    if db.get_live_session(session_id) is None:
+    row = db.get_live_session(session_id)
+    if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
+    target_session_id = row["session_id"]
     now = time.time()
-    acked = db.ack_live_messages(session_id, body.ids, now=now)
+    acked = db.ack_live_messages(target_session_id, body.ids, now=now)
     if acked:
         # The extension acks only after ``session.send`` resolves. That is the
         # bridge's first reliable evidence that a queued/steered prompt reached
         # the live CLI after an idle turn, so mark the represented session busy
         # until later mirrored events (or a turn boundary) refine it.
         db.update_live_turn_state(
-            session_id, turn_state="running", last_activity_at=now
+            target_session_id, turn_state="running", last_activity_at=now
         )
     return AckMessagesResult(acked=acked)

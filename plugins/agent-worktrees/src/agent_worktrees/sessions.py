@@ -2101,21 +2101,10 @@ def mux_seed_pane(
 ) -> dict:
     """Type ``seed`` as the first interactive prompt into a freshly spawned pane.
 
-    A cutover spawns a *plain* interactive Copilot (no ``--interactive`` launch
-    arg -- see :func:`build_mux_new_window_argv`: psmux cannot carry a
-    spaces-containing pane arg on Windows), then this injects the seed as literal
-    keystrokes once Copilot is ready. ``send-keys -l`` delivers the whole prompt
-    (spaces and all) as one line -- the same mux mechanism the retire path uses --
-    sidestepping every command-line quoting hazard.
-
-    Hardened against seeding into the wrong pane state (a half-loaded TUI, or a
-    pane that fell back to a bare shell whose ``❯`` looks like Copilot's caret):
-    confirmed-ready requires two consecutive stable polls (never a first-frame
-    match); an unconfirmed pane never gets a typed/submitted seed (the caller
-    sees ``sent``/``submitted`` false); a typed seed is echo-verified before
-    Enter is pressed. Also auto-dismisses known blocking startup dialogs (see
-    :mod:`agent_worktrees.pane_nudges`) -- e.g. Copilot's first-run desktop-app
-    nudge, which otherwise deadlocks a detached launch forever.
+    Hardened against seeding into the wrong pane state: confirmed-ready uses
+    the live input region, requires two stable polls, never types into an
+    unconfirmed pane, echo-verifies before Enter, and auto-dismisses known
+    blocking startup dialogs (see :mod:`agent_worktrees.pane_nudges`).
 
     ``ready_timeout`` is the idle window: visibly busy/changing panes keep the
     wait alive, capped by ``hard_timeout``. Returns ``{ok, pane, ready, sent,
@@ -2126,7 +2115,7 @@ def mux_seed_pane(
     import subprocess
     import time
 
-    from . import pane_nudges
+    from . import pane_nudges, pane_readiness
 
     mux_bin = _mux_bin(mux)
 
@@ -2139,41 +2128,6 @@ def mux_seed_pane(
             return (r.stdout or "") if r.returncode == 0 else ""
         except (OSError, subprocess.TimeoutExpired):
             return ""
-
-    def _input_region(cap: str) -> str:
-        """Bottom live-input region, not scrollback transcript history."""
-        lines = [line.rstrip() for line in cap.splitlines() if line.strip()]
-        return "\n".join(lines[-8:])
-
-    def _busy(region: str) -> bool:
-        low = region.lower()
-        return any(
-            phrase in low
-            for phrase in (
-                "resuming session",
-                "loading",
-                "starting",
-                "initializing",
-                "authenticating",
-                "connecting",
-            )
-        )
-
-    def _ready_signature(cap: str) -> str | None:
-        region = _input_region(cap)
-        low = region.lower()
-        if "enter to select" in low or _busy(region):
-            return None
-        # Copilot CLI >= 1.0.89 boxed input. Both box rails must be in the live
-        # bottom region so an old transcript drawing cannot satisfy readiness.
-        if "╻▄" in region and "╹▀" in region:
-            return "boxed-input"
-        # Older Copilot builds expose a footer while the input is live. Require
-        # the footer in the bottom region; a bare shell prompt that happens to
-        # use the same caret glyph is not enough.
-        if "esc" in low and "interrupt" in low:
-            return "interrupt-footer"
-        return None
 
     # Readiness must be STABLE (two polls) so a transient banner/spinner frame
     # can't trip it. A known blocking dialog is dismissed at most once per call.
@@ -2188,8 +2142,8 @@ def mux_seed_pane(
     hard_deadline = start + hard_window
     while time.monotonic() < min(idle_deadline, hard_deadline):
         cap = _cap()
-        region = _input_region(cap)
-        ready_sig = _ready_signature(cap)
+        region = pane_readiness.input_region(cap)
+        ready_sig = pane_readiness.ready_signature(cap)
         if ready_sig:
             stable = stable + 1 if ready_sig == last_ready_sig else 1
             last_ready_sig = ready_sig
@@ -2201,7 +2155,7 @@ def mux_seed_pane(
             pane_nudges.dismiss(mux_bin, pane_id)
         else:
             stable, last_ready_sig = 0, None
-        if (_busy(region) or region != last_region) and idle_window > 0:
+        if (pane_readiness.is_busy(region) or region != last_region) and idle_window > 0:
             idle_deadline = min(hard_deadline, time.monotonic() + idle_window)
         last_region = region
         time.sleep(poll_interval)

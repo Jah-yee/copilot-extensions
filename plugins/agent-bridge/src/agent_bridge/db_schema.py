@@ -58,6 +58,16 @@ class _SchemaMixin:
                 "idx_live_messages_idempotency ON live_messages(idempotency_key)"
                 " WHERE idempotency_key IS NOT NULL"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS live_session_aliases ("
+                "alias_session_id TEXT PRIMARY KEY, "
+                "target_session_id TEXT NOT NULL, "
+                "created_at REAL NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_live_session_aliases_target "
+                "ON live_session_aliases(target_session_id)"
+            )
             conn.commit()
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
@@ -561,3 +571,22 @@ class _SchemaMixin:
             conn.execute("UPDATE schema_version SET version=?", (23,))
             conn.commit()
             log.info("Schema migrated to version 23: live_messages.claimed_at/outcome")
+
+        if from_version < 24:
+            # v23 -> v24: live-session aliases let a transient placeholder id
+            # forward to the current id when Copilot changes session ids inside
+            # the same claimed CLI-mode scope (for example once a resumed
+            # conversation finishes loading). The live_sessions table remains
+            # the single registry; aliases only preserve old handles.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS live_session_aliases (
+                    alias_session_id TEXT PRIMARY KEY,
+                    target_session_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_live_session_aliases_target
+                    ON live_session_aliases(target_session_id);
+            """)
+            conn.execute("UPDATE schema_version SET version=?", (24,))
+            conn.commit()
+            log.info("Schema migrated to version 24: live-session aliases")

@@ -246,6 +246,35 @@ def test_migration_v9_to_v10_adds_driven_by(tmp_path: Path) -> None:
         db.close()
 
 
+def test_migration_v23_to_v24_adds_live_session_aliases(tmp_path: Path) -> None:
+    """A pre-v24 database gains the live-session alias table."""
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE schema_version (version INTEGER NOT NULL);"
+        "INSERT INTO schema_version (version) VALUES (23);"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    try:
+        ver = db.execute_read("SELECT version FROM schema_version")[0]["version"]
+        assert ver == SCHEMA_VERSION
+        db.execute_write(
+            "INSERT INTO live_session_aliases "
+            "(alias_session_id, target_session_id, created_at) VALUES (?, ?, ?)",
+            ("old", "new", 123.0),
+        )
+        rows = db.execute_read(
+            "SELECT target_session_id FROM live_session_aliases WHERE alias_session_id=?",
+            ("old",),
+        )
+        assert rows[0]["target_session_id"] == "new"
+    finally:
+        db.close()
+
+
 # -- Route layer ------------------------------------------------------------
 
 

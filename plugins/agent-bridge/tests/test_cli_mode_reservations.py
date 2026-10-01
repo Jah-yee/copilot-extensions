@@ -29,10 +29,18 @@ def tmp_db(tmp_path: Path):
     db.close()
 
 
-def _register(db: Database, sid: str, wt: str | None, now: float) -> str:
+def _register(
+    db: Database,
+    sid: str,
+    wt: str | None,
+    now: float,
+    *,
+    pid: int | None = 1,
+    driven_by: str | None = None,
+) -> str:
     return db.register_live_session(
         sid, machine="m", cwd="/w", worktree_id=wt, repo=None,
-        branch=None, pid=1, role="picker", now=now,
+        branch=None, pid=pid, role="picker", now=now, driven_by=driven_by,
     )
 
 
@@ -136,8 +144,8 @@ class TestClaimOnRegistration:
         successor) registers normally but does not steal the claim."""
         now = time.time()
         tmp_db.create_cli_mode_reservation("wt-A", now=now)
-        assert _register(tmp_db, "cli-1", "wt-A", now + 1) == "live"
-        assert _register(tmp_db, "cli-2", "wt-A", now + 2) == "live"
+        assert _register(tmp_db, "cli-1", "wt-A", now + 1, pid=1) == "live"
+        assert _register(tmp_db, "cli-2", "wt-A", now + 2, pid=2) == "live"
         assert tmp_db.get_live_session("cli-1")["cli_mode"] == 1
         assert tmp_db.get_live_session("cli-2")["cli_mode"] == 0
         assert (
@@ -165,6 +173,37 @@ class TestClaimOnRegistration:
         tmp_db.create_cli_mode_reservation("wt-A", now=now, ttl_seconds=10)
         assert _register(tmp_db, "cli-1", "wt-A", now + 11) == "live"
         assert tmp_db.get_live_session("cli-1")["cli_mode"] == 0
+
+    def test_same_process_session_id_change_inherits_claim_and_aliases_old_id(
+        self, tmp_db: Database
+    ) -> None:
+        import json as _json
+
+        now = time.time()
+        venue = {"kind": "codespace", "target": "cs-1", "mux_session_name": "wt-anchor-example"}
+        tmp_db.create_cli_mode_reservation(
+            "anchor-example@cs-1", now=now, venue=_json.dumps(venue),
+        )
+        assert _register(
+            tmp_db, "placeholder", "anchor-example@cs-1", now + 1,
+            pid=4242, driven_by="orchestrator",
+        ) == "live"
+        assert _register(
+            tmp_db, "resumed", "anchor-example@cs-1", now + 2, pid=4242,
+        ) == "live"
+
+        assert tmp_db.get_cli_mode_reservation("anchor-example@cs-1")[
+            "claimed_by_session_id"
+        ] == "resumed"
+        assert tmp_db.get_live_session_exact("placeholder") is None
+        row = tmp_db.get_live_session("resumed")
+        assert row["cli_mode"] == 1
+        assert row["driven_by"] == "orchestrator"
+        assert _json.loads(row["venue"]) == venue
+        assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+        assert tmp_db.resolve_live_session("placeholder", now=now + 3)["session_id"] == "resumed"
+        tmp_db.deregister_live_session("placeholder")
+        assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
 
 
 class TestClaimCliModeReservationDirect:
@@ -358,6 +397,51 @@ class TestReservationVenueRoutes:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["venue"] == {**_VENUE, "supervisor_ref": None}
+
+    def test_registered_session_id_change_forwards_old_handle(
+        self, tmp_db: Database
+    ) -> None:
+        client = self._client(tmp_db)
+        assert client.post(
+            "/api/v1/live-sessions/cli-mode-reservations/anchor-example@cs-1",
+            json={"worktree_id": "anchor-example@cs-1", "venue": _VENUE},
+        ).status_code == 200
+        first = client.post(
+            "/api/v1/live-sessions",
+            json={
+                "session_id": "placeholder",
+                "worktree_id": "anchor-example@cs-1",
+                "pid": 4242,
+                "driven_by": "orchestrator",
+            },
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            "/api/v1/live-sessions",
+            json={
+                "session_id": "resumed",
+                "worktree_id": "anchor-example@cs-1",
+                "pid": 4242,
+            },
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["session_id"] == "resumed"
+        assert second.json()["venue"] == {**_VENUE, "supervisor_ref": None}
+        assert second.json()["driven_by"] == "orchestrator"
+
+        resolved = client.get(
+            "/api/v1/live-sessions/resolve", params={"handle": "placeholder"},
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["session_id"] == "resumed"
+        sent = client.post(
+            "/api/v1/live-sessions/placeholder/messages",
+            json={"sender": "tester", "body": "hello"},
+        )
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["session_id"] == "resumed"
+        pending = tmp_db.list_pending_live_messages("resumed")
+        assert len(pending) == 1 and pending[0]["body"] == "hello"
         got = client.get(
             "/api/v1/live-sessions/cli-mode-reservations/anchor-example@cs-1"
         )

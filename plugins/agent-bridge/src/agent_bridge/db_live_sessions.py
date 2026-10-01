@@ -12,6 +12,7 @@ from .db_core import (
     live_session_is_fresh,
     local_pid_alive,
 )
+from .db_live_session_aliases import inherit_cli_mode_claim_for_session_id_change
 
 LIVE_MESSAGE_DELIVERIES = {"queue", "steer", "interrupt"}
 
@@ -69,6 +70,7 @@ class _LiveSessionsMixin:
         reservation holds the worktree) or ``'taken-over'`` (this id was taken
         over). The route maps a rejection to HTTP 409.
         """
+        session_id = self.resolve_live_session_id(session_id)
         cur = self.execute_write(
             "INSERT INTO live_sessions (session_id, machine, cwd, worktree_id, "
             "repo, branch, pid, role, driven_by, venue, status, registered_at, "
@@ -110,10 +112,14 @@ class _LiveSessionsMixin:
                     "WHERE session_id=?",
                     (worktree_id, session_id, session_id),
                 )
+            elif worktree_id is not None:
+                inherit_cli_mode_claim_for_session_id_change(
+                    self, worktree_id, session_id, now=now
+                )
             return "live"
         # Rejected -- derive why for the caller's error (the authoritative
         # decision was the 0-row write above).
-        existing = self.get_live_session(session_id)
+        existing = self.get_live_session_exact(session_id)
         if existing is not None and (existing.get("status") or "live") == "taken-over":
             return "taken-over"
         return "reserved"
@@ -236,11 +242,19 @@ class _LiveSessionsMixin:
 
     def deregister_live_session(self, session_id: str) -> None:
         """Remove a live interactive-session registration and its message queue."""
+        exact = self.get_live_session_exact(session_id)
+        if exact is None:
+            return
         self.execute_write(
             "DELETE FROM live_sessions WHERE session_id=?", (session_id,)
         )
         self.execute_write(
             "DELETE FROM live_messages WHERE session_id=?", (session_id,)
+        )
+        self.execute_write(
+            "DELETE FROM live_session_aliases "
+            "WHERE alias_session_id=? OR target_session_id=?",
+            (session_id, session_id),
         )
 
     def expire_live_sessions_for_worktree(
@@ -532,11 +546,36 @@ class _LiveSessionsMixin:
         )
         return dict(rows[0]) if rows else None
 
-    def get_live_session(self, session_id: str) -> dict[str, Any] | None:
+    def get_live_session_exact(self, session_id: str) -> dict[str, Any] | None:
         rows = self.execute_read(
             "SELECT * FROM live_sessions WHERE session_id=?", (session_id,)
         )
         return dict(rows[0]) if rows else None
+
+    def resolve_live_session_id(self, session_id: str) -> str:
+        """Resolve a retired live-session id to its current id, if aliased."""
+        current = session_id
+        seen: set[str] = set()
+        for _ in range(8):
+            if current in seen:
+                return current
+            seen.add(current)
+            rows = self.execute_read(
+                "SELECT target_session_id FROM live_session_aliases "
+                "WHERE alias_session_id=?",
+                (current,),
+            )
+            if not rows:
+                return current
+            target = rows[0]["target_session_id"]
+            if not isinstance(target, str) or not target or target == current:
+                return current
+            current = target
+        return current
+
+    def get_live_session(self, session_id: str) -> dict[str, Any] | None:
+        resolved = self.resolve_live_session_id(session_id)
+        return self.get_live_session_exact(resolved)
 
     def get_fresh_live_session(
         self,

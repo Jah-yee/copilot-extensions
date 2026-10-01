@@ -451,10 +451,15 @@ shape before committing to a design)_
       up from `plugins/<plugin>/`, one level up from `worktree-manager/`).
       Covers both trees (`sync-vendored-libs.py`/`check-vendored-libs-
       sync.py` already scan both today). **All sub-items below are
-      structurally complete; the sole standing exception is
-      `customizing-copilot`'s one current structural holdout — a
-      `plugin-activation` pointer copy that cannot take this form at all
-      (see its own sub-item for why).**
+      complete for every ELIGIBLE copy; two copies are explicit,
+      deliberate exceptions and do NOT take this canonical-reference
+      form at all — see their own sub-item for why each:
+      `customizing-copilot`'s `plugin-activation` copy (no consuming
+      `pyproject.toml` at all, stays a pointer) and `agent-worktrees`'s
+      `plugin-activation` copy (hits a real `uv` resolver conflict against
+      its own deliberately-real `dropin-registry`/`plugin-resolve`
+      siblings, resolved instead as a full real byte-vendored copy,
+      2026-10-01).**
       - [x] **Re-convert the 7 libs already converted to `src-passthrough`**
             back to this form first, one at a time, using the exact same
             bounded-slice pattern already proven for the forward

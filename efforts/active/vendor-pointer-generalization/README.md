@@ -651,7 +651,7 @@ shape before committing to a design)_
       compares the output against a fresh current-canonical vendored
       reconstruction (copy canonical -> materialize nested refs) rather than a
       stale historical tree. No `SKIP`s, no tree drift.
-- [x] Confirm every consuming plugin's own test suite
+- [ ] Confirm every consuming plugin's own test suite
       (`tools/run-plugin-tests.py <plugin>`) passes with **no local
       `libs/<lib>` directory present at all** in the `dev` checkout —
       proving the canonical reference alone (via `[tool.uv.sources]`
@@ -660,16 +660,18 @@ shape before committing to a design)_
       confirm (this is the whole point of the second course correction) a
       NON-editable `uv pip install <plugin-dir>` still resolves the
       shared-lib dependency to canonical live (not copied) — the property
-      `src-passthrough` lacked. **Status, 2026-10-01:** both halves now
-      DONE. The editable half was proven first — the full-suite proof
-      covers every converted plugin consumer (`tools/run-plugin-tests.py
-      agent-worktrees --reinstall` plus the earlier 10-plugin sweep recorded
-      below). The non-editable half was blocked on two real bugs surfaced by
-      `agent-worktrees` specifically (packaged wrapper assets not
-      self-contained, issue #4787; staged-install source recovery not
-      durable, issue #4788) — both fixed and merged (PRs #4796, #4794), so
-      the non-editable proof now holds for every real converted plugin this
-      effort touched, with no remaining shippability gap.
+      `src-passthrough` lacked. **Status, 2026-10-01:** the editable
+      half is DONE — the full-suite proof covers every converted plugin
+      consumer (`tools/run-plugin-tests.py agent-worktrees --reinstall`
+      plus the earlier 10-plugin sweep recorded below). The non-editable
+      half's two real blocking bugs are now fixed (`agent-worktrees`'s
+      packaged wrapper assets, issue #4787; its staged-install source
+      recovery, issue #4788 — both merged, PRs #4796/#4794), **but the
+      non-editable suite proof itself is still open**: it is only
+      directly confirmed so far for `lazy-cli-dispatch`, `agent-vault`,
+      `agent-ssh`, and now `agent-worktrees` (4 of the ~12 real converted
+      plugin consumers) — the remaining suite matrix still needs to be
+      run and recorded before this criterion can honestly close.
 
 ### Phase 2 — Canonical-reference form for the shared installer engine
 > **Status note (2026-09-30, updated):** libs' mechanism pivoted away to
@@ -778,7 +780,7 @@ shape before committing to a design)_
       `uv`-editable is current again; a `src-passthrough` copy's own
       "local pointer directory present, `src/` replaced by a stub"
       criterion no longer applies once each lib is re-converted.)
-- [x] **NEW criterion, added by the second course correction**
+- [ ] **NEW criterion, added by the second course correction**
       (confirmed for `lazy-cli-dispatch` specifically, PR #4245 -- not
       yet for every lib, since only that one is converted so far): a
       converted plugin's own test suite ALSO passes when the plugin
@@ -805,17 +807,19 @@ shape before committing to a design)_
       Those two blockers were tracked explicitly as issue **#4787**
       (wrapper assets not self-contained in packaged fallback) and issue
       **#4788** (staged non-editable installs lose the remaining
-      `src-passthrough` source binding). **Done, 2026-10-01 later:** both
-      resolved. #4788 closed by converting `agent-worktrees`'s
-      `plugin-activation` copy to a full real vendored tree with committed
-      staged-install regression coverage (PR #4794). #4787 closed by
-      packaging `agent-worktrees`'s launch-wrapper assets into the plugin's
-      own payload via a manifest-driven materialize step
+      `src-passthrough` source binding). **Update, 2026-10-01 later:** both
+      underlying bugs resolved. #4788 closed by converting
+      `agent-worktrees`'s `plugin-activation` copy to a full real vendored
+      tree with committed staged-install regression coverage (PR #4794).
+      #4787 closed by packaging `agent-worktrees`'s launch-wrapper assets
+      into the plugin's own payload via a manifest-driven materialize step
       (`tools/materialize_launch_wrapper_assets.py`), with a packaged-preview
       regression proving `deploy_wrappers()` succeeds from a payload-only
-      root with no sibling `worktree-manager/` present (PR #4796). The
-      non-editable top-level-suite proof is therefore complete for every
-      real converted plugin this effort touched.
+      root with no sibling `worktree-manager/` present (PR #4796). With both
+      bugs fixed, `agent-worktrees` itself is now confirmed non-editably,
+      alongside `lazy-cli-dispatch`, `agent-vault`, and `agent-ssh` (4 of
+      ~12 real converted plugin consumers) — **this criterion stays open**
+      until the remaining suite matrix is run and recorded across the rest.
 - [x] Editing the canonical `libs/<lib>` source and re-running a
       converted plugin's tests **without reinstalling** picks up the edit
       — the "in-place test scripts in `dev`" / "call across folders"
@@ -3047,8 +3051,12 @@ _Pending._
 - Landed as PR #4796, merged. Issue #4787 closed.
 - **Net effect:** with both #4787 and #4788 now closed, the non-editable
   top-level-install Validation Plan item (and its Phase 1 twin checklist
-  item) are both fully satisfied for every real converted plugin this
-  effort touched — checked off above.
+  item) have both their known BLOCKING BUGS resolved — but a subsequent
+  review correctly found the broader "every converted plugin" claim was
+  not yet earned: only `lazy-cli-dispatch`, `agent-vault`, `agent-ssh`, and
+  now `agent-worktrees` are directly confirmed non-editably (4 of ~12 real
+  converted plugin consumers). Both checklist items stay **open** below
+  until the remaining suite matrix is run and recorded.
 
 ### 2026-10-01 — Master checklist consolidation pass
 
@@ -3065,16 +3073,24 @@ _Pending._
   - Corrected stale "BLOCKED for its remaining two copies" phrasing (now
     one copy, `customizing-copilot`'s, remains intentionally on
     `src-passthrough`; `agent-worktrees`'s is a closed full-copy exception).
-  - Checked off both the Validation Plan's non-editable-install item and
-    its Phase 1 twin, now that #4787/#4788 are both closed.
-- Two items remain genuinely, accurately open: the `src-passthrough`
+  - **Correction (2026-10-01, later pass, after review):** an earlier
+    version of this entry also checked off the Validation Plan's
+    non-editable-install item and its Phase 1 twin. Review correctly
+    pointed out that closing issues #4787/#4788 fixed the two *blocking
+    bugs* but did not itself demonstrate the suite passes non-editably for
+    every real converted plugin — only 4 of ~12 are directly confirmed.
+    Both items are reverted to open; see the per-item status notes above
+    for the precise remaining evidence gap.
+- Three items remain genuinely, accurately open: the `src-passthrough`
   retirement Plan item (blocked on `customizing-copilot`'s structural
   pointer dependency — a separate, not-yet-scoped replacement for its
-  `plugin-activation.py` script's load path) and nothing else — every
-  other Plan phase and Validation Plan item is now `[x]`.
-- **Effort `Status:` intentionally left as `Draft`** — the `src-passthrough`
-  retirement item is still open, so this effort is not ready to be marked
-  Done. That remaining item is a legitimate, narrowly-scoped follow-up
-  (not tracked as a separate issue yet); a future session should either
-  scope that replacement work as its own tracked issue/effort or fold it
-  in here before closing.
+  `plugin-activation.py` script's load path), and the non-editable
+  top-level-suite proof (Validation Plan item and its Phase 1 twin —
+  blocking bugs fixed, remaining-plugin suite matrix not yet run).
+- **Effort `Status:` intentionally left as `Draft`** — these items are
+  still open, so this effort is not ready to be marked Done. The
+  `src-passthrough` retirement item is a legitimate, narrowly-scoped
+  follow-up (not tracked as a separate issue yet); the suite-matrix item
+  just needs the remaining plugins run through the same non-editable
+  check already proven 4 times over. A future session should either close
+  both here or scope them as tracked follow-ups.

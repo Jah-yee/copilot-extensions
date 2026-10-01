@@ -2,7 +2,7 @@
 publish targets.
 
 Manages ``~/.agent-worktrees/forks.yaml``. ``create_pr``'s ``pr.fork``
-confirmation gate (see :mod:`.pr_ops`) refuses to fork/push anywhere on a
+confirmation gate (see :mod:`.pr_fork`) refuses to fork/push anywhere on a
 caller's first call per repo+login for a repo whose resolved PR flow
 publishes through a personal fork -- it returns
 ``needs_confirmation: "fork_setup"`` so a human can approve it. A GitHub fork
@@ -13,12 +13,12 @@ repo once a human has genuinely granted it.
 This module is the durable side of that approval. Once a repo's fork has been
 confirmed -- either by a live ``create_pr --confirm-fork`` call, or ahead of
 time via ``agent-worktrees forks set <repo> --owner <login>`` during machine/
-harness setup -- :func:`is_confirmed` lets :mod:`.pr_ops` skip the
+harness setup -- :func:`is_confirmed` lets :mod:`.pr_fork` skip the
 confirmation gate for every future call for that repo, on this machine, until
 the entry is removed.
 
 A confirmation is scoped to the **effective login** that will actually
-authenticate the repo's operations (:func:`.pr_ops._resolve_fork_credential`
+authenticate the repo's operations (:func:`.pr_fork._resolve_fork_credential`
 -- the gh account that genuinely signs the git/API calls, not merely the
 configured ``account_map`` entry, which can silently fall back to a
 *different* ambient identity when no token can be minted for the mapped
@@ -302,7 +302,7 @@ def is_confirmed(repo_slug: str, *, account: str = "") -> bool:
     """Whether ``repo_slug``'s fork-publish target is confirmed for ``account``.
 
     ``account`` should be the repo's currently-resolved effective identity
-    (e.g. ``pr_ops._resolve_fork_credential``'s scope, or ``""`` when truly
+    (e.g. ``pr_fork._resolve_fork_credential``'s scope, or ``""`` when truly
     unresolvable -- callers must treat an empty account as unconfirmable, not
     look it up here). A confirmation recorded under a different account no
     longer counts -- the account mapping changing since confirmation is
@@ -327,7 +327,7 @@ def record_confirmation(
     any existing one for the same repo -- switching which identity publishes
     a repo's PRs, then switching back, keeps both confirmations durable
     rather than the second overwriting the first. Called automatically by
-    :mod:`.pr_ops` after a successful fork-and-remote setup, and directly by
+    :mod:`.pr_fork` after a successful fork-and-remote setup, and directly by
     ``forks set`` for pre-seeding during machine/harness setup.
 
     Locked (see :func:`_locked_registry_file`): safe against a concurrent

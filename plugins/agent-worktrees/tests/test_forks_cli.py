@@ -15,7 +15,7 @@ def test_set_requires_owner(capfd):
 
 def test_set_resolves_account_by_default(monkeypatch, capfd):
     monkeypatch.setattr(
-        "agent_worktrees.pr_ops._resolve_fork_credential",
+        "agent_worktrees.pr_fork._resolve_fork_credential",
         lambda slug, prcfg: (None, "resolved-login"),
     )
     rc = forks_cli.cmd_forks_dispatch(
@@ -46,7 +46,7 @@ def test_set_resolves_account_by_default(monkeypatch, capfd):
 
 def test_set_explicit_account_overrides_resolution(monkeypatch, capfd):
     monkeypatch.setattr(
-        "agent_worktrees.pr_ops._resolve_fork_credential",
+        "agent_worktrees.pr_fork._resolve_fork_credential",
         lambda slug, prcfg: (None, "would-be-resolved"),
     )
     rc = forks_cli.cmd_forks_dispatch(
@@ -66,14 +66,14 @@ def test_set_with_token_stdin_derives_scope(monkeypatch, capfd):
     the secret from stdin, never argv (shell history / process listing)."""
     import io
 
-    from agent_worktrees import pr_ops
+    from agent_worktrees import pr_fork
 
     monkeypatch.setattr("sys.stdin", io.StringIO("ghp_exampletoken\n"))
     rc = forks_cli.cmd_forks_dispatch(
         ["set", "octo-org/widgets", "--owner", "octocat", "--token-stdin"],
     )
     assert rc == 0
-    expected_scope = pr_ops._token_scope("ghp_exampletoken")
+    expected_scope = pr_fork._token_scope("ghp_exampletoken")
     out = capfd.readouterr().out
     assert expected_scope in out
 
@@ -128,7 +128,7 @@ def test_unknown_flag_is_rejected_not_silently_ignored(monkeypatch, capfd):
     silently dropped while the command still succeeds under an unintended
     default -- it must fail loudly instead."""
     monkeypatch.setattr(
-        "agent_worktrees.pr_ops._resolve_fork_credential",
+        "agent_worktrees.pr_fork._resolve_fork_credential",
         lambda slug, prcfg: (None, "would-be-ambient"),
     )
     rc = forks_cli.cmd_forks_dispatch(
@@ -150,7 +150,7 @@ def test_extra_positional_is_rejected(capfd):
 
 def test_list_json_and_text(monkeypatch, capfd):
     monkeypatch.setattr(
-        "agent_worktrees.pr_ops._resolve_fork_credential",
+        "agent_worktrees.pr_fork._resolve_fork_credential",
         lambda slug, prcfg: (None, ""),
     )
     forks_cli.cmd_forks_dispatch(["set", "octo-org/widgets", "--owner", "octocat"])
@@ -182,7 +182,7 @@ def test_show_unknown_repo_fails(capfd):
 
 def test_remove(monkeypatch, capfd):
     monkeypatch.setattr(
-        "agent_worktrees.pr_ops._resolve_fork_credential",
+        "agent_worktrees.pr_fork._resolve_fork_credential",
         lambda slug, prcfg: (None, ""),
     )
     forks_cli.cmd_forks_dispatch(["set", "octo-org/widgets", "--owner", "octocat"])

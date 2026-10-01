@@ -1,7 +1,7 @@
 """``forks`` CLI dispatch: the durable confirmed fork-publish registry.
 
 See :mod:`.fork_registry` for the catalog itself and why it exists (the
-``pr.fork`` confirmation gate in :mod:`.pr_ops`). Kept as its own module
+``pr.fork`` confirmation gate in :mod:`.pr_fork`). Kept as its own module
 rather than folded into ``repos_cli.py`` to stay under this repo's per-module
 line-count cap, mirroring how ``copilot_identity_cli.py`` and
 ``related_cli.py`` are split out.
@@ -243,7 +243,7 @@ def _dispatch_sub(sub: str, rest: list[str], fork_registry, _opt) -> int:
         if "--token-stdin" in rest:
             import sys as _sys
 
-            from . import pr_ops
+            from . import pr_fork
 
             # Read the secret from stdin rather than argv (--token <value>
             # would land it in shell history and any process listing).
@@ -252,20 +252,21 @@ def _dispatch_sub(sub: str, rest: list[str], fork_registry, _opt) -> int:
                 output.err("forks set --token-stdin: no token read from stdin")
                 return 1
             # The SAME scope create_pr derives for a token_command/token_env
-            # -bound repo (see _resolve_fork_credential) -- pass the repo's
-            # real token here so the pre-seeded entry actually matches what
-            # create-pr will look up; --account alone cannot reproduce this,
-            # since create-pr never guesses a login for an opaque token.
-            account = pr_ops._token_scope(token)
+            # -bound repo (see pr_fork._resolve_fork_credential) -- pass the
+            # repo's real token here so the pre-seeded entry actually
+            # matches what create-pr will look up; --account alone cannot
+            # reproduce this, since create-pr never guesses a login for an
+            # opaque token.
+            account = pr_fork._token_scope(token)
         elif account is None:
-            from . import pr_ops
+            from . import pr_fork
 
             # Same resolver create_pr's gate checks against (not the bare
-            # account mapping) -- see pr_ops._resolve_fork_credential. Built
+            # account mapping) -- see pr_fork._resolve_fork_credential. Built
             # with a BARE PRConfig (no token_command/token_env): this default
             # covers the common account-mapping/ambient-auth case only. Use
             # --token-stdin instead for a repo using pr.token_command/token_env.
-            _token, account = pr_ops._resolve_fork_credential(
+            _token, account = pr_fork._resolve_fork_credential(
                 repo, cfg.PRConfig(provider="github"),
             )
         fork_registry.record_confirmation(

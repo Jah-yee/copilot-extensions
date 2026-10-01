@@ -443,142 +443,6 @@ def _title_from_commits(worktree_path: str, upstream: str) -> str | None:
     return subject or None
 
 
-def _token_scope(token: str) -> str:
-    """The durable confirmation scope for an opaque auth token's own value.
-
-    Shared by :func:`_resolve_fork_credential` and ``forks_cli set --token``
-    so a pre-seeded entry for a ``pr.token_command``/``token_env``-bound repo
-    uses the EXACT same scope string ``create_pr`` will compute for it.
-    """
-    import hashlib
-    return "token:" + hashlib.sha256(token.encode()).hexdigest()[:16]
-
-
-def _resolve_fork_credential(repo_slug: str, prcfg) -> tuple[str | None, str]:
-    """Resolve the (token, scope) pair for this repo's fork operations ONCE.
-
-    Both the confirmation-gate scope and the token actually handed to
-    ``provider.ensure_fork`` come from this single resolution (mirroring
-    ``providers.account_token_for_slug``'s own priority: an explicit
-    ``pr.token_command``/``token_env`` binding first, else the repo's
-    resolved account mapping only when a token can actually be minted for
-    it, else ambient ``gh`` auth) -- resolving it twice (once here, again
-    inside ``account_token_for_slug``) could let a non-deterministic
-    ``token_command`` or a transient mint authenticate the real operation as
-    a different identity than the one the gate just confirmed/recorded.
-
-    ``scope`` is ``""`` only when neither a configured token nor a
-    mapped/ambient account can be resolved at all -- an opaque custom token
-    still gets a non-empty hashed scope via :func:`_token_scope`. Callers
-    must treat an empty scope as **fail-closed**: never persist or trust a
-    durable confirmation for it, since two different unresolvable
-    identities would otherwise collide on the same empty key.
-    """
-    if getattr(prcfg, "provider", "") != "github":
-        return None, ""
-    from .providers.base import resolve_token
-
-    token = resolve_token(prcfg)
-    if token:
-        return token, _token_scope(token)
-
-    from . import git_ops, repos
-
-    account = repos.account_for_github_slug(repo_slug) or ""
-    active = git_ops.active_gh_account() or ""
-    if not account or (active and active.casefold() == account.casefold()):
-        return None, active
-    minted = git_ops.gh_token_for_account(account)
-    return (minted, account) if minted else (None, active)
-
-
-def _resolve_live_fork_owner(prcfg, token: str | None) -> str | None:
-    """Non-mutating pre-check of the real fork-owner login a publish would
-    resolve to, WITHOUT creating/verifying anything (see
-    ``providers.PRProvider.resolve_fork_owner``). Lets the confirmation gate
-    catch a stale/typo'd stored owner BEFORE :func:`_ensure_fork_and_remote`'s
-    mutating POST/remote-repoint can run.
-
-    Returns ``None`` (not a mismatch -- just "couldn't check") for an
-    unsupported provider or a failed resolution; the caller then proceeds to
-    the normal, mutating path, which will surface the same auth/provider
-    failure there instead of here.
-    """
-    if getattr(prcfg, "provider", "") != "github":
-        return None
-    from . import providers
-    try:
-        provider = providers.get_provider(prcfg.provider)
-        return provider.resolve_fork_owner(token=token)
-    except (providers.ProviderError, OSError):
-        return None
-
-
-def _non_default_gh_host() -> str:
-    """Ambient ``GH_HOST``, if pinning ``gh`` to a non-default (non-
-    github.com) authority -- empty string otherwise. ``pr.fork``'s durable
-    confirmation registry is keyed by repo+account only, not by GitHub
-    authority/host, so the same ``owner/repo`` slug could otherwise
-    identify two unrelated repositories (github.com vs. a GitHub Enterprise
-    host) and silently reuse a confirmation across that boundary. Until the
-    registry is host-scoped, this is used to refuse ``pr.fork`` entirely
-    against a non-default host rather than risk that cross-host reuse.
-    """
-    import os
-    host = (os.environ.get("GH_HOST") or "").strip().lower()
-    return host if host and host != "github.com" else ""
-
-
-def _ensure_fork_and_remote(
-    worktree_path: str, repo_slug: str, prcfg, *, token: str | None,
-) -> dict:
-    """Ensure the caller's fork of ``repo_slug`` exists and a local git remote
-    (``prcfg.fork.remote``) points at it.
-
-    Returns ``{"owner": <fork-owner>}`` on success, or ``{"error": <message>}``
-    on any failure (never raises) -- GitHub-only, matching ``pr.fork``'s scope.
-    An explicit ``prcfg.fork.owner`` overrides the fork-owner login used to
-    build the PR head, in case the caller pushes through a differently-named
-    fork than the one their own token would create/read. ``token`` is the
-    SAME value :func:`_resolve_fork_credential` resolved for the confirmation
-    scope -- never re-derived here, so the operation authenticates as
-    exactly the identity that was confirmed.
-    """
-    if prcfg.provider != "github":
-        return {"error": (
-            f"pr.fork is only supported for provider 'github' today "
-            f"(this repo is configured for provider {prcfg.provider!r})."
-        )}
-    non_default_host = _non_default_gh_host()
-    if non_default_host:
-        return {"error": (
-            f"pr.fork does not support a non-default GH_HOST "
-            f"('{non_default_host}') today -- its durable confirmation "
-            f"registry is not scoped by authority. Unset GH_HOST (or "
-            f"point it at github.com) to use pr.fork for this repo."
-        )}
-    from . import providers
-    try:
-        provider = providers.get_provider(prcfg.provider)
-        fork = provider.ensure_fork(repo_slug, token=token)
-    except (providers.ProviderError, OSError) as exc:
-        return {"error": f"Could not create/verify a fork of '{repo_slug}': {exc}"}
-    if fork is None:
-        return {"error": (
-            f"Could not create/verify a fork of '{repo_slug}' (no 'gh' auth, "
-            f"an API error, or an unsupported provider)."
-        )}
-    owner, clone_url = fork
-    if prcfg.fork.owner:
-        owner = prcfg.fork.owner
-    if not git_ops.ensure_remote(prcfg.fork.remote, clone_url, cwd=worktree_path):
-        return {"error": (
-            f"Could not point local git remote '{prcfg.fork.remote}' at "
-            f"'{clone_url}'."
-        )}
-    return {"owner": owner}
-
-
 def create_pr(
     worktree_id: str,
     config: Config,
@@ -903,7 +767,10 @@ def create_pr(
     # GitHub-only). Only touches anything when the repo opts in via
     # `pr.roles` and/or `pr.fork.enabled`; an unconfigured repo's
     # `prcfg`/`publish_remote` are unchanged from here on -- byte-for-byte
-    # today's behavior.
+    # today's behavior. The gate itself (identity/credential resolution,
+    # the durable confirmation check, and the fork/remote bootstrap) lives
+    # in pr_fork.py -- see resolve_fork_publish's docstring for its
+    # contract.
     publish_remote = remote
     fork_owner = ""
     if prcfg.roles:
@@ -917,118 +784,19 @@ def create_pr(
         prcfg = actor_flow.pr_config
         base["viewer_permission"] = actor_flow.viewer_permission
     if prcfg.fork.enabled:
-        from . import fork_registry
+        from . import pr_fork
 
-        # pr.fork's durable confirmation registry is not scoped by GitHub
-        # authority (host) -- the same owner/repo slug can identify
-        # unrelated repositories on github.com vs. a GitHub Enterprise host
-        # pinned via ambient GH_HOST, and reusing a confirmation across that
-        # boundary would silently authorize a fork/push against a DIFFERENT
-        # real repository. Until the registry is host-scoped, restrict
-        # pr.fork to the default github.com host entirely -- this check
-        # runs BEFORE any registry lookup, so a confirmation recorded under
-        # github.com can never be silently reused once GH_HOST later points
-        # elsewhere.
-        non_default_host = _non_default_gh_host()
-        if non_default_host:
-            return {**base, "error": (
-                f"pr.fork does not support a non-default GH_HOST "
-                f"('{non_default_host}') today -- its durable confirmation "
-                f"registry is not scoped by authority. Unset GH_HOST (or "
-                f"point it at github.com) to use pr.fork for this repo."
-            )}
-
-        # Resolve the credential ONCE: the same (token, scope) pair both
-        # gates the confirmation decision and authenticates the actual fork
-        # operation below -- see _resolve_fork_credential's docstring.
-        fork_token, effective_account = _resolve_fork_credential(default_pr_repo, prcfg)
-        # Fail closed on an unresolvable identity: never trust (or later
-        # persist) a confirmation under an empty scope, which would let any
-        # other equally-unresolvable caller silently reuse it.
-        confirmed_entry = (
-            fork_registry.find_fork(default_pr_repo, effective_account)
-            if effective_account else None
+        fork_result = pr_fork.resolve_fork_publish(
+            worktree_path, default_pr_repo, prcfg, confirm_fork=confirm_fork,
         )
-        # An explicit pr.fork.owner override deterministically decides the
-        # owner login used for the PR head (see _ensure_fork_and_remote --
-        # the actual fork/remote clone_url still comes from the
-        # authenticated provider) independent of which identity
-        # authenticates -- if it's configured and doesn't match what was
-        # actually confirmed, this is a DIFFERENT approval, not the same
-        # one under a new name; re-ask rather than silently publishing there.
-        already_confirmed = confirmed_entry is not None and (
-            not prcfg.fork.owner or prcfg.fork.owner == confirmed_entry.owner
-        )
-        # A stored confirmation's owner can diverge from the actually
-        # resolved fork owner (a typo at 'forks set' time, or a genuine
-        # upstream change) when NO static pr.fork.owner override exists to
-        # check against ahead of time. Validate it NON-MUTATINGLY, before
-        # _ensure_fork_and_remote's mutating POST/remote-repoint can run --
-        # a silent skip must not create a fork or touch the checkout before
-        # discovering the approved owner no longer matches. An explicit
-        # confirm_fork=True this call is itself a fresh, live approval of
-        # whatever the real owner turns out to be, and skips this pre-check.
-        # A FAILED/inconclusive lookup (live_owner is None, e.g. a transient
-        # API error) must ALSO fail closed -- an unverifiable owner must
-        # never silently reuse a stored approval, since ensure_fork's own
-        # (separate) lookup moments later could legitimately resolve a
-        # DIFFERENT owner and persist it without this call ever having
-        # confirmed that was intended.
-        if already_confirmed and not confirm_fork and not prcfg.fork.owner:
-            live_owner = _resolve_live_fork_owner(prcfg, fork_token)
-            if live_owner != confirmed_entry.owner:
-                return {
-                    **base, "success": False,
-                    "needs_confirmation": "fork_setup",
-                    "repo": default_pr_repo,
-                    "fork_remote": prcfg.fork.remote,
-                    "message": (
-                        f"Could not verify the previously confirmed fork owner "
-                        f"for '{default_pr_repo}' ('{confirmed_entry.owner}') "
-                        f"still matches the actual resolved fork owner "
-                        f"({live_owner!r}). Ask the user to confirm publishing "
-                        f"there, then re-run create-pr with --confirm-fork "
-                        f"(or confirm_fork=True)."
-                    ),
-                }
-        if not confirm_fork and not already_confirmed:
-            return {
-                **base, "success": False,
-                "needs_confirmation": "fork_setup",
-                "repo": default_pr_repo,
-                "fork_remote": prcfg.fork.remote,
-                "message": (
-                    f"This repo's resolved PR flow publishes through a personal fork of "
-                    f"'{default_pr_repo}' rather than a direct push. Ask the user to confirm "
-                    f"forking it and pushing there, then re-run create-pr with --confirm-fork "
-                    f"(or confirm_fork=True) -- only needed once per repo+login (or pre-seed "
-                    f"via 'forks set')."
-                ),
-            }
-        fork_setup = _ensure_fork_and_remote(
-            worktree_path, default_pr_repo, prcfg, token=fork_token,
-        )
-        if fork_setup.get("error"):
-            return {**base, "error": fork_setup["error"]}
-        fork_owner = fork_setup["owner"]
-        publish_remote = prcfg.fork.remote
-        # Re-persist whenever this is the first confirmation OR the real
-        # resolved owner just changed (the explicit-reconfirm self-heal path
-        # for a stale entry the pre-check above caught on a PRIOR call) --
-        # purely bookkeeping here, never a gating decision (that already
-        # happened, non-mutatingly, above).
-        owner_changed = (
-            confirmed_entry is not None and confirmed_entry.owner != fork_owner
-        )
-        if (not already_confirmed or owner_changed) and effective_account:
-            try:
-                fork_registry.record_confirmation(
-                    default_pr_repo, fork_owner,
-                    remote=prcfg.fork.remote, account=effective_account,
-                )
-            except OSError as exc:
-                base.setdefault("warnings", []).append(f"Could not persist fork confirmation: {exc}")
-
+        if fork_result.get("needs_confirmation"):
+            return {**base, "success": False, **fork_result}
+        if fork_result.get("error"):
+            return {**base, "error": fork_result["error"]}
+        publish_remote = fork_result["publish_remote"]
+        fork_owner = fork_result["fork_owner"]
+        if fork_result.get("warning"):
+            base.setdefault("warnings", []).append(fork_result["warning"])
 
     if not git_ops.is_clean(cwd=worktree_path):
         return {**base, "error": (

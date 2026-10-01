@@ -437,7 +437,7 @@ in-repo overlay (below); the in-repo version wins when both are present.
 > login that actually authenticates, not merely the repo.** A successful
 > confirmed call records the approval in `~/.agent-worktrees/forks.yaml` (see
 > `fork_registry.py`), keyed by repo **and** the effective login
-> (`pr_ops._resolve_fork_credential`, resolved **once** and reused for both
+> (`pr_fork._resolve_fork_credential`, resolved **once** and reused for both
 > the confirmation scope and the actual fork operation: an explicit
 > `pr.token_command`/`token_env` binding first, else the repo's resolved
 > account mapping only when a token can actually be minted for it, else the

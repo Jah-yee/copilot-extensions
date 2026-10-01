@@ -1479,7 +1479,7 @@ class TestSetPRAndStatus:
         like `https://h/gitea/o/r/pulls/42`) -- a third path segment between
         host and `owner/repo` the plain host-relative pattern never matches.
         Stripping the configured `api_base` as a prefix first must still
-        resolve the correct slug (review finding, PR #4795)."""
+        resolve the correct slug."""
         config, wid, _wt_path, _ = pr_repo
         import dataclasses
         repo = config.repos["ext"]
@@ -1500,10 +1500,10 @@ class TestSetPRAndStatus:
     def test_set_pr_repo_change_clears_attribution_evidence(self, pr_repo):
         """A parsed repo change (not just a number/provider change) must
         also clear stale attribution/observation evidence -- the create/
-        reuse path already does this for an explicit --repo change
-        (review finding, PR #4795): without it, `refresh_source_attribution`
-        can incorrectly short-circuit as already published against the OLD
-        repo's merge evidence."""
+        reuse path already does this for an explicit --repo change:
+        without it, `refresh_source_attribution` can incorrectly
+        short-circuit as already published against the OLD repo's merge
+        evidence."""
         _config, wid, _wt_path, _ = pr_repo
         pr_ops.set_pr(
             wid, url="https://github.com/OwnerA/repo-a/pull/1", number=1,

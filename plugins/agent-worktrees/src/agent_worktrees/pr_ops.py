@@ -1995,9 +1995,10 @@ def set_pr(
 #: A GitHub/generic or Gitea PR URL's hosting ``owner/repo`` slug -- both
 #: providers share the same ``.../<owner>/<repo>/pull(s)?/<n>`` structural
 #: shape (``providers/gitea.py``'s own ``/repos/{repo}/pulls/{number}`` API
-#: path mirrors this). Azure DevOps URLs don't fit this shape at all (no
-#: ``owner/repo`` concept the same way) and are deliberately left unmatched
-#: -- same as today's existing (absent) behavior for that provider.
+#: path mirrors this). An Azure DevOps URL has no ``owner/repo`` concept
+#: this way (it addresses a repo as ``.../<org>/<project>/_git/<repo>/
+#: pullrequest/<n>``) and is deliberately left unmatched: ``pr.repo`` stays
+#: unset for that provider.
 _PR_URL_REPO_RE = re.compile(r"^https?://[^/]+/([^/]+/[^/]+)/pulls?/\d+/?$", re.IGNORECASE)
 
 
@@ -2102,8 +2103,7 @@ def _set_pr_locked(
     # Resolve a parsed repo slug (if the URL parses) BEFORE computing
     # identity_changed, so a repo change -- not just a number/provider
     # change -- also clears attribution/observation evidence below (the
-    # create/reuse path already does this for an explicit --repo change;
-    # review finding, PR #4795).
+    # create/reuse path already does this for an explicit --repo change).
     parsed_repo = ""
     if url is not None:
         try:

@@ -2528,3 +2528,138 @@ def test_context_handoff_handoff_fallback_projection_is_valid() -> None:
     )
     rendered = projections.render_projection(handoff_fallback)
     assert rendered.byte_count <= projections.MAX_PROJECTION_BYTES
+
+
+@pytest.mark.guard
+def test_customizing_copilot_ships_the_repo_wide_local_cache_catchall() -> None:
+    """``customizing-copilot`` -- the projection mechanism's own home -- ships
+    the single repo-wide catch-all this effort's Phase 7 Plan calls for
+    (``docs/patterns/worktree-scoped-dynamic-guidance.md`` §3): the one
+    thing every launch path loads unconditionally, closing the gap the
+    per-file preamble (slice 3) cannot -- a source that has never synced in
+    yet has no checked-in file to carry a preamble at all.
+    """
+    sources = [
+        _source(
+            REPO / "plugins" / "customizing-copilot",
+            "copilot-extensions",
+            "customizing-copilot",
+        ),
+    ]
+    result = projections.Result(operation="test")
+
+    specs, _unknown = projections._load_specs(REPO, sources, result)
+
+    assert result.blocking == 0
+    assert {spec.source_id for spec in specs} == {"local-cache-catchall"}
+    spec = specs[0]
+    assert spec.apply_to == "**"
+    # Opted out of its own local cache (skipLocalCache: true in the
+    # declaration) -- otherwise its *.local.instructions.md sibling would
+    # match its own "check every *.local.instructions.md" glob and get
+    # read back, pointlessly repeating the same directive.
+    assert spec.skip_local_cache is True
+    rendered = projections.render_projection(spec)
+    assert rendered.byte_count <= projections.MAX_PROJECTION_BYTES
+    text = rendered.content.decode("utf-8")
+    assert ".github/instructions/**/*.local.instructions.md" in text
+    assert "Their absence is not an error." in text
+
+
+def test_render_local_cache_honors_skip_local_cache(tmp_path: Path) -> None:
+    """A source declared with ``skipLocalCache: true`` never gets a
+    ``*.local.instructions.md`` sibling -- the repo-wide catch-all's own
+    opt-out (see ``test_customizing_copilot_ships_the_repo_wide_local_cache_
+    catchall``), proven generically here rather than only against the real
+    shipped declaration."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _plugin, source = _write_plugin(
+        tmp_path,
+        "market",
+        "policy",
+        entries=[
+            {
+                "id": "fallback",
+                "template": "instructions/fallback.instructions.md",
+                "destination": ".github/instructions/policy/fallback.instructions.md",
+                "customizationKind": "instructions",
+                "applyTo": "**",
+                "legacyMarkers": [],
+                "skipLocalCache": True,
+            }
+        ],
+    )
+
+    result = projections.render_local_cache(repo, lambda: [source])
+
+    assert result.blocking == 0
+    assert result.changed == []
+    assert not (
+        repo
+        / ".github"
+        / "instructions"
+        / "policy"
+        / "fallback.local.instructions.md"
+    ).exists()
+
+
+def test_skip_local_cache_must_be_boolean(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _plugin, source = _write_plugin(
+        tmp_path,
+        "market",
+        "policy",
+        entries=[
+            {
+                "id": "fallback",
+                "template": "instructions/fallback.instructions.md",
+                "destination": ".github/instructions/policy/fallback.instructions.md",
+                "customizationKind": "instructions",
+                "applyTo": "**",
+                "legacyMarkers": [],
+                "skipLocalCache": "yes",
+            }
+        ],
+    )
+    result = projections.Result(operation="test")
+
+    specs, _unknown = projections._load_specs(repo, [source], result)
+
+    assert specs == []
+    assert any(
+        "skipLocalCache must be a boolean" in finding.message
+        for finding in result.findings
+    )
+
+
+def test_unrelated_extra_key_is_rejected(tmp_path: Path) -> None:
+    """A declaration entry with any key outside the required/optional union
+    is rejected -- an unrelated extra key must never silently pass."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _plugin, source = _write_plugin(
+        tmp_path,
+        "market",
+        "policy",
+        entries=[
+            {
+                "id": "fallback",
+                "template": "instructions/fallback.instructions.md",
+                "destination": ".github/instructions/policy/fallback.instructions.md",
+                "customizationKind": "instructions",
+                "applyTo": "**",
+                "legacyMarkers": [],
+                "someUnrelatedKey": True,
+            }
+        ],
+    )
+    result = projections.Result(operation="test")
+
+    specs, _unknown = projections._load_specs(repo, [source], result)
+
+    assert specs == []
+    assert any(
+        "unknown or missing keys" in finding.message for finding in result.findings
+    )

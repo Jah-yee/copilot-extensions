@@ -694,6 +694,16 @@ def test_cancel_handoff_is_no_project_command():
     assert "cancel-handoff" in m._NO_PROJECT_COMMANDS
 
 
+def test_forks_is_no_project_command():
+    """'forks' manages a machine-global registry (~/.agent-worktrees/forks.yaml),
+    like its 'accounts' sibling -- it must run from a neutral cwd without
+    resolving a project, and must be excluded from project-scoped CLI help."""
+    assert "forks" in m._NO_PROJECT_COMMANDS
+    assert "forks" in m.front_door_cli._PROJECT_IRRELEVANT_COMMANDS
+    assert m._is_no_project_invocation(["forks", "list"])
+    assert m._is_no_project_invocation(["forks", "set", "owner/repo", "--owner", "me"])
+
+
 def test_removed_terminal_profile_commands_not_registered():
     parser = m.build_parser()
 

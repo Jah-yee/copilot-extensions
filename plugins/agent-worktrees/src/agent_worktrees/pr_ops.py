@@ -443,7 +443,58 @@ def _title_from_commits(worktree_path: str, upstream: str) -> str | None:
     return subject or None
 
 
-def _ensure_fork_and_remote(worktree_path: str, repo_slug: str, prcfg) -> dict:
+def _token_scope(token: str) -> str:
+    """The durable confirmation scope for an opaque auth token's own value.
+
+    Shared by :func:`_resolve_fork_credential` and ``forks_cli set --token``
+    so a pre-seeded entry for a ``pr.token_command``/``token_env``-bound repo
+    uses the EXACT same scope string ``create_pr`` will compute for it.
+    """
+    import hashlib
+    return "token:" + hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _resolve_fork_credential(repo_slug: str, prcfg) -> tuple[str | None, str]:
+    """Resolve the (token, scope) pair for this repo's fork operations ONCE.
+
+    Both the confirmation-gate scope and the token actually handed to
+    ``provider.ensure_fork`` come from this single resolution (mirroring
+    ``providers.account_token_for_slug``'s own priority: an explicit
+    ``pr.token_command``/``token_env`` binding first, else the repo's
+    resolved account mapping only when a token can actually be minted for
+    it, else ambient ``gh`` auth) -- resolving it twice (once here, again
+    inside ``account_token_for_slug``) could let a non-deterministic
+    ``token_command`` or a transient mint authenticate the real operation as
+    a different identity than the one the gate just confirmed/recorded.
+
+    ``scope`` is ``""`` when the identity genuinely cannot be determined
+    without a live API call (an opaque custom token, or no account/ambient
+    login resolvable at all) -- callers must treat an empty scope as
+    **fail-closed**: never persist or trust a durable confirmation for it,
+    since two different unresolvable identities would otherwise collide on
+    the same empty key.
+    """
+    if getattr(prcfg, "provider", "") != "github":
+        return None, ""
+    from .providers.base import resolve_token
+
+    token = resolve_token(prcfg)
+    if token:
+        return token, _token_scope(token)
+
+    from . import git_ops, repos
+
+    account = repos.account_for_github_slug(repo_slug) or ""
+    active = git_ops.active_gh_account() or ""
+    if not account or (active and active.casefold() == account.casefold()):
+        return None, active
+    minted = git_ops.gh_token_for_account(account)
+    return (minted, account) if minted else (None, active)
+
+
+def _ensure_fork_and_remote(
+    worktree_path: str, repo_slug: str, prcfg, *, token: str | None,
+) -> dict:
     """Ensure the caller's fork of ``repo_slug`` exists and a local git remote
     (``prcfg.fork.remote``) points at it.
 
@@ -451,7 +502,10 @@ def _ensure_fork_and_remote(worktree_path: str, repo_slug: str, prcfg) -> dict:
     on any failure (never raises) -- GitHub-only, matching ``pr.fork``'s scope.
     An explicit ``prcfg.fork.owner`` overrides the fork-owner login used to
     build the PR head, in case the caller pushes through a differently-named
-    fork than the one their own token would create/read.
+    fork than the one their own token would create/read. ``token`` is the
+    SAME value :func:`_resolve_fork_credential` resolved for the confirmation
+    scope -- never re-derived here, so the operation authenticates as
+    exactly the identity that was confirmed.
     """
     if prcfg.provider != "github":
         return {"error": (
@@ -461,7 +515,6 @@ def _ensure_fork_and_remote(worktree_path: str, repo_slug: str, prcfg) -> dict:
     from . import providers
     try:
         provider = providers.get_provider(prcfg.provider)
-        token = providers.account_token_for_slug(repo_slug, prcfg)
         fork = provider.ensure_fork(repo_slug, token=token)
     except (providers.ProviderError, OSError) as exc:
         return {"error": f"Could not create/verify a fork of '{repo_slug}': {exc}"}
@@ -516,17 +569,15 @@ def create_pr(
     and the agent can fall back to delegating PR creation manually.
 
     ``confirm_fork`` gates the role-aware fork-PR flow (see
-    ``efforts/active/role-aware-fork-pr-flow`` in this repo, GitHub-only
-    today): when the repo's ``pr.roles``/``pr.fork`` config resolves the
-    caller's live role to a flow that publishes through a personal fork
-    rather than a direct push, ``create_pr`` does **not** silently fork or
-    push anywhere on a caller's first call. It returns a
-    ``needs_confirmation: "fork_setup"`` result explaining what it would do,
-    for the calling agent to relay to the human. Only a second call with
-    ``confirm_fork=True`` actually creates/verifies the fork, points a local
-    remote at it, and publishes there. A repo that never configures
-    ``pr.fork``/``pr.roles`` never resolves a fork flow, so this parameter is
-    a no-op for it -- fully backward compatible.
+    ``efforts/active/role-aware-fork-pr-flow``, GitHub-only today): a repo
+    whose ``pr.roles``/``pr.fork`` config publishes through a personal fork
+    returns ``needs_confirmation: "fork_setup"`` on a caller's first call
+    per repo+login, for the agent to relay to the human, instead of silently
+    forking/pushing. ``confirm_fork=True`` creates/verifies the fork and
+    durably records the approval (see :mod:`.fork_registry`); later calls
+    skip the gate until the effective login changes. Pre-approve via
+    ``agent-worktrees forks set <repo> --owner <login>``. Unconfigured repos
+    are unaffected.
 
     A worktree can track multiple PRs.  When the active PR is **terminal**
     (merged/closed) -- or ``new`` is set, or none exists -- a *fresh* PR is
@@ -819,26 +870,56 @@ def create_pr(
         prcfg = actor_flow.pr_config
         base["viewer_permission"] = actor_flow.viewer_permission
     if prcfg.fork.enabled:
-        if not confirm_fork:
+        from . import fork_registry
+
+        # Resolve the credential ONCE: the same (token, scope) pair both
+        # gates the confirmation decision and authenticates the actual fork
+        # operation below -- see _resolve_fork_credential's docstring.
+        fork_token, effective_account = _resolve_fork_credential(default_pr_repo, prcfg)
+        # Fail closed on an unresolvable identity: never trust (or later
+        # persist) a confirmation under an empty scope, which would let any
+        # other equally-unresolvable caller silently reuse it.
+        confirmed_entry = (
+            fork_registry.find_fork(default_pr_repo, effective_account)
+            if effective_account else None
+        )
+        # An explicit pr.fork.owner override deterministically decides the
+        # real fork owner (see _ensure_fork_and_remote) independent of which
+        # identity authenticates -- if it's configured and doesn't match what
+        # was actually confirmed, this is a DIFFERENT approval, not the same
+        # one under a new name; re-ask rather than silently publishing there.
+        already_confirmed = confirmed_entry is not None and (
+            not prcfg.fork.owner or prcfg.fork.owner == confirmed_entry.owner
+        )
+        if not confirm_fork and not already_confirmed:
             return {
                 **base, "success": False,
                 "needs_confirmation": "fork_setup",
                 "repo": default_pr_repo,
                 "fork_remote": prcfg.fork.remote,
                 "message": (
-                    f"This repo's resolved PR flow publishes through a "
-                    f"personal fork of '{default_pr_repo}' rather than a "
-                    f"direct push. Ask the user to confirm forking it to "
-                    f"their own GitHub account and pushing the branch "
-                    f"there, then re-run create-pr with --confirm-fork "
-                    f"(or confirm_fork=True) once they agree."
+                    f"This repo's resolved PR flow publishes through a personal fork of "
+                    f"'{default_pr_repo}' rather than a direct push. Ask the user to confirm "
+                    f"forking it and pushing there, then re-run create-pr with --confirm-fork "
+                    f"(or confirm_fork=True) -- only needed once per repo+login (or pre-seed "
+                    f"via 'forks set')."
                 ),
             }
-        fork_setup = _ensure_fork_and_remote(worktree_path, default_pr_repo, prcfg)
+        fork_setup = _ensure_fork_and_remote(
+            worktree_path, default_pr_repo, prcfg, token=fork_token,
+        )
         if fork_setup.get("error"):
             return {**base, "error": fork_setup["error"]}
         publish_remote = prcfg.fork.remote
         fork_owner = fork_setup["owner"]
+        if not already_confirmed and effective_account:
+            try:
+                fork_registry.record_confirmation(
+                    default_pr_repo, fork_owner,
+                    remote=prcfg.fork.remote, account=effective_account,
+                )
+            except OSError as exc:
+                base.setdefault("warnings", []).append(f"Could not persist fork confirmation: {exc}")
 
     if not git_ops.is_clean(cwd=worktree_path):
         return {**base, "error": (

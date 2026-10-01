@@ -180,11 +180,24 @@ def _isolate_agent_worktrees_home(tmp_path_factory):
     saved_agent_home = os.environ.get("AGENT_HOME")
     saved_userprofile = os.environ.get("USERPROFILE")
     saved_home = os.environ.get("HOME")
+    # ``mux_status_link._default_root()`` (and anything else honoring this
+    # override) reads ``WORKTREE_MANAGER_ROOT`` directly, bypassing both the
+    # env vars above AND the ``Path.home()`` patch below. Left set from a real
+    # dev machine running its own resident Worktree Manager daemon, a test
+    # silently reads/writes that REAL ``~/.worktree-manager`` tree (its live
+    # mux-daemon routing/token/lock files) instead of the isolated fake home --
+    # the exact class of leak this fixture exists to prevent. Observed
+    # concretely as ``test_mux_status_link.py`` getting a genuine ``"not-live"``
+    # routing response back from the real daemon instead of its fake
+    # ``CoalescingServer``. Unset it for the duration of the test so
+    # ``_default_root()`` falls through to the patched ``USERPROFILE``/``HOME``.
+    saved_worktree_manager_root = os.environ.get("WORKTREE_MANAGER_ROOT")
     saved_path_home = pathlib.Path.__dict__.get("home")
 
     os.environ["AGENT_HOME"] = str(fake_home)
     os.environ["USERPROFILE"] = str(fake_home)
     os.environ["HOME"] = str(fake_home)
+    os.environ.pop("WORKTREE_MANAGER_ROOT", None)
     # ``repos.py`` and several helpers call ``Path.home()`` directly, so the env
     # vars alone are not enough -- patch the resolver on the class too.
     pathlib.Path.home = classmethod(lambda cls: fake_home)
@@ -202,6 +215,7 @@ def _isolate_agent_worktrees_home(tmp_path_factory):
             ("AGENT_HOME", saved_agent_home),
             ("USERPROFILE", saved_userprofile),
             ("HOME", saved_home),
+            ("WORKTREE_MANAGER_ROOT", saved_worktree_manager_root),
         ):
             if val is None:
                 os.environ.pop(key, None)

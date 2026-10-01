@@ -1,0 +1,9 @@
+{
+  "comment": "Durable fork-confirmation registry: once a repo's fork-based PR flow is confirmed (or pre-seeded via 'forks set'), create-pr no longer re-asks for it on later calls; also fixes a test-isolation leak where WORKTREE_MANAGER_ROOT could read a real resident Worktree Manager daemon's state instead of the sandboxed test home.",
+  "changes": [
+    {
+      "plugin": "agent-worktrees",
+      "type": "patch"
+    }
+  ]
+}

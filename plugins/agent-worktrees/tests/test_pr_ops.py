@@ -743,6 +743,109 @@ class TestCreatePR:
 # create_pr -- role-aware fork-PR flow (efforts/active/role-aware-fork-pr-flow)
 # ---------------------------------------------------------------------------
 
+class TestResolveForkCredential:
+    """_resolve_fork_credential must reflect the identity that actually
+    authenticates (mirroring providers.account_token_for_slug), not the bare
+    account mapping -- an unmintable mapping silently falls back to ambient
+    auth, and a confirmation scoped to the mapping alone would miss that.
+    Returns (token, scope): the SAME token must flow to the real fork
+    operation, and scope=="" means "unresolvable -- fail closed"."""
+
+    def _cfg(self, provider="github"):
+        import dataclasses
+        return dataclasses.replace(cfg.PRConfig(enabled=True), provider=provider)
+
+    def test_non_github_provider_returns_empty(self, monkeypatch):
+        assert pr_ops._resolve_fork_credential("o/r", self._cfg("gitea")) == (None, "")
+
+    def test_unmapped_repo_falls_back_to_active_account(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent_worktrees.repos.account_for_github_slug", lambda s: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.active_gh_account", lambda: "whoami",
+        )
+        assert pr_ops._resolve_fork_credential("o/r", self._cfg()) == (None, "whoami")
+
+    def test_unresolvable_identity_fails_closed_to_empty_scope(self, monkeypatch):
+        """Neither a mapped account nor an active gh login -- the identity
+        is genuinely unknown, so the scope must be '' (never a value two
+        different unresolvable callers could collide on)."""
+        monkeypatch.setattr(
+            "agent_worktrees.repos.account_for_github_slug", lambda s: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.active_gh_account", lambda: None,
+        )
+        assert pr_ops._resolve_fork_credential("o/r", self._cfg()) == (None, "")
+
+    def test_mapping_equal_to_active_uses_active(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent_worktrees.repos.account_for_github_slug", lambda s: "Same",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.active_gh_account", lambda: "same",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.gh_token_for_account", lambda a: "should-not-be-called",
+        )
+        assert pr_ops._resolve_fork_credential("o/r", self._cfg()) == (None, "same")
+
+    def test_mintable_cross_account_mapping_wins(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent_worktrees.repos.account_for_github_slug", lambda s: "mapped",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.active_gh_account", lambda: "active",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.gh_token_for_account",
+            lambda a: "tok" if a == "mapped" else None,
+        )
+        assert pr_ops._resolve_fork_credential("o/r", self._cfg()) == ("tok", "mapped")
+
+    def test_unmintable_cross_account_mapping_falls_back_to_active(self, monkeypatch):
+        """The exact gap this helper exists to close: a mapped account that
+        cannot actually be minted silently resolves to ambient auth, so the
+        confirmation scope must reflect 'active', not 'mapped'."""
+        monkeypatch.setattr(
+            "agent_worktrees.repos.account_for_github_slug", lambda s: "mapped",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.active_gh_account", lambda: "active",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.gh_token_for_account", lambda a: None,
+        )
+        assert pr_ops._resolve_fork_credential("o/r", self._cfg()) == (None, "active")
+
+    def test_explicit_token_binding_takes_priority_and_is_scoped_by_value(self, monkeypatch):
+        """pr.token_command/token_env is account_token_for_slug's FIRST
+        priority -- a repo using it can authenticate as an identity no
+        mapping/ambient lookup would ever reveal, so it must win here too.
+        Scoped by the token's own value (not a guessed login) so a
+        changed/rotated token safely re-prompts instead of silently trusting
+        whichever identity the new token happens to belong to -- and the
+        SAME token value is returned for the real fork operation to use."""
+        import dataclasses
+        config_with_token = dataclasses.replace(
+            self._cfg(), token_env="SOME_TOKEN_ENV_VAR_UNSET",
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.base.resolve_token", lambda prcfg: "secret-token-abc",
+        )
+        first_token, first_scope = pr_ops._resolve_fork_credential("o/r", config_with_token)
+        assert first_token == "secret-token-abc"
+        assert first_scope.startswith("token:")
+
+        monkeypatch.setattr(
+            "agent_worktrees.providers.base.resolve_token", lambda prcfg: "secret-token-xyz",
+        )
+        _second_token, second_scope = pr_ops._resolve_fork_credential("o/r", config_with_token)
+        assert second_scope.startswith("token:")
+        assert second_scope != first_scope  # a different token value -> a different scope
+
+
 class TestCreatePRForkFlow:
     def _fork_config(self, config, tmp_path: Path, **fork_overrides):
         import dataclasses
@@ -841,6 +944,227 @@ class TestCreatePRForkFlow:
         assert "needs_confirmation" not in res
         assert "pr_head" not in res
         assert res["remote"] == "origin"
+
+    def test_confirmed_fork_is_remembered_for_next_call(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """A confirmed fork is durable: once create_pr(confirm_fork=True)
+        succeeds for a repo, a LATER create_pr call for that same repo (a
+        fresh PR iteration, no confirm_fork) must not re-ask -- the approval
+        was recorded in fork_registry, not just honored for this one call."""
+        config, wid, wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)
+
+        fork_dir = tmp_path / "fork-remembered.git"
+        git_ops.git("init", "--bare", "-b", "master", str(fork_dir))
+        fake = self._fake_provider("theirfork", str(fork_dir))
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: fake,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "remembered-login"),
+        )
+
+        from agent_worktrees import fork_registry
+        assert fork_registry.list_forks() == []
+
+        first = pr_ops.create_pr(
+            wid, config, confirm_fork=True, target_repo="acme/remembered-repo",
+        )
+        assert first["success"] is True, first
+        assert fork_registry.is_confirmed(
+            "acme/remembered-repo", account="remembered-login",
+        ) is True
+
+        # Simulate a later call (e.g. a different worktree of the same repo,
+        # or a fresh PR after the first merged) WITHOUT confirm_fork -- it
+        # must proceed straight to publishing, not re-ask. Give it a distinct
+        # branch so it doesn't collide with the first call's feature branch.
+        second = pr_ops.create_pr(
+            wid, config, new=True, target_repo="acme/remembered-repo",
+            branch="feature/work-2-aaaa-2",
+        )
+        assert second.get("needs_confirmation") is None, second
+        assert second["success"] is True, second
+        assert second["remote"] == "fork"
+
+    def test_preseeded_fork_skips_confirmation_entirely(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """A repo pre-approved via the 'forks set' flow (e.g. during machine/
+        harness setup) never triggers needs_confirmation, even on the very
+        first create_pr call -- confirm_fork=True is never passed."""
+        config, wid, wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)
+
+        fork_dir = tmp_path / "fork-preseeded.git"
+        git_ops.git("init", "--bare", "-b", "master", str(fork_dir))
+        fake = self._fake_provider("preseeded-owner", str(fork_dir))
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: fake,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "preseeded-login"),
+        )
+
+        from agent_worktrees import fork_registry
+        repo = "acme/preseeded-repo"
+        fork_registry.record_confirmation(
+            repo, "preseeded-owner", account="preseeded-login",
+        )
+
+        res = pr_ops.create_pr(
+            wid, config, target_repo=repo,
+        )  # no confirm_fork at all
+
+        assert "needs_confirmation" not in res, res
+        assert res["success"] is True, res
+        assert res["pr_head"] == "preseeded-owner:feature/work-2-aaaa"
+
+    def test_configured_owner_mismatch_forces_reconfirmation(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """An explicit pr.fork.owner deterministically decides the real fork
+        owner independent of identity (see _ensure_fork_and_remote) -- so a
+        stored confirmation recorded under a DIFFERENT owner is a different
+        approval, not the same one under a new name, and must re-prompt
+        rather than silently publish under the newly-configured owner."""
+        config, wid, _wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path, owner="new-explicit-owner")
+
+        fork_dir = tmp_path / "fork-owner-mismatch.git"
+        git_ops.git("init", "--bare", "-b", "master", str(fork_dir))
+        fake = self._fake_provider("new-explicit-owner", str(fork_dir))
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: fake,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "mismatch-login"),
+        )
+
+        from agent_worktrees import fork_registry
+        repo = "acme/owner-mismatch-repo"
+        # A prior confirmation exists for this repo+account, but under a
+        # DIFFERENT owner than what pr.fork.owner now configures.
+        fork_registry.record_confirmation(
+            repo, "stale-owner", account="mismatch-login",
+        )
+
+        res = pr_ops.create_pr(
+            wid, config, target_repo=repo,
+        )  # no confirm_fork -- must re-ask, not reuse the stale owner
+
+        assert res["success"] is False, res
+        assert res["needs_confirmation"] == "fork_setup", res
+
+        # Confirming explicitly now proceeds, and re-records under the
+        # NEW owner (not silently kept at the old stale one).
+        res2 = pr_ops.create_pr(
+            wid, config, confirm_fork=True, target_repo=repo,
+            branch="feature/work-2-aaaa-mismatch",
+        )
+        assert res2["success"] is True, res2
+        assert res2["pr_head"] == "new-explicit-owner:feature/work-2-aaaa-mismatch"
+        entry = fork_registry.find_fork(repo, "mismatch-login")
+        assert entry.owner == "new-explicit-owner"
+
+    def test_forks_set_default_scope_matches_create_pr_gate(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """'forks set' (no --account) must default to the SAME scope
+        create_pr's gate checks against -- both go through
+        _resolve_fork_credential, exercised here with NO mocking of that
+        resolver itself (only its collaborators), so a real divergence
+        between the two call sites would show up as a spurious re-prompt."""
+        from agent_worktrees import forks_cli
+
+        config, wid, wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)
+
+        fork_dir = tmp_path / "fork-consistency.git"
+        git_ops.git("init", "--bare", "-b", "master", str(fork_dir))
+        fake = self._fake_provider("consistency-owner", str(fork_dir))
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: fake,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        # Pin the ambient collaborators (not _resolve_fork_credential
+        # itself) so the test is deterministic across machines/CI.
+        monkeypatch.setattr(
+            "agent_worktrees.repos.account_for_github_slug", lambda slug: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.git_ops.active_gh_account", lambda: "ambient-user",
+        )
+
+        repo = "acme/consistency-repo"
+        rc = forks_cli.cmd_forks_dispatch(["set", repo, "--owner", "consistency-owner"])
+        assert rc == 0
+
+        res = pr_ops.create_pr(wid, config, target_repo=repo)  # no confirm_fork
+        assert "needs_confirmation" not in res, res
+        assert res["success"] is True, res
+
+    def test_confirmation_does_not_cross_logins(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """A confirmation recorded under one effective login must not be
+        honored once the repo resolves to a DIFFERENT one -- otherwise a
+        stale confirmation would silently authorize forking/pushing under an
+        identity the human never actually approved (e.g. an account-mapping
+        change, or ambient gh auth switching users)."""
+        config, wid, wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)
+
+        fork_dir = tmp_path / "fork-account-a.git"
+        git_ops.git("init", "--bare", "-b", "master", str(fork_dir))
+        fake = self._fake_provider("account-a-owner", str(fork_dir))
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: fake,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "login-a"),
+        )
+
+        confirmed = pr_ops.create_pr(
+            wid, config, confirm_fork=True, target_repo="acme/cross-account-repo",
+        )
+        assert confirmed["success"] is True, confirmed
+
+        # Now simulate the resolved login changing (an account-mapping edit,
+        # or ambient `gh auth switch` to a different user).
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "login-b"),
+        )
+        asked_again = pr_ops.create_pr(
+            wid, config, new=True, target_repo="acme/cross-account-repo",
+            branch="feature/work-2-aaaa-cross",
+        )
+        assert asked_again.get("needs_confirmation") == "fork_setup", asked_again
 
 
 # ---------------------------------------------------------------------------

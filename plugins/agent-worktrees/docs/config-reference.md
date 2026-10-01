@@ -426,12 +426,56 @@ in-repo overlay (below); the in-repo version wins when both are present.
 
 > **`pr.fork`/`pr.roles` confirmation gate.** When the resolved flow for a
 > `create-pr` call needs a fork, it does **not** silently fork anything or
-> push to an unexpected remote on the caller's first try. It returns
-> `needs_confirmation: "fork_setup"` with a human-readable `message` — the
-> calling agent relays this to the user, then re-runs `create-pr
-> --confirm-fork` (or `confirm_fork=True`) once they agree. Only that
+> push to an unexpected remote on the caller's first try for that repo+login.
+> It returns `needs_confirmation: "fork_setup"` with a human-readable
+> `message` — the calling agent relays this to the user, then re-runs
+> `create-pr --confirm-fork` (or `confirm_fork=True`) once they agree. That
 > confirmed call creates/verifies the fork (idempotent — a caller who already
 > has one is untouched) and points the local `fork` remote at it.
+>
+> **This confirmation is durable, not per-call — but it is scoped to the
+> login that actually authenticates, not merely the repo.** A successful
+> confirmed call records the approval in `~/.agent-worktrees/forks.yaml` (see
+> `fork_registry.py`), keyed by repo **and** the effective login
+> (`pr_ops._resolve_fork_credential`, resolved **once** and reused for both
+> the confirmation scope and the actual fork operation: an explicit
+> `pr.token_command`/`token_env` binding first, else the repo's resolved
+> account mapping only when a token can actually be minted for it, else the
+> active `gh` account; an identity that cannot be resolved at all fails
+> closed — never persisted or trusted). Every later `create-pr` call for
+> that same repo **under the same resolved login** — any worktree, any
+> session, on this machine — skips the gate automatically, since the
+> underlying GitHub fork is a durable, account-scoped resource, not a
+> per-worktree one. If the account mapping changes, ambient `gh` auth
+> switches users, or a configured token rotates, the next call re-prompts
+> instead of silently authorizing a different identity's fork/push — this is
+> intentional, not a registry failure.
+>
+> **A repo can carry more than one confirmed account at once.** The registry
+> key is `(repo, account)`, not repo alone — confirming under a second
+> account (an operator switching which identity publishes a repo's PRs) adds
+> a separate durable entry rather than overwriting the first, so switching
+> back to the original account later does not re-trigger the gate either.
+> Separately, when `pr.fork.owner` is explicitly configured, it
+> deterministically decides the real fork owner regardless of identity (see
+> `_ensure_fork_and_remote`) — if a stored confirmation's owner doesn't match
+> that configured override, the gate treats it as a *different* approval and
+> re-prompts rather than silently publishing under the newly-configured
+> owner; a successful re-confirmation then updates the stored entry to the
+> new owner.
+>
+> A repo can also be pre-approved once, ahead of any `create-pr` call — e.g.
+> during machine/harness setup — with `agent-worktrees forks set
+> <owner>/<repo> --owner <login>` (its `--account` defaults to the same
+> resolver for the common account-mapping/ambient-auth case; a repo whose
+> real config binds `pr.token_command`/`token_env` instead needs **`--token
+> <the-same-token>`** so the pre-seeded entry's scope is derived from the
+> token's own value, matching exactly what `create-pr`'s gate will compute
+> for it — `--account` alone cannot reproduce that scope for an opaque
+> token). Manage the catalog with `forks list` / `forks show <repo> [--account
+> A]` / `forks remove <repo> [--account A]` (omitting `--account` on `remove`
+> forgets every account confirmed for that repo; the gate asks again on that
+> repo's/account's next call).
 
 > **Configured profile vs. effective actor profile.** The base `PRConfig`
 > always has a pure, network-free **configured profile**. `get pr-profile`

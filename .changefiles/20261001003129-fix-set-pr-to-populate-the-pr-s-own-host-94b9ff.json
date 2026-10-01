@@ -1,9 +1,0 @@
-{
-  "comment": "Fix set-pr to populate the PR's own hosting owner/repo slug from --url, so pr-nudge and other provider calls stop falling back to the worktree's local project name",
-  "changes": [
-    {
-      "plugin": "agent-worktrees",
-      "type": "patch"
-    }
-  ]
-}

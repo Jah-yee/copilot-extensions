@@ -181,9 +181,13 @@ def test_windows_binstub_self_provisions_from_a_direct_install_layout(tmp_path: 
         (PLUGIN / "bin" / "agent-worktrees.ps1")
         .read_text(encoding="utf-8")
         # Exercise only the _direct discovery + invocation, never the real
-        # provisioning/mutex/uv machinery below it.
+        # provisioning/mutex/uv machinery below it. `& $_inst` runs the
+        # selected install.ps1 directly in the CURRENT PowerShell host --
+        # whichever one (pwsh or Windows PowerShell) actually invoked this
+        # harness -- rather than hardcoding a `pwsh` child process that
+        # would fail on a host where only `powershell.exe` is available.
         .split("if (-not ($_inst -and (Test-Path -LiteralPath $_inst))) { [Console]::Error", 1)[0]
-        + "if ($_inst) { & pwsh -NoProfile -File $_inst } else { Write-Output 'NO_INSTALLER_FOUND' }\n",
+        + "if ($_inst) { & $_inst } else { Write-Output 'NO_INSTALLER_FOUND' }\n",
         encoding="utf-8",
     )
 

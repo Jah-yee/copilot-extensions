@@ -846,6 +846,42 @@ class TestResolveForkCredential:
         assert second_scope != first_scope  # a different token value -> a different scope
 
 
+class TestResolveLiveForkOwner:
+    """_resolve_live_fork_owner must be the NON-mutating half the
+    confirmation gate's pre-check relies on -- it must never reach any
+    mutating provider call, and must fail soft (None) rather than raise."""
+
+    def _cfg(self, provider="github"):
+        import dataclasses
+        return dataclasses.replace(cfg.PRConfig(enabled=True), provider=provider)
+
+    def test_non_github_provider_returns_none(self):
+        assert pr_ops._resolve_live_fork_owner(self._cfg("gitea"), None) is None
+
+    def test_delegates_to_provider_resolve_fork_owner(self, monkeypatch):
+        class _FakeProvider:
+            def resolve_fork_owner(self, *, token=None):
+                assert token == "tok"
+                return "live-owner"
+
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: _FakeProvider(),
+        )
+        assert pr_ops._resolve_live_fork_owner(self._cfg(), "tok") == "live-owner"
+
+    def test_provider_error_is_swallowed_to_none(self, monkeypatch):
+        from agent_worktrees import providers
+
+        class _FailingProvider:
+            def resolve_fork_owner(self, *, token=None):
+                raise providers.ProviderError("boom")
+
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: _FailingProvider(),
+        )
+        assert pr_ops._resolve_live_fork_owner(self._cfg(), None) is None
+
+
 class TestCreatePRForkFlow:
     def _fork_config(self, config, tmp_path: Path, **fork_overrides):
         import dataclasses
@@ -862,6 +898,9 @@ class TestCreatePRForkFlow:
 
             def ensure_fork(self, repo, *, token=None):
                 return (fork_owner, fork_clone_url)
+
+            def resolve_fork_owner(self, *, token=None):
+                return fork_owner
 
         return _FakeProvider()
 
@@ -1127,6 +1166,9 @@ class TestCreatePRForkFlow:
         assert res["needs_confirmation"] == "fork_setup", res
         assert "real-owner" in res["message"]
         assert "stale-typo-owner" in res["message"]
+        # Nothing was mutated: the mismatch was caught BEFORE
+        # _ensure_fork_and_remote's mutating fork-create/remote-repoint ran.
+        assert not git_ops.has_remote("fork", cwd=str(_wt_path))
 
         # Explicit re-confirmation proceeds and self-heals the stored entry
         # to the real, live-resolved owner.

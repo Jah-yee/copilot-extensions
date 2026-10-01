@@ -359,6 +359,26 @@ class PRProvider(Protocol):
         """
         ...
 
+    def resolve_fork_owner(self, *, token: str | None = None) -> str | None:
+        """Non-mutating resolution of the login a fork would be created
+        under -- WITHOUT creating/verifying anything (unlike
+        :meth:`ensure_fork`, which both resolves this and issues a mutating
+        POST to create/read the fork). Lets a caller validate an expected
+        owner (e.g. a durable pre-approval) BEFORE any mutating side effect
+        runs, rather than discovering a stale/typo'd owner only after the
+        fork was already created and the local remote repointed.
+
+        - **github** resolves it via ``gh api user`` (a read-only call).
+        - other providers are unsupported (return ``None``) -- fork-mode is
+          GitHub-only today; a caller falls back to the mutating
+          :meth:`ensure_fork` path in that case, which surfaces the same
+          auth/provider failure there instead.
+
+        Never raises: unsupported provider or a failed API call both
+        collapse to ``None``.
+        """
+        ...
+
     def get_comment_threads(
         self, repo: str, number: int, *, api_base: str = "", token: str | None = None
     ) -> ThreadsResult:

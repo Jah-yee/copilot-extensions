@@ -492,6 +492,28 @@ def _resolve_fork_credential(repo_slug: str, prcfg) -> tuple[str | None, str]:
     return (minted, account) if minted else (None, active)
 
 
+def _resolve_live_fork_owner(prcfg, token: str | None) -> str | None:
+    """Non-mutating pre-check of the real fork-owner login a publish would
+    resolve to, WITHOUT creating/verifying anything (see
+    ``providers.PRProvider.resolve_fork_owner``). Lets the confirmation gate
+    catch a stale/typo'd stored owner BEFORE :func:`_ensure_fork_and_remote`'s
+    mutating POST/remote-repoint can run.
+
+    Returns ``None`` (not a mismatch -- just "couldn't check") for an
+    unsupported provider or a failed resolution; the caller then proceeds to
+    the normal, mutating path, which will surface the same auth/provider
+    failure there instead of here.
+    """
+    if getattr(prcfg, "provider", "") != "github":
+        return None
+    from . import providers
+    try:
+        provider = providers.get_provider(prcfg.provider)
+        return provider.resolve_fork_owner(token=token)
+    except (providers.ProviderError, OSError):
+        return None
+
+
 def _ensure_fork_and_remote(
     worktree_path: str, repo_slug: str, prcfg, *, token: str | None,
 ) -> dict:
@@ -891,6 +913,31 @@ def create_pr(
         already_confirmed = confirmed_entry is not None and (
             not prcfg.fork.owner or prcfg.fork.owner == confirmed_entry.owner
         )
+        # A stored confirmation's owner can diverge from the actually
+        # resolved fork owner (a typo at 'forks set' time, or a genuine
+        # upstream change) when NO static pr.fork.owner override exists to
+        # check against ahead of time. Validate it NON-MUTATINGLY, before
+        # _ensure_fork_and_remote's mutating POST/remote-repoint can run --
+        # a silent skip must not create a fork or touch the checkout before
+        # discovering the approved owner no longer matches. An explicit
+        # confirm_fork=True this call is itself a fresh, live approval of
+        # whatever the real owner turns out to be, and skips this pre-check.
+        if already_confirmed and not confirm_fork and not prcfg.fork.owner:
+            live_owner = _resolve_live_fork_owner(prcfg, fork_token)
+            if live_owner and live_owner != confirmed_entry.owner:
+                return {
+                    **base, "success": False,
+                    "needs_confirmation": "fork_setup",
+                    "repo": default_pr_repo,
+                    "fork_remote": prcfg.fork.remote,
+                    "message": (
+                        f"The previously confirmed fork owner for '{default_pr_repo}' "
+                        f"('{confirmed_entry.owner}') no longer matches the actual "
+                        f"resolved fork owner ('{live_owner}'). Ask the user to confirm "
+                        f"publishing to '{live_owner}', then re-run create-pr with "
+                        f"--confirm-fork (or confirm_fork=True)."
+                    ),
+                }
         if not confirm_fork and not already_confirmed:
             return {
                 **base, "success": False,
@@ -911,34 +958,16 @@ def create_pr(
         if fork_setup.get("error"):
             return {**base, "error": fork_setup["error"]}
         fork_owner = fork_setup["owner"]
-        # A stored confirmation's owner can diverge from the actually
-        # resolved fork owner -- a typo at 'forks set' time, or a genuine
-        # upstream change -- in which case silently publishing wherever the
-        # provider now resolves to is exactly the "approved X, got Y"
-        # mismatch a pre-approval contract exists to prevent. A SILENT skip
-        # (already_confirmed, no explicit --confirm-fork THIS call) must
-        # re-validate against the live result; an explicit confirm_fork=True
-        # this call is itself a fresh, live approval of whatever the real
-        # owner turns out to be, and is never blocked by a stale comparison.
-        owner_diverged = (
+        publish_remote = prcfg.fork.remote
+        # Re-persist whenever this is the first confirmation OR the real
+        # resolved owner just changed (the explicit-reconfirm self-heal path
+        # for a stale entry the pre-check above caught on a PRIOR call) --
+        # purely bookkeeping here, never a gating decision (that already
+        # happened, non-mutatingly, above).
+        owner_changed = (
             confirmed_entry is not None and confirmed_entry.owner != fork_owner
         )
-        if already_confirmed and not confirm_fork and owner_diverged:
-            return {
-                **base, "success": False,
-                "needs_confirmation": "fork_setup",
-                "repo": default_pr_repo,
-                "fork_remote": prcfg.fork.remote,
-                "message": (
-                    f"The previously confirmed fork owner for '{default_pr_repo}' "
-                    f"('{confirmed_entry.owner}') no longer matches the actual "
-                    f"resolved fork owner ('{fork_owner}'). Ask the user to confirm "
-                    f"publishing to '{fork_owner}', then re-run create-pr with "
-                    f"--confirm-fork (or confirm_fork=True)."
-                ),
-            }
-        publish_remote = prcfg.fork.remote
-        if (not already_confirmed or owner_diverged) and effective_account:
+        if (not already_confirmed or owner_changed) and effective_account:
             try:
                 fork_registry.record_confirmation(
                     default_pr_repo, fork_owner,
@@ -946,6 +975,7 @@ def create_pr(
                 )
             except OSError as exc:
                 base.setdefault("warnings", []).append(f"Could not persist fork confirmation: {exc}")
+
 
     if not git_ops.is_clean(cwd=worktree_path):
         return {**base, "error": (

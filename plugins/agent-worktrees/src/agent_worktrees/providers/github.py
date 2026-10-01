@@ -854,21 +854,23 @@ class GitHubProvider:
         _ = (repo, base, head_sha, api_base, token)
         return None
 
+    def resolve_fork_owner(self, *, token: str | None = None) -> str | None:
+        """Read-only ``gh api user`` half of :meth:`ensure_fork`, split out
+        so a caller can validate an owner before its mutating POST runs."""
+        who = run_cli(["gh", "api", "user", "--jq", ".login"], env=self._env(token))
+        if who.returncode != 0:
+            return None
+        owner = who.stdout.strip()
+        return owner or None
+
     def ensure_fork(
         self, repo: str, *, token: str | None = None,
     ) -> tuple[str, str] | None:
         """Create (or read, if it already exists) the caller's fork via
         ``POST /repos/<repo>/forks`` -- idempotent on GitHub's own API.
-
-        Resolves the caller's login first (``gh api user``) purely for the
-        returned ``owner`` -- the actual fork-owner is whoever the token
-        belongs to regardless. Returns ``None`` on any failure: no ``gh``
-        auth, a non-2xx API response, or a payload missing ``clone_url``.
-        """
-        who = run_cli(["gh", "api", "user", "--jq", ".login"], env=self._env(token))
-        if who.returncode != 0:
-            return None
-        owner = who.stdout.strip()
+        Owner comes from :meth:`resolve_fork_owner`. Returns ``None`` on any
+        failure: no ``gh`` auth, a non-2xx response, or a missing ``clone_url``."""
+        owner = self.resolve_fork_owner(token=token)
         if not owner:
             return None
         proc = run_cli(
@@ -887,6 +889,7 @@ class GitHubProvider:
         if not isinstance(clone_url, str) or not clone_url:
             return None
         return (owner, clone_url)
+
 
     _THREADS_QUERY = (
         "query($owner:String!,$name:String!,$number:Int!){"
@@ -972,12 +975,9 @@ class GitHubProvider:
         self, repo: str, number: int, *, api_base: str = "", token: str | None = None,
         thread_ids: tuple[int, ...] = (),
     ) -> str:
-        """Resolve all active review threads via GraphQL.
-
-        GitHub thread ids are opaque node ids, so ``thread_ids`` (display
-        indices) cannot target individually; this resolves every currently
-        unresolved thread (the "addressed all feedback" case).
-        """
+        """Resolve all active review threads via GraphQL. GitHub thread ids
+        are opaque node ids, so ``thread_ids`` can't target individually;
+        this resolves every currently unresolved thread instead."""
         _ = (api_base, thread_ids)
         owner, name = self._split_owner_name(repo)
         data, err = self._graphql(

@@ -123,6 +123,32 @@ def test_option_followed_by_another_flag_is_a_usage_error(capfd):
     assert "--owner requires a value" in capfd.readouterr().out
 
 
+def test_unknown_flag_is_rejected_not_silently_ignored(monkeypatch, capfd):
+    """The exact gap a removed '--token <value>' flag could have left behind:
+    an unsupported/mistyped flag (and its value) must never be silently
+    dropped while the command still succeeds under an unintended default --
+    it must fail loudly instead."""
+    monkeypatch.setattr(
+        "agent_worktrees.pr_ops._resolve_fork_credential",
+        lambda slug, prcfg: (None, "would-be-ambient"),
+    )
+    rc = forks_cli.cmd_forks_dispatch(
+        ["set", "octo-org/widgets", "--owner", "octocat", "--token", "secret"],
+    )
+    assert rc == 1
+    assert "unknown option" in capfd.readouterr().out
+    # And nothing was recorded under the unintended ambient default.
+    from agent_worktrees import fork_registry
+    assert fork_registry.find_forks_for_repo("octo-org/widgets") == []
+
+
+def test_extra_positional_is_rejected(capfd):
+    rc = forks_cli.cmd_forks_dispatch(["list", "unexpected-extra-arg"])
+    assert rc == 1
+    assert "unexpected extra argument" in capfd.readouterr().out
+
+
+
 def test_list_json_and_text(monkeypatch, capfd):
     monkeypatch.setattr(
         "agent_worktrees.pr_ops._resolve_fork_credential",

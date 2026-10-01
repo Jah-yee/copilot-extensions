@@ -59,7 +59,7 @@ def _forks_usage() -> None:
 
 
 class _ForksArgError(ValueError):
-    """Raised by ``_opt`` on a flag present with a missing/invalid value.
+    """Raised by ``_opt``/``_reject_unknown_options`` on malformed input.
 
     Distinguishes 'flag not given' (``None``, a legitimate default) from
     'flag given but malformed' -- e.g. ``forks remove owner/repo --account``
@@ -68,8 +68,61 @@ class _ForksArgError(ValueError):
     with a missing value previously fell through to 'remove every account'
     instead of failing loudly, and a bare ``--token-stdin`` typo'd as
     ``--token`` previously fell through to ambient-auth resolution instead of
-    reading the intended secret.
+    reading the intended secret. Also raised for an unrecognized flag or an
+    extra positional -- e.g. ``forks set o/r --owner me --token secret``
+    (``--token`` was removed in favor of ``--token-stdin``) must fail loudly
+    rather than silently ignore the unknown flag and its value and record an
+    unintended, ambient-resolved account.
     """
+
+
+# Per-subcommand known flags -- True if the flag takes a value, False if
+# it's a bare boolean switch. Anything else present in argv (an unknown
+# flag, or more positionals than the subcommand accepts) is a usage error,
+# never silently ignored -- see _ForksArgError's docstring for why this
+# matters (a dropped unsupported flag can silently change what gets
+# recorded, e.g. an intended --token-stdin typo'd and ignored).
+_KNOWN_OPTIONS: dict[str, dict[str, bool]] = {
+    "list": {"--json": False},
+    "show": {"--account": True, "--json": False},
+    "set": {
+        "--owner": True, "--remote": True, "--account": True,
+        "--token-stdin": False, "--notes": True,
+    },
+    "remove": {"--account": True},
+    "rm": {"--account": True},
+}
+_MAX_POSITIONALS: dict[str, int] = {
+    "list": 0, "show": 1, "set": 1, "remove": 1, "rm": 1,
+}
+
+
+def _reject_unknown_options(sub: str, rest: list[str]) -> None:
+    """Walk ``rest`` and raise on anything outside ``sub``'s known contract:
+    an unrecognized flag, a value-taking flag missing its value (mirrors
+    ``_opt``'s own check, so this catches it even for a flag ``_opt`` is
+    never called for), or more positionals than the subcommand accepts.
+    """
+    allowed = _KNOWN_OPTIONS.get(sub, {})
+    max_positionals = _MAX_POSITIONALS.get(sub, 0)
+    positionals = 0
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("--"):
+            if tok not in allowed:
+                raise _ForksArgError(f"unknown option {tok!r}")
+            if allowed[tok]:
+                if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                    raise _ForksArgError(f"{tok} requires a value")
+                i += 2
+            else:
+                i += 1
+        else:
+            positionals += 1
+            if positionals > max_positionals:
+                raise _ForksArgError(f"unexpected extra argument {tok!r}")
+            i += 1
 
 
 def cmd_forks_dispatch(argv: list[str]) -> int:
@@ -94,6 +147,8 @@ def cmd_forks_dispatch(argv: list[str]) -> int:
         return rest[idx + 1]
 
     try:
+        if sub in _KNOWN_OPTIONS:
+            _reject_unknown_options(sub, rest)
         return _dispatch_sub(sub, rest, fork_registry, _opt)
     except _ForksArgError as exc:
         output.err(f"forks {sub}: {exc}")

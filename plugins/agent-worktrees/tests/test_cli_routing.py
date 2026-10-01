@@ -694,6 +694,7 @@ def test_cancel_handoff_is_no_project_command():
     assert "cancel-handoff" in m._NO_PROJECT_COMMANDS
 
 
+@pytest.mark.guard
 def test_forks_is_no_project_command():
     """'forks' manages a machine-global registry (~/.agent-worktrees/forks.yaml),
     like its 'accounts' sibling -- it must run from a neutral cwd without

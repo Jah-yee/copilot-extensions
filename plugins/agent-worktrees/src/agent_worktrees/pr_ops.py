@@ -910,9 +910,35 @@ def create_pr(
         )
         if fork_setup.get("error"):
             return {**base, "error": fork_setup["error"]}
-        publish_remote = prcfg.fork.remote
         fork_owner = fork_setup["owner"]
-        if not already_confirmed and effective_account:
+        # A stored confirmation's owner can diverge from the actually
+        # resolved fork owner -- a typo at 'forks set' time, or a genuine
+        # upstream change -- in which case silently publishing wherever the
+        # provider now resolves to is exactly the "approved X, got Y"
+        # mismatch a pre-approval contract exists to prevent. A SILENT skip
+        # (already_confirmed, no explicit --confirm-fork THIS call) must
+        # re-validate against the live result; an explicit confirm_fork=True
+        # this call is itself a fresh, live approval of whatever the real
+        # owner turns out to be, and is never blocked by a stale comparison.
+        owner_diverged = (
+            confirmed_entry is not None and confirmed_entry.owner != fork_owner
+        )
+        if already_confirmed and not confirm_fork and owner_diverged:
+            return {
+                **base, "success": False,
+                "needs_confirmation": "fork_setup",
+                "repo": default_pr_repo,
+                "fork_remote": prcfg.fork.remote,
+                "message": (
+                    f"The previously confirmed fork owner for '{default_pr_repo}' "
+                    f"('{confirmed_entry.owner}') no longer matches the actual "
+                    f"resolved fork owner ('{fork_owner}'). Ask the user to confirm "
+                    f"publishing to '{fork_owner}', then re-run create-pr with "
+                    f"--confirm-fork (or confirm_fork=True)."
+                ),
+            }
+        publish_remote = prcfg.fork.remote
+        if (not already_confirmed or owner_diverged) and effective_account:
             try:
                 fork_registry.record_confirmation(
                     default_pr_repo, fork_owner,

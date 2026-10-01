@@ -1083,6 +1083,71 @@ class TestCreatePRForkFlow:
         entry = fork_registry.find_fork(repo, "mismatch-login")
         assert entry.owner == "new-explicit-owner"
 
+    def test_live_resolved_owner_mismatch_forces_reconfirmation(
+        self, pr_repo, tmp_path, monkeypatch,
+    ):
+        """Even with NO pr.fork.owner override configured, a stored
+        confirmation's owner can still diverge from the actually resolved
+        fork owner (a typo at 'forks set' time, or a genuine upstream
+        change). A silent skip must re-validate against the LIVE result
+        rather than trusting the stale stored owner -- silently publishing
+        wherever the provider now resolves to is exactly the 'approved X,
+        got Y' gap a pre-approval contract exists to prevent."""
+        config, wid, _wt_path, _remote_dir = pr_repo
+        config = self._fork_config(config, tmp_path)  # no owner override
+
+        fork_dir = tmp_path / "fork-live-mismatch.git"
+        git_ops.git("init", "--bare", "-b", "master", str(fork_dir))
+        fake = self._fake_provider("real-owner", str(fork_dir))
+        monkeypatch.setattr(
+            "agent_worktrees.providers.get_provider", lambda name: fake,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.providers.account_token_for_slug",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "agent_worktrees.pr_ops._resolve_fork_credential",
+            lambda slug, prcfg: (None, "live-mismatch-login"),
+        )
+
+        from agent_worktrees import fork_registry
+        repo = "acme/live-owner-mismatch-repo"
+        # Stored confirmation names a DIFFERENT owner than the provider will
+        # actually resolve for this (correctly matched) account/scope.
+        fork_registry.record_confirmation(
+            repo, "stale-typo-owner", account="live-mismatch-login",
+        )
+
+        res = pr_ops.create_pr(
+            wid, config, target_repo=repo,
+        )  # no confirm_fork -- must re-ask, not trust the stale stored owner
+
+        assert res["success"] is False, res
+        assert res["needs_confirmation"] == "fork_setup", res
+        assert "real-owner" in res["message"]
+        assert "stale-typo-owner" in res["message"]
+
+        # Explicit re-confirmation proceeds and self-heals the stored entry
+        # to the real, live-resolved owner.
+        res2 = pr_ops.create_pr(
+            wid, config, confirm_fork=True, target_repo=repo,
+            branch="feature/work-2-aaaa-live-mismatch",
+        )
+        assert res2["success"] is True, res2
+        assert res2["pr_head"] == "real-owner:feature/work-2-aaaa-live-mismatch"
+        entry = fork_registry.find_fork(repo, "live-mismatch-login")
+        assert entry.owner == "real-owner"
+
+        # And now a THIRD call, with no confirm_fork, proceeds silently --
+        # the stored entry matches the live result again.
+        res3 = pr_ops.create_pr(
+            wid, config, target_repo=repo,
+            branch="feature/work-2-aaaa-live-mismatch-2",
+        )
+        assert "needs_confirmation" not in res3, res3
+        assert res3["success"] is True, res3
+
     def test_forks_set_default_scope_matches_create_pr_gate(
         self, pr_repo, tmp_path, monkeypatch,
     ):

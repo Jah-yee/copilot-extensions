@@ -462,20 +462,28 @@ in-repo overlay (below); the in-repo version wins when both are present.
 > that configured override, the gate treats it as a *different* approval and
 > re-prompts rather than silently publishing under the newly-configured
 > owner; a successful re-confirmation then updates the stored entry to the
-> new owner.
+> new owner. The same re-validation also applies with **no** `pr.fork.owner`
+> override configured at all: if a stored confirmation's owner diverges from
+> the fork owner the provider actually resolves live (a typo at `forks set`
+> time, or a genuine upstream change), a silent skip re-prompts rather than
+> trusting the stale stored value — only an explicit `--confirm-fork` this
+> call proceeds regardless, and self-heals the stored entry to the real
+> owner it resolved.
 >
 > A repo can also be pre-approved once, ahead of any `create-pr` call — e.g.
 > during machine/harness setup — with `agent-worktrees forks set
 > <owner>/<repo> --owner <login>` (its `--account` defaults to the same
 > resolver for the common account-mapping/ambient-auth case; a repo whose
-> real config binds `pr.token_command`/`token_env` instead needs **`--token
-> <the-same-token>`** so the pre-seeded entry's scope is derived from the
-> token's own value, matching exactly what `create-pr`'s gate will compute
-> for it — `--account` alone cannot reproduce that scope for an opaque
-> token). Manage the catalog with `forks list` / `forks show <repo> [--account
-> A]` / `forks remove <repo> [--account A]` (omitting `--account` on `remove`
-> forgets every account confirmed for that repo; the gate asks again on that
-> repo's/account's next call).
+> real config binds `pr.token_command`/`token_env` instead needs
+> **`--token-stdin`** — piping that same token's value on stdin (never as a
+> bare argv value, to keep it out of shell history and process listings) —
+> so the pre-seeded entry's scope is derived from the token's own value,
+> matching exactly what `create-pr`'s gate will compute for it; `--account`
+> alone cannot reproduce that scope for an opaque token). Manage the catalog
+> with `forks list` / `forks show <repo> [--account A]` / `forks remove
+> <repo> [--account A]` (omitting `--account` on `remove` forgets every
+> account confirmed for that repo; the gate asks again on that repo's/
+> account's next call).
 
 > **Configured profile vs. effective actor profile.** The base `PRConfig`
 > always has a pure, network-free **configured profile**. `get pr-profile`

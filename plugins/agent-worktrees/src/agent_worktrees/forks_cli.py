@@ -37,15 +37,18 @@ def _forks_usage() -> None:
     print("  list                                List confirmed forks")
     print("  show <repo> [--account A]           Show a repo's confirmed fork(s) --")
     print("                                      all accounts, or just one with --account")
-    print("  set <repo> --owner <login> [--remote R] [--account A | --token T] [--notes T]")
+    print("  set <repo> --owner <login> [--remote R] [--account A | --token-stdin] [--notes T]")
     print("                                      Pre-approve a repo's fork (e.g. during")
     print("                                      setup) without waiting for create-pr to ask.")
     print("                                      --account defaults to the resolved account/")
     print("                                      ambient gh login. For a repo using")
-    print("                                      pr.token_command/token_env, pass that SAME")
-    print("                                      token via --token (scope is derived from it,")
-    print("                                      matching what create-pr will compute) --")
-    print("                                      --account alone cannot reproduce that scope.")
+    print("                                      pr.token_command/token_env, pipe that SAME")
+    print("                                      token's value via --token-stdin (scope is")
+    print("                                      derived from it, matching what create-pr will")
+    print("                                      compute) -- --account alone cannot reproduce")
+    print("                                      that scope, and the token is read from stdin")
+    print("                                      rather than argv so it never lands in shell")
+    print("                                      history or a process listing.")
     print("  remove <repo> [--account A]         Forget a repo's confirmation(s) -- every")
     print("                                      account for this repo, or just one with")
     print("                                      --account (create-pr will ask again)")
@@ -53,6 +56,20 @@ def _forks_usage() -> None:
     print("Examples:")
     print(f"  {project} forks set octo-org/widgets --owner octocat")
     print(f"  {project} forks list")
+
+
+class _ForksArgError(ValueError):
+    """Raised by ``_opt`` on a flag present with a missing/invalid value.
+
+    Distinguishes 'flag not given' (``None``, a legitimate default) from
+    'flag given but malformed' -- e.g. ``forks remove owner/repo --account``
+    with nothing after it, or immediately followed by another flag. Letting
+    either of those silently resolve to ``None`` is exactly how ``--account``
+    with a missing value previously fell through to 'remove every account'
+    instead of failing loudly, and a bare ``--token-stdin`` typo'd as
+    ``--token`` previously fell through to ambient-auth resolution instead of
+    reading the intended secret.
+    """
 
 
 def cmd_forks_dispatch(argv: list[str]) -> int:
@@ -69,12 +86,24 @@ def cmd_forks_dispatch(argv: list[str]) -> int:
         return 0
 
     def _opt(flag: str) -> str | None:
-        if flag in rest:
-            idx = rest.index(flag)
-            if idx + 1 < len(rest):
-                return rest[idx + 1]
-        return None
+        if flag not in rest:
+            return None
+        idx = rest.index(flag)
+        if idx + 1 >= len(rest) or rest[idx + 1].startswith("--"):
+            raise _ForksArgError(f"{flag} requires a value")
+        return rest[idx + 1]
 
+    try:
+        return _dispatch_sub(sub, rest, fork_registry, _opt)
+    except _ForksArgError as exc:
+        output.err(f"forks {sub}: {exc}")
+        return 1
+
+
+def _dispatch_sub(sub: str, rest: list[str], fork_registry, _opt) -> int:
+    """The actual per-subcommand body, split out so ``cmd_forks_dispatch``
+    can wrap it in one ``_ForksArgError`` handler rather than repeating
+    try/except per subcommand."""
     if sub == "list":
         entries = fork_registry.list_forks()
         if "--json" in rest:
@@ -150,7 +179,7 @@ def cmd_forks_dispatch(argv: list[str]) -> int:
         if not rest or rest[0].startswith("-"):
             output.err(
                 "Usage: forks set <repo> --owner <login> [--remote R] "
-                "[--account A | --token T] [--notes T]"
+                "[--account A | --token-stdin] [--notes T]"
             )
             return 1
         repo = rest[0]
@@ -159,16 +188,26 @@ def cmd_forks_dispatch(argv: list[str]) -> int:
             output.err("forks set requires --owner <login>")
             return 1
         account = _opt("--account")
-        token_opt = _opt("--token")
-        if token_opt is not None:
+        if account is not None and "--token-stdin" in rest:
+            output.err("forks set: --account and --token-stdin are mutually exclusive")
+            return 1
+        if "--token-stdin" in rest:
+            import sys as _sys
+
             from . import pr_ops
 
+            # Read the secret from stdin rather than argv (--token <value>
+            # would land it in shell history and any process listing).
+            token = _sys.stdin.readline().rstrip("\r\n")
+            if not token:
+                output.err("forks set --token-stdin: no token read from stdin")
+                return 1
             # The SAME scope create_pr derives for a token_command/token_env
             # -bound repo (see _resolve_fork_credential) -- pass the repo's
             # real token here so the pre-seeded entry actually matches what
             # create-pr will look up; --account alone cannot reproduce this,
             # since create-pr never guesses a login for an opaque token.
-            account = pr_ops._token_scope(token_opt)
+            account = pr_ops._token_scope(token)
         elif account is None:
             from . import pr_ops
 
@@ -176,7 +215,7 @@ def cmd_forks_dispatch(argv: list[str]) -> int:
             # account mapping) -- see pr_ops._resolve_fork_credential. Built
             # with a BARE PRConfig (no token_command/token_env): this default
             # covers the common account-mapping/ambient-auth case only. Use
-            # --token instead for a repo using pr.token_command/token_env.
+            # --token-stdin instead for a repo using pr.token_command/token_env.
             _token, account = pr_ops._resolve_fork_credential(
                 repo, cfg.PRConfig(provider="github"),
             )
@@ -206,3 +245,4 @@ def cmd_forks_dispatch(argv: list[str]) -> int:
     output.err(f"Unknown forks subcommand: {sub}")
     _forks_usage()
     return 1
+

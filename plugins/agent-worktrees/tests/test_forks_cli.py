@@ -59,17 +59,18 @@ def test_set_explicit_account_overrides_resolution(monkeypatch, capfd):
     assert payload["forks"][0]["account"] == "explicit"
 
 
-def test_set_with_token_derives_scope(monkeypatch, capfd):
-    """``--token`` must derive the SAME scope create_pr's gate would compute
-    for a token_command/token_env-bound repo, rather than guessing a login
-    account alone cannot reproduce for an opaque token."""
+def test_set_with_token_stdin_derives_scope(monkeypatch, capfd):
+    """``--token-stdin`` must derive the SAME scope create_pr's gate would
+    compute for a token_command/token_env-bound repo, rather than guessing a
+    login account alone cannot reproduce for an opaque token -- and must read
+    the secret from stdin, never argv (shell history / process listing)."""
+    import io
+
     from agent_worktrees import pr_ops
 
+    monkeypatch.setattr("sys.stdin", io.StringIO("ghp_exampletoken\n"))
     rc = forks_cli.cmd_forks_dispatch(
-        [
-            "set", "octo-org/widgets", "--owner", "octocat",
-            "--token", "ghp_exampletoken",
-        ],
+        ["set", "octo-org/widgets", "--owner", "octocat", "--token-stdin"],
     )
     assert rc == 0
     expected_scope = pr_ops._token_scope("ghp_exampletoken")
@@ -79,6 +80,47 @@ def test_set_with_token_derives_scope(monkeypatch, capfd):
     forks_cli.cmd_forks_dispatch(["show", "octo-org/widgets", "--json"])
     payload = json.loads(capfd.readouterr().out)
     assert payload["forks"][0]["account"] == expected_scope
+
+
+def test_set_token_stdin_and_account_mutually_exclusive(capfd):
+    rc = forks_cli.cmd_forks_dispatch(
+        [
+            "set", "octo-org/widgets", "--owner", "octocat",
+            "--account", "explicit", "--token-stdin",
+        ],
+    )
+    assert rc == 1
+    assert "mutually exclusive" in capfd.readouterr().out
+
+
+def test_set_token_stdin_empty_fails(monkeypatch, capfd):
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    rc = forks_cli.cmd_forks_dispatch(
+        ["set", "octo-org/widgets", "--owner", "octocat", "--token-stdin"],
+    )
+    assert rc == 1
+    assert "no token read from stdin" in capfd.readouterr().out
+
+
+def test_option_with_missing_value_is_a_usage_error(capfd):
+    """A flag present with nothing after it (or immediately followed by
+    another flag) must fail loudly, not silently resolve to None -- e.g.
+    'forks remove <repo> --account' previously fell through to removing
+    every account for that repo instead of reporting a malformed command."""
+    rc = forks_cli.cmd_forks_dispatch(["remove", "octo-org/widgets", "--account"])
+    assert rc == 1
+    out = capfd.readouterr().out
+    assert "--account requires a value" in out
+
+
+def test_option_followed_by_another_flag_is_a_usage_error(capfd):
+    rc = forks_cli.cmd_forks_dispatch(
+        ["set", "octo-org/widgets", "--owner", "--remote"],
+    )
+    assert rc == 1
+    assert "--owner requires a value" in capfd.readouterr().out
 
 
 def test_list_json_and_text(monkeypatch, capfd):
@@ -127,6 +169,24 @@ def test_remove(monkeypatch, capfd):
     rc = forks_cli.cmd_forks_dispatch(["remove", "octo-org/widgets"])
     assert rc == 1
     assert "No confirmed fork" in capfd.readouterr().out
+
+
+def test_remove_with_account_only_removes_that_account(capfd):
+    """'remove <repo> --account A' must forget only A's entry, leaving a
+    different account's confirmation for the same repo intact -- the exact
+    multi-account-per-repo contract the composite key exists to support."""
+    from agent_worktrees import fork_registry
+
+    fork_registry.record_confirmation("octo-org/widgets", "alice", account="account-a")
+    fork_registry.record_confirmation("octo-org/widgets", "bob", account="account-b")
+    capfd.readouterr()
+
+    rc = forks_cli.cmd_forks_dispatch(
+        ["remove", "octo-org/widgets", "--account", "account-a"],
+    )
+    assert rc == 0
+    assert fork_registry.is_confirmed("octo-org/widgets", account="account-a") is False
+    assert fork_registry.is_confirmed("octo-org/widgets", account="account-b") is True
 
 
 def test_help_and_unknown_subcommand(capfd):

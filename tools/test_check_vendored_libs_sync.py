@@ -97,3 +97,22 @@ def test_verify_ignores_pointer_only_libs(fake_repo: Path):
     _seed_pointer_copy(fake_repo, "plugins/two/libs/shared-lib")
 
     assert check_vendored_libs_sync.verify() == []
+
+
+def test_verify_still_flags_pointer_version_skew_in_a_mixed_set(fake_repo: Path):
+    _seed_real_lib(fake_repo, "libs/shared-lib", content="value = 1\n", version="0.1.0-dev1")
+    _seed_real_lib(
+        fake_repo,
+        "plugins/agent-worktrees/libs/shared-lib",
+        content="value = 1\n",
+        version="0.1.0-dev1",
+    )
+    _seed_pointer_copy(
+        fake_repo,
+        "plugins/customizing-copilot/libs/shared-lib",
+        version="9.9.9",
+    )
+
+    problems = check_vendored_libs_sync.verify()
+
+    assert any("version skew across copies" in p for p in problems)

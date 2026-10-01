@@ -165,10 +165,18 @@ def verify() -> list[str]:
                         "-- re-sync the vendored copies"
                     )
 
-        # 2) declared versions must all match.
+        # 2) declared versions must all match. Pointer copies are excluded
+        # from the src/ byte comparison above, but their declared versions
+        # still matter: a mixed real+pointer set that publishes the same
+        # distribution under different versions is still install-order skew.
+        version_paths = list(compare_paths)
+        if pointer_paths:
+            version_paths.extend(pointer_paths)
         versions = {
-            rel_names[i]: _declared_version(compare_paths[i])
-            for i in range(len(compare_paths))
+            (
+                f"libs/{lib}" if p == canonical else str(p.relative_to(base))
+            ): _declared_version(p)
+            for p in version_paths
         }
         distinct = {v for v in versions.values() if v is not None}
         if len(distinct) > 1:

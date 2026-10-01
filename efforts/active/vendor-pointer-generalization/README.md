@@ -386,19 +386,34 @@ itself now superseded, not the design above).
 ### Phase 0 — Audit the real remaining surface (no code changes)
 _(agent-recommended, mirroring `vendored-installer-engine`'s own Phase 0
 shape before committing to a design)_
-- [ ] Enumerate every currently byte-duplicated-across-plugins construct in
+- [x] Enumerate every currently byte-duplicated-across-plugins construct in
       the repo (shared libs, installer engine, and any other "and more"
       candidates — e.g. shared CI guard scripts, shared skill fragments) and
       classify each as: already pointer-capable but unconverted (real libs),
       designed for byte-vendor+drift-checker today (installer engine), or
-      not yet addressed by any mechanism.
-- [ ] Confirm the existing `VENDOR_POINTER.json`/file-pointer forms are
+      not yet addressed by any mechanism. **Done, retroactively via the
+      2026-09-30 "Phase 3 complete" Journal entry's bounded duplicate sweep**
+      (hashed duplicate files across `plugins/*/`, enumerated remaining
+      `VENDOR_POINTER.json` holdouts, checked existing duplicate-management
+      tools) — the remaining large surfaces were found to already have
+      explicit owners (`sync-installation-context.py`,
+      `sync-versioned-runtime.py`/`check-runtime-resolution.py`,
+      `check-bootstrap-sync.py`), not silent new candidates.
+- [x] Confirm the existing `VENDOR_POINTER.json`/file-pointer forms are
       sufficient for the lib surface as-is, or whether real-world use
       surfaces a gap the isolated trial didn't (e.g. a lib with local,
       genuinely-per-plugin modifications layered on top of the canonical
       source — the trial's 56 copies were presumably byte-identical to
       canonical already; confirm that holds for every real copy before
       converting, since a pointer has no way to express a local diff).
+      **Done:** every real copy converted across Phase 1 was confirmed
+      byte-identical to canonical before conversion (per-lib Journal
+      entries); the one genuine local-diff-shaped exception,
+      `customizing-copilot`'s `plugin-activation` copy, was deliberately
+      kept on the file/stub-adjacent pointer form rather than forced into
+      canonical-reference, precisely because a pointer can't express its
+      script's direct `source`-field read (see the `src-passthrough`
+      retirement note below).
 
 ### Phase 1 — Convert real shared-lib copies to canonical-reference form
 - [x] **Define the dev-time resolver before converting anything** —
@@ -424,7 +439,7 @@ shape before committing to a design)_
       un-struck and active again; the src-passthrough-specific notes are
       kept as historical record of what was tried and why it's being
       undone.
-- [ ] **Convert every real vendored lib to the canonical-reference form**:
+- [x] **Convert every real vendored lib to the canonical-reference form**:
       for every `plugins/<plugin>/libs/<lib>` (and `worktree-manager/
       libs/<lib>`) copy that is byte-identical to its canonical
       `libs/<lib>` source, (1) delete the local copy entirely (no
@@ -435,7 +450,10 @@ shape before committing to a design)_
       relative depth depends on the consumer's own location — two levels
       up from `plugins/<plugin>/`, one level up from `worktree-manager/`).
       Covers both trees (`sync-vendored-libs.py`/`check-vendored-libs-
-      sync.py` already scan both today).
+      sync.py` already scan both today). **All sub-items below are
+      complete; the sole standing exception is `customizing-copilot`'s
+      structurally-permanent `plugin-activation` pointer copy, which
+      cannot take this form at all — see its own sub-item for why.**
       - [x] **Re-convert the 7 libs already converted to `src-passthrough`**
             back to this form first, one at a time, using the exact same
             bounded-slice pattern already proven for the forward
@@ -445,16 +463,18 @@ shape before committing to a design)_
             (4), `ssh-manager` (4), `single-instance-lease` (5),
             `config-migrate` (5) — **all 6 done**. `plugin-activation`'s
             re-conversion is **DONE for every consumer that can safely
-            support it, and BLOCKED for its remaining two copies** — see
-            the corrected sub-item immediately below; do not re-attempt
-            either without a fresh design resolution first (see the
-            2026-09-29 "attempted, blocked, reverted" Journal entry). Each
-            re-conversion closes out its own instance of issue #3905 (the
-            non-editable-install gap no longer applies once that lib is
-            back on the `uv`-editable form) — this does not apply to
-            either remaining `plugin-activation` copy, which stay on
-            `src-passthrough` and so keep issue #3905's gap open for those
-            two specifically.
+            support the `uv`-editable form; its two remaining non-`uv`-
+            editable copies are now resolved differently** — see the
+            corrected sub-item immediately below. Each re-conversion
+            closes out its own instance of issue #3905 (the non-editable-
+            install gap no longer applies once that lib is back on the
+            `uv`-editable form). `agent-worktrees`'s copy closed its own
+            instance of issue #3905 too, via a full real vendored copy
+            (issue #4788, 2026-10-01) rather than `uv`-editable — the gap
+            no longer applies to it either, just by a different mechanism.
+            Only `customizing-copilot`'s copy remains permanently on
+            `src-passthrough` and keeps issue #3905's gap open, by
+            structural design (see below).
             - [x] **Ordering caveat found during `ssh-manager`'s
                   conversion (2026-09-28)**: a lib with its OWN dependency
                   on another vendored lib (per its `pyproject.toml`
@@ -629,7 +649,7 @@ shape before committing to a design)_
       compares the output against a fresh current-canonical vendored
       reconstruction (copy canonical -> materialize nested refs) rather than a
       stale historical tree. No `SKIP`s, no tree drift.
-- [ ] Confirm every consuming plugin's own test suite
+- [x] Confirm every consuming plugin's own test suite
       (`tools/run-plugin-tests.py <plugin>`) passes with **no local
       `libs/<lib>` directory present at all** in the `dev` checkout —
       proving the canonical reference alone (via `[tool.uv.sources]`
@@ -638,13 +658,16 @@ shape before committing to a design)_
       confirm (this is the whole point of the second course correction) a
       NON-editable `uv pip install <plugin-dir>` still resolves the
       shared-lib dependency to canonical live (not copied) — the property
-      `src-passthrough` lacked. **Status, 2026-10-01:** the editable
-      half is DONE — the full-suite proof already covers every converted plugin consumer
-      (`tools/run-plugin-tests.py agent-worktrees --reinstall` plus the earlier
-      10-plugin sweep recorded below). The non-editable half remains OPEN for
-      the same blocker recorded in Validation Plan / Journal below: local
-      experiments got `agent-worktrees` green in scratch validation, but the
-      shippable packaging/runtime fix has not landed and is still under review.
+      `src-passthrough` lacked. **Status, 2026-10-01:** both halves now
+      DONE. The editable half was proven first — the full-suite proof
+      covers every converted plugin consumer (`tools/run-plugin-tests.py
+      agent-worktrees --reinstall` plus the earlier 10-plugin sweep recorded
+      below). The non-editable half was blocked on two real bugs surfaced by
+      `agent-worktrees` specifically (packaged wrapper assets not
+      self-contained, issue #4787; staged-install source recovery not
+      durable, issue #4788) — both fixed and merged (PRs #4796, #4794), so
+      the non-editable proof now holds for every real converted plugin this
+      effort touched, with no remaining shippability gap.
 
 ### Phase 2 — Canonical-reference form for the shared installer engine
 > **Status note (2026-09-30, updated):** libs' mechanism pivoted away to
@@ -753,7 +776,7 @@ shape before committing to a design)_
       `uv`-editable is current again; a `src-passthrough` copy's own
       "local pointer directory present, `src/` replaced by a stub"
       criterion no longer applies once each lib is re-converted.)
-- [ ] **NEW criterion, added by the second course correction**
+- [x] **NEW criterion, added by the second course correction**
       (confirmed for `lazy-cli-dispatch` specifically, PR #4245 -- not
       yet for every lib, since only that one is converted so far): a
       converted plugin's own test suite ALSO passes when the plugin
@@ -768,20 +791,29 @@ shape before committing to a design)_
       property `src-passthrough` structurally lacked (issue #3905); it is
       the primary reason for reverting to this mechanism, so it must be
       demonstrated directly, not merely inferred from the earlier
-      editable-install prototype. **Status, 2026-10-01:** still OPEN. Local
-      scratch validation did get `agent-worktrees` green non-editably after
-      fixing missing payload-root assets and iterating on the remaining
-      `plugin-activation` passthrough fallback, but PR #4767 review found the
-      current approach is not yet safely shippable: packaged payload fallback
-      still depends on external `worktree-manager/bin/*` wrapper assets, and
-      the PEP 610 `direct_url.json` source-recovery path can still point at a
+      editable-install prototype. **Status, 2026-10-01:** was OPEN earlier
+      the same day. Local scratch validation did get `agent-worktrees` green
+      non-editably after fixing missing payload-root assets and iterating on
+      the remaining `plugin-activation` passthrough fallback, but PR #4767
+      review found the then-current approach not yet safely shippable:
+      packaged payload fallback still depended on external
+      `worktree-manager/bin/*` wrapper assets, and the PEP 610
+      `direct_url.json` source-recovery path could still point at a
       transient installer staging directory rather than a durable checkout.
-      Those two blockers are now tracked explicitly as issue **#4787**
+      Those two blockers were tracked explicitly as issue **#4787**
       (wrapper assets not self-contained in packaged fallback) and issue
       **#4788** (staged non-editable installs lose the remaining
-      `src-passthrough` source binding). **Update, 2026-10-01 later:** #4788
-      is resolved by converting `agent-worktrees`'s `plugin-activation`
-      copy to a full real vendored tree with committed staged-install
+      `src-passthrough` source binding). **Done, 2026-10-01 later:** both
+      resolved. #4788 closed by converting `agent-worktrees`'s
+      `plugin-activation` copy to a full real vendored tree with committed
+      staged-install regression coverage (PR #4794). #4787 closed by
+      packaging `agent-worktrees`'s launch-wrapper assets into the plugin's
+      own payload via a manifest-driven materialize step
+      (`tools/materialize_launch_wrapper_assets.py`), with a packaged-preview
+      regression proving `deploy_wrappers()` succeeds from a payload-only
+      root with no sibling `worktree-manager/` present (PR #4796). The
+      non-editable top-level-suite proof is therefore complete for every
+      real converted plugin this effort touched.
       regression coverage, so the remaining blocker on this checkbox is
       now #4787 alone (wrapper assets still not self-contained).
 - [x] Editing the canonical `libs/<lib>` source and re-running a
@@ -2988,3 +3020,61 @@ _Pending._
   - The long-deferred "`src-passthrough` retirement" Plan item **does not**
     fully close yet, because `customizing-copilot` still has the one
     structural, intentional pointer user described above.
+
+### 2026-10-01 — Issue #4787 resolved: packaged launch-wrapper assets made self-contained
+
+- Fixed the other half of the non-editable validation blocker: `agent-worktrees`'s
+  `deploy_wrappers()` previously sourced launch-wrapper assets
+  (`worktree-manager/bin/*`, plus transitive assets — `session-options.*`,
+  `psmux-path.ps1`, `psmux-passthrough.conf` — found once the real packaged
+  set was traced through) from a SIBLING directory outside the packaged
+  plugin payload, violating `docs/install-contract.md`'s self-contained
+  shipped-payload guarantee for a true marketplace-style install.
+- Fix: added a manifest-driven packaged-asset set
+  (`plugins/agent-worktrees/launch-wrapper-assets.json`, read by the new
+  `tools/launch_wrapper_assets_ref.py`), materialized into preview/release
+  payloads by new `tools/materialize_launch_wrapper_assets.py`, wired into
+  both `tools/materialize_main.py` and `tools/preview_release.py` alongside
+  the existing lib/installer-engine materialize steps. Dev-time canonical
+  sources stay in `worktree-manager/bin/` unchanged; only the shipped
+  payload now carries its own self-contained copy. Updated uninstall
+  cleanup and docs (`plugins/agent-worktrees/docs/architecture.md`,
+  `cli-reference.md`) to match.
+- Added a packaged-preview regression proving `deploy_wrappers()` succeeds
+  from a payload-only root with no sibling `worktree-manager/` directory
+  present at all — directly exercising the issue's own symptom, not just
+  the materialize step in isolation.
+- Landed as PR #4796, merged. Issue #4787 closed.
+- **Net effect:** with both #4787 and #4788 now closed, the non-editable
+  top-level-install Validation Plan item (and its Phase 1 twin checklist
+  item) are both fully satisfied for every real converted plugin this
+  effort touched — checked off above.
+
+### 2026-10-01 — Master checklist consolidation pass
+
+- Several umbrella/Phase checkboxes above had fallen behind their own
+  sub-items and Journal entries after the last few parallel legs (each
+  sub-agent closed its own narrow item but didn't always walk back up to
+  flip the parent checkbox or fix now-stale "remaining two copies"-style
+  phrasing). Swept the whole Plan + Validation Plan section and:
+  - Checked off Phase 0's two audit items retroactively — they were
+    genuinely satisfied by the 2026-09-30 "Phase 3 complete" entry's
+    duplicate sweep, just never checked.
+  - Checked off the Phase 1 umbrella "convert every real vendored lib"
+    item — every sub-item under it was already `[x]`.
+  - Corrected stale "BLOCKED for its remaining two copies" phrasing (now
+    one copy, `customizing-copilot`'s, remains intentionally on
+    `src-passthrough`; `agent-worktrees`'s is a closed full-copy exception).
+  - Checked off both the Validation Plan's non-editable-install item and
+    its Phase 1 twin, now that #4787/#4788 are both closed.
+- Two items remain genuinely, accurately open: the `src-passthrough`
+  retirement Plan item (blocked on `customizing-copilot`'s structural
+  pointer dependency — a separate, not-yet-scoped replacement for its
+  `plugin-activation.py` script's load path) and nothing else — every
+  other Plan phase and Validation Plan item is now `[x]`.
+- **Effort `Status:` intentionally left as `Draft`** — the `src-passthrough`
+  retirement item is still open, so this effort is not ready to be marked
+  Done. That remaining item is a legitimate, narrowly-scoped follow-up
+  (not tracked as a separate issue yet); a future session should either
+  scope that replacement work as its own tracked issue/effort or fold it
+  in here before closing.

@@ -1473,6 +1473,61 @@ class TestSetPRAndStatus:
         st = pr_ops.pr_status(wid)
         assert st["repo"] == "SomeOwner/some-other-repo"
 
+    def test_set_pr_derives_repo_slug_from_path_hosted_gitea_url(self, pr_repo):
+        """A self-hosted Gitea instance's `api_base` can carry an arbitrary
+        path prefix (`providers/gitea.py`'s own `create_pull` produces URLs
+        like `https://h/gitea/o/r/pulls/42`) -- a third path segment between
+        host and `owner/repo` the plain host-relative pattern never matches.
+        Stripping the configured `api_base` as a prefix first must still
+        resolve the correct slug (review finding, PR #4795)."""
+        config, wid, _wt_path, _ = pr_repo
+        import dataclasses
+        repo = config.repos["ext"]
+        pr_cfg = dataclasses.replace(repo.pr, api_base="https://h/gitea")
+        config = dataclasses.replace(
+            config, repos={"ext": dataclasses.replace(repo, pr=pr_cfg)},
+        )
+        res = pr_ops.set_pr(
+            wid,
+            url="https://h/gitea/o/r/pulls/42",
+            number=42,
+            provider="gitea",
+            config=config,
+        )
+        assert res["success"] is True
+        assert res["repo"] == "o/r"
+
+    def test_set_pr_repo_change_clears_attribution_evidence(self, pr_repo):
+        """A parsed repo change (not just a number/provider change) must
+        also clear stale attribution/observation evidence -- the create/
+        reuse path already does this for an explicit --repo change
+        (review finding, PR #4795): without it, `refresh_source_attribution`
+        can incorrectly short-circuit as already published against the OLD
+        repo's merge evidence."""
+        _config, wid, _wt_path, _ = pr_repo
+        pr_ops.set_pr(
+            wid, url="https://github.com/OwnerA/repo-a/pull/1", number=1,
+            provider="github",
+        )
+        rec_path = cfg.tracking_dir() / f"{wid}.yaml"
+        rec = tracking.load_record(rec_path)
+        rec.active_pr().attribution_head = "deadbeef"
+        rec.active_pr().head_observed_at = "2026-01-01T00:00:00Z"
+        rec.active_pr().head_observed_api_base = "https://old-base"
+        tracking.save_record(rec)
+
+        res = pr_ops.set_pr(
+            wid, url="https://github.com/OwnerB/repo-b/pull/1", number=1,
+            provider="github",
+        )
+        assert res["success"] is True
+        assert res["repo"] == "OwnerB/repo-b"
+        rec = tracking.load_record(rec_path)
+        pr = rec.active_pr()
+        assert pr.attribution_head == ""
+        assert pr.head_observed_at == ""
+        assert pr.head_observed_api_base == ""
+
     def test_set_pr_leaves_repo_unset_for_an_unparseable_url(self, pr_repo):
         """An ADO-shaped (or any otherwise-unrecognized) URL has no `owner/
         repo` concept this parser can extract -- `pr.repo` must stay unset

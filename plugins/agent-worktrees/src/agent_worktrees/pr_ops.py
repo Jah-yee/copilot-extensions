@@ -2001,11 +2001,26 @@ def set_pr(
 _PR_URL_REPO_RE = re.compile(r"^https?://[^/]+/([^/]+/[^/]+)/pulls?/\d+/?$", re.IGNORECASE)
 
 
-def _repo_slug_from_pr_url(url: str) -> str:
+def _repo_slug_from_pr_url(url: str, api_base: str = "") -> str:
     """Extract the hosting ``owner/repo`` slug from a PR URL, or ``""`` when
     the URL doesn't match a supported provider's shape (ADO, or anything
-    unrecognized) -- never raises."""
-    m = _PR_URL_REPO_RE.match(url.strip())
+    unrecognized) -- never raises.
+
+    A self-hosted Gitea instance's own ``api_base`` can carry an arbitrary
+    path prefix (e.g. ``https://h/gitea``, per ``providers/gitea.py``'s own
+    ``create_pull``), so its PR URLs look like
+    ``https://h/gitea/<owner>/<repo>/pulls/<n>`` -- a THIRD path segment
+    (``gitea``) between host and ``owner/repo`` that the plain two-segment
+    pattern above never matches. When ``api_base`` is known, strip it as a
+    literal prefix first and parse the remainder; otherwise fall back to the
+    plain host-relative pattern (GitHub, or a path-less Gitea instance)."""
+    url = url.strip()
+    base = (api_base or "").strip().rstrip("/")
+    if base and url.lower().startswith(base.lower() + "/"):
+        m = re.match(r"^([^/]+/[^/]+)/pulls?/\d+/?$", url[len(base) + 1:], re.IGNORECASE)
+        if m:
+            return m.group(1)
+    m = _PR_URL_REPO_RE.match(url)
     return m.group(1) if m else ""
 
 
@@ -2084,9 +2099,26 @@ def _set_pr_locked(
     if tracking.ensure_pr_id(pr):
         tracking.save_record(record)
 
+    # Resolve a parsed repo slug (if the URL parses) BEFORE computing
+    # identity_changed, so a repo change -- not just a number/provider
+    # change -- also clears attribution/observation evidence below (the
+    # create/reuse path already does this for an explicit --repo change;
+    # review finding, PR #4795).
+    parsed_repo = ""
+    if url is not None:
+        try:
+            api_base = (
+                config.default_repo.pr.api_base if config is not None
+                else cfg.load_config().default_repo.pr.api_base
+            )
+        except Exception:
+            api_base = ""
+        parsed_repo = _repo_slug_from_pr_url(url, api_base)
+
     identity_changed = (
         (number is not None and number != pr.number)
         or (provider is not None and provider != pr.provider)
+        or (parsed_repo and parsed_repo != pr.repo)
     )
     if url is not None:
         pr.url = url
@@ -2099,7 +2131,6 @@ def _set_pr_locked(
         # is wrong whenever the PR's actual host repo has a different name
         # or owner than the local project (real failure: a 404 from GitHub's
         # API against a nonexistent `repos/<project-name>/pulls/<n>` path).
-        parsed_repo = _repo_slug_from_pr_url(url)
         if parsed_repo:
             pr.repo = parsed_repo
     if number is not None:

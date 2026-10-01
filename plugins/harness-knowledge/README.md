@@ -2,8 +2,9 @@
 
 Payload-only binding plugin for a **stateless** Copilot CLI control harness and
 its private **knowledge** repo. It ships a setup skill plus small configurator
-scripts; there is no runtime, venv, binstub, hook, or installer. Enable the
-plugin, then run the **`binding-knowledge`** skill once for the machine.
+scripts; there is no runtime, venv, binstub, hook, or installer. Harness setup
+runs the **`binding-knowledge`** skill once for the machine after its core
+plugins are available.
 
 A stateless harness holds the shareable *intelligence* (instructions, config,
 skills, sub-agents) but no personal state. Personal state (efforts, logs,
@@ -18,10 +19,12 @@ The front door is the **`binding-knowledge`** skill:
 1. Inspect the launch repo with `agent-worktrees state-root --json`. A resolved
    path can still come from fallback discovery, so it does not replace the
    canonical registration check below.
-2. Choose the knowledge repo: use an existing local checkout, clone a remote, or
-   create a new private repo. The flow should fail before configuration if the
-   chosen checkout is missing or is not a git repo; the configurator assumes the
-   path it is given.
+2. Confirm the knowledge repo with private `dotfiles` preselected. If the
+   operator does not already know why they need a different repo, keep that
+   default. A separate private GitHub repo, Azure DevOps developer repo, or
+   another checkout remains an advanced supported choice. The flow should fail
+   before configuration if the chosen checkout is missing or is not a git repo;
+   the configurator assumes the path it is given.
 3. Run the single idempotent registration-and-binding command:
    `skills/binding-knowledge/scripts/bind_knowledge.py
    --agent-worktrees-path "<catalog argv[0]>" --register`, along with the

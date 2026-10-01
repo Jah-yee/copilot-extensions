@@ -457,17 +457,21 @@ in-repo overlay (below); the in-repo version wins when both are present.
 > a separate durable entry rather than overwriting the first, so switching
 > back to the original account later does not re-trigger the gate either.
 > Separately, when `pr.fork.owner` is explicitly configured, it
-> deterministically decides the real fork owner regardless of identity (see
-> `_ensure_fork_and_remote`) — if a stored confirmation's owner doesn't match
-> that configured override, the gate treats it as a *different* approval and
-> re-prompts rather than silently publishing under the newly-configured
-> owner; a successful re-confirmation then updates the stored entry to the
-> new owner. The same re-validation also applies with **no** `pr.fork.owner`
-> override configured at all: if a stored confirmation's owner diverges from
-> the fork owner the provider actually resolves live (a typo at `forks set`
-> time, or a genuine upstream change), a silent skip re-prompts rather than
-> trusting the stale stored value — only an explicit `--confirm-fork` this
-> call proceeds regardless, and self-heals the stored entry to the real
+> deterministically overrides the owner login used to build the PR head
+> (`<owner>:<branch>`) regardless of identity — `_ensure_fork_and_remote`
+> still obtains the actual fork/remote (`clone_url`) from the authenticated
+> provider first; the override only changes which login names the PR head,
+> not which repository is actually forked/pushed to. If a stored
+> confirmation's owner doesn't match that configured override, the gate
+> treats it as a *different* approval and re-prompts rather than silently
+> publishing under the newly-configured owner; a successful re-confirmation
+> then updates the stored entry to the new owner. The same re-validation
+> also applies with **no** `pr.fork.owner` override configured at all: if a
+> stored confirmation's owner diverges from the fork owner the provider
+> actually resolves live (a typo at `forks set` time, or a genuine upstream
+> change), a silent skip re-prompts rather than trusting the stale stored
+> value — only an explicit `--confirm-fork` this call proceeds regardless,
+> and self-heals the stored entry to the real
 > owner it resolved.
 >
 > A repo can also be pre-approved once, ahead of any `create-pr` call — e.g.

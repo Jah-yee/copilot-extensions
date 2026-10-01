@@ -106,9 +106,9 @@ def test_set_token_stdin_empty_fails(monkeypatch, capfd):
 
 def test_option_with_missing_value_is_a_usage_error(capfd):
     """A flag present with nothing after it (or immediately followed by
-    another flag) must fail loudly, not silently resolve to None -- e.g.
-    'forks remove <repo> --account' previously fell through to removing
-    every account for that repo instead of reporting a malformed command."""
+    another flag) must fail loudly: 'forks remove <repo> --account' with a
+    missing value is a malformed command, never an implicit "remove every
+    account for that repo"."""
     rc = forks_cli.cmd_forks_dispatch(["remove", "octo-org/widgets", "--account"])
     assert rc == 1
     out = capfd.readouterr().out
@@ -124,10 +124,9 @@ def test_option_followed_by_another_flag_is_a_usage_error(capfd):
 
 
 def test_unknown_flag_is_rejected_not_silently_ignored(monkeypatch, capfd):
-    """The exact gap a removed '--token <value>' flag could have left behind:
-    an unsupported/mistyped flag (and its value) must never be silently
-    dropped while the command still succeeds under an unintended default --
-    it must fail loudly instead."""
+    """An unsupported or mistyped flag (and its value) must never be
+    silently dropped while the command still succeeds under an unintended
+    default -- it must fail loudly instead."""
     monkeypatch.setattr(
         "agent_worktrees.pr_ops._resolve_fork_credential",
         lambda slug, prcfg: (None, "would-be-ambient"),

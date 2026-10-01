@@ -467,12 +467,12 @@ def _resolve_fork_credential(repo_slug: str, prcfg) -> tuple[str | None, str]:
     ``token_command`` or a transient mint authenticate the real operation as
     a different identity than the one the gate just confirmed/recorded.
 
-    ``scope`` is ``""`` when the identity genuinely cannot be determined
-    without a live API call (an opaque custom token, or no account/ambient
-    login resolvable at all) -- callers must treat an empty scope as
-    **fail-closed**: never persist or trust a durable confirmation for it,
-    since two different unresolvable identities would otherwise collide on
-    the same empty key.
+    ``scope`` is ``""`` only when neither a configured token nor a
+    mapped/ambient account can be resolved at all -- an opaque custom token
+    still gets a non-empty hashed scope via :func:`_token_scope`. Callers
+    must treat an empty scope as **fail-closed**: never persist or trust a
+    durable confirmation for it, since two different unresolvable
+    identities would otherwise collide on the same empty key.
     """
     if getattr(prcfg, "provider", "") != "github":
         return None, ""
@@ -591,7 +591,8 @@ def create_pr(
     and the agent can fall back to delegating PR creation manually.
 
     ``confirm_fork`` gates the role-aware fork-PR flow (see
-    ``efforts/active/role-aware-fork-pr-flow``, GitHub-only today): a repo
+    ``efforts/2026/09/26 role-aware-fork-pr-flow/README.md``, GitHub-only
+    today): a repo
     whose ``pr.roles``/``pr.fork`` config publishes through a personal fork
     returns ``needs_confirmation: "fork_setup"`` on a caller's first call
     per repo+login, for the agent to relay to the human, instead of silently
@@ -875,10 +876,11 @@ def create_pr(
     )
 
     # --- Role-aware PR flow resolution + fork-publish confirmation gate ----
-    # (efforts/active/role-aware-fork-pr-flow, Phase 2b, GitHub-only). Only
-    # touches anything when the repo opts in via `pr.roles` and/or
-    # `pr.fork.enabled`; an unconfigured repo's `prcfg`/`publish_remote` are
-    # unchanged from here on -- byte-for-byte today's behavior.
+    # (efforts/2026/09/26 role-aware-fork-pr-flow/README.md, Phase 2b,
+    # GitHub-only). Only touches anything when the repo opts in via
+    # `pr.roles` and/or `pr.fork.enabled`; an unconfigured repo's
+    # `prcfg`/`publish_remote` are unchanged from here on -- byte-for-byte
+    # today's behavior.
     publish_remote = remote
     fork_owner = ""
     if prcfg.roles:
@@ -906,9 +908,11 @@ def create_pr(
             if effective_account else None
         )
         # An explicit pr.fork.owner override deterministically decides the
-        # real fork owner (see _ensure_fork_and_remote) independent of which
-        # identity authenticates -- if it's configured and doesn't match what
-        # was actually confirmed, this is a DIFFERENT approval, not the same
+        # owner login used for the PR head (see _ensure_fork_and_remote --
+        # the actual fork/remote clone_url still comes from the
+        # authenticated provider) independent of which identity
+        # authenticates -- if it's configured and doesn't match what was
+        # actually confirmed, this is a DIFFERENT approval, not the same
         # one under a new name; re-ask rather than silently publishing there.
         already_confirmed = confirmed_entry is not None and (
             not prcfg.fork.owner or prcfg.fork.owner == confirmed_entry.owner

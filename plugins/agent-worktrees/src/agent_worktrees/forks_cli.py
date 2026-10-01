@@ -59,20 +59,14 @@ def _forks_usage() -> None:
 
 
 class _ForksArgError(ValueError):
-    """Raised by ``_opt``/``_reject_unknown_options`` on malformed input.
-
+    """Raised by ``_opt``/``_reject_unknown_options`` on malformed input:
+    a flag present with a missing/invalid value (e.g. ``--account`` with
+    nothing after it, or immediately followed by another flag), an
+    unrecognized flag, or more positionals than the subcommand accepts.
     Distinguishes 'flag not given' (``None``, a legitimate default) from
-    'flag given but malformed' -- e.g. ``forks remove owner/repo --account``
-    with nothing after it, or immediately followed by another flag. Letting
-    either of those silently resolve to ``None`` is exactly how ``--account``
-    with a missing value previously fell through to 'remove every account'
-    instead of failing loudly, and a bare ``--token-stdin`` typo'd as
-    ``--token`` previously fell through to ambient-auth resolution instead of
-    reading the intended secret. Also raised for an unrecognized flag or an
-    extra positional -- e.g. ``forks set o/r --owner me --token secret``
-    (``--token`` was removed in favor of ``--token-stdin``) must fail loudly
-    rather than silently ignore the unknown flag and its value and record an
-    unintended, ambient-resolved account.
+    'flag given but malformed', so a malformed or unsupported option always
+    fails loudly instead of silently defaulting to a destructive scope (e.g.
+    'remove every account') or an unintended ambient-auth identity.
     """
 
 

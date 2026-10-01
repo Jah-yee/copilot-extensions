@@ -830,9 +830,11 @@ shape before committing to a design)_
       regression proving `deploy_wrappers()` succeeds from a payload-only
       root with no sibling `worktree-manager/` present (PR #4796). With both
       bugs fixed, `agent-worktrees` itself is now confirmed non-editably,
-      alongside `lazy-cli-dispatch`, `agent-vault`, and `agent-ssh` (4 of
-      ~12 real converted plugin consumers) — **this criterion stays open**
-      until the remaining suite matrix is run and recorded across the rest.
+      alongside `agent-vault` and `agent-ssh` (3 of 11 real converted
+      plugin consumers — `lazy-cli-dispatch` is a lib `agent-worktrees`
+      consumes, PR #4245, not a distinct fourth) — **this criterion stays
+      open** until the remaining suite matrix is run and recorded across
+      the rest.
 - [x] Editing the canonical `libs/<lib>` source and re-running a
       converted plugin's tests **without reinstalling** picks up the edit
       — the "in-place test scripts in `dev`" / "call across folders"

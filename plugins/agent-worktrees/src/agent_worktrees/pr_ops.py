@@ -1992,6 +1992,23 @@ def set_pr(
         )
 
 
+#: A GitHub/generic or Gitea PR URL's hosting ``owner/repo`` slug -- both
+#: providers share the same ``.../<owner>/<repo>/pull(s)?/<n>`` structural
+#: shape (``providers/gitea.py``'s own ``/repos/{repo}/pulls/{number}`` API
+#: path mirrors this). Azure DevOps URLs don't fit this shape at all (no
+#: ``owner/repo`` concept the same way) and are deliberately left unmatched
+#: -- same as today's existing (absent) behavior for that provider.
+_PR_URL_REPO_RE = re.compile(r"^https?://[^/]+/([^/]+/[^/]+)/pulls?/\d+/?$", re.IGNORECASE)
+
+
+def _repo_slug_from_pr_url(url: str) -> str:
+    """Extract the hosting ``owner/repo`` slug from a PR URL, or ``""`` when
+    the URL doesn't match a supported provider's shape (ADO, or anything
+    unrecognized) -- never raises."""
+    m = _PR_URL_REPO_RE.match(url.strip())
+    return m.group(1) if m else ""
+
+
 def _set_pr_locked(
     base: dict,
     yaml_path: Path,
@@ -2073,6 +2090,18 @@ def _set_pr_locked(
     )
     if url is not None:
         pr.url = url
+        # `set-pr --url ...` is the documented manual-registration path for
+        # a PR opened outside create-pr's own flow (e.g. via a provider's
+        # own CLI/API directly) -- without this, `pr.repo` is left unset and
+        # every downstream operation needing the hosting `owner/repo` slug
+        # (pr-nudge's requested_reviewers call, among others) silently falls
+        # back to the worktree's generic local project name instead, which
+        # is wrong whenever the PR's actual host repo has a different name
+        # or owner than the local project (real failure: a 404 from GitHub's
+        # API against a nonexistent `repos/<project-name>/pulls/<n>` path).
+        parsed_repo = _repo_slug_from_pr_url(url)
+        if parsed_repo:
+            pr.repo = parsed_repo
     if number is not None:
         pr.number = number
     if provider is not None:

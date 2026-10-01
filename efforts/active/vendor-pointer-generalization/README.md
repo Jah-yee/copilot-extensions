@@ -500,7 +500,7 @@ shape before committing to a design)_
                   `editable = true` -- not just consumer-facing entries.
             - [x] **`plugin-activation`'s 8 consumers are now fully
                   classified: 6 `uv`-editable, 1 full real copy, 1
-                  permanent `src-passthrough`**
+                  current structural exception on `src-passthrough`**
                   (superseding an earlier, inaccurate draft of this
                   sub-item — corrected 2026-09-29 after a reviewer finding
                   caught the drift): `agent-dispatch`, `agent-logger`,
@@ -511,7 +511,9 @@ shape before committing to a design)_
                   do **NOT** get the `uv`-editable form, for two entirely
                   different reasons:
                   - **`customizing-copilot`'s copy stays `src-passthrough`
-                    forever.** This plugin has no `pyproject.toml`
+                    for now, pending the separate replacement work the
+                    retirement item below describes — not forever by
+                    design.** This plugin has no `pyproject.toml`
                     consuming the lib via `[tool.uv.sources]` at all — the
                     `uv`-editable mechanism has no TOML entry to rewrite,
                     so it cannot structurally apply here regardless of any

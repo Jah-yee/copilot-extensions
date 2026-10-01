@@ -1,0 +1,9 @@
+{
+  "comment": "pre-approve extension-permission-access at worktree creation to avoid a first-launch interactive-prompt hang",
+  "changes": [
+    {
+      "plugin": "agent-worktrees",
+      "type": "patch"
+    }
+  ]
+}

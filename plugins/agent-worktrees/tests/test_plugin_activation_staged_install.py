@@ -7,9 +7,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parents[3]
 PLUGIN_LIBS = REPO / "plugins" / "agent-worktrees" / "libs"
+pytestmark = pytest.mark.guard
 
 
 def _copy_installed_package(stage_root: Path, site_packages: Path, lib: str) -> None:

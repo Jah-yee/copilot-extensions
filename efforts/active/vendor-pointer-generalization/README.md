@@ -408,12 +408,16 @@ shape before committing to a design)_
       converting, since a pointer has no way to express a local diff).
       **Done:** every real copy converted across Phase 1 was confirmed
       byte-identical to canonical before conversion (per-lib Journal
-      entries); the one genuine local-diff-shaped exception,
-      `customizing-copilot`'s `plugin-activation` copy, was deliberately
-      kept on the file/stub-adjacent pointer form rather than forced into
-      canonical-reference, precisely because a pointer can't express its
-      script's direct `source`-field read (see the `src-passthrough`
-      retirement note below).
+      entries); no real per-plugin local source-tree diff was found
+      anywhere (the pointer-vs-canonical-reference choice always turned
+      on consumer mechanism, never on content divergence). The one
+      remaining pointer-form user, `customizing-copilot`'s
+      `plugin-activation` copy, is NOT a local-diff case either: it stays
+      on the pointer form because it has no consuming `pyproject.toml` at
+      all, and its own script reads the pointer's `source` field directly
+      — a different, mechanism-level exception from the content-diff
+      scenario this item was originally worried about (see the
+      `src-passthrough` retirement note below).
 
 ### Phase 1 — Convert real shared-lib copies to canonical-reference form
 - [x] **Define the dev-time resolver before converting anything** —
@@ -670,15 +674,17 @@ shape before committing to a design)_
       `src-passthrough` lacked. **Status, 2026-10-01:** the editable
       half is DONE — the full-suite proof covers every converted plugin
       consumer (`tools/run-plugin-tests.py agent-worktrees --reinstall`
-      plus the earlier 10-plugin sweep recorded below). The non-editable
+      plus the earlier 11-plugin sweep recorded below). The non-editable
       half's two real blocking bugs are now fixed (`agent-worktrees`'s
       packaged wrapper assets, issue #4787; its staged-install source
       recovery, issue #4788 — both merged, PRs #4796/#4794), **but the
       non-editable suite proof itself is still open**: it is only
-      directly confirmed so far for `lazy-cli-dispatch`, `agent-vault`,
-      `agent-ssh`, and now `agent-worktrees` (4 of the ~12 real converted
-      plugin consumers) — the remaining suite matrix still needs to be
-      run and recorded before this criterion can honestly close.
+      directly confirmed so far for `agent-worktrees`, `agent-vault`, and
+      `agent-ssh` (3 of the 11 real converted plugin consumers above —
+      `lazy-cli-dispatch` is a lib `agent-worktrees` consumes, PR #4245,
+      not a distinct plugin, so it does not add a fourth) — the remaining
+      suite matrix still needs to be run and recorded before this
+      criterion can honestly close.
 
 ### Phase 2 — Canonical-reference form for the shared installer engine
 > **Status note (2026-09-30, updated):** libs' mechanism pivoted away to
@@ -3060,10 +3066,11 @@ _Pending._
   top-level-install Validation Plan item (and its Phase 1 twin checklist
   item) have both their known BLOCKING BUGS resolved — but a subsequent
   review correctly found the broader "every converted plugin" claim was
-  not yet earned: only `lazy-cli-dispatch`, `agent-vault`, `agent-ssh`, and
-  now `agent-worktrees` are directly confirmed non-editably (4 of ~12 real
-  converted plugin consumers). Both checklist items stay **open** below
-  until the remaining suite matrix is run and recorded.
+  not yet earned: only `agent-worktrees`, `agent-vault`, and `agent-ssh`
+  are directly confirmed non-editably (3 of 11 real converted plugin
+  consumers — `lazy-cli-dispatch` is a lib `agent-worktrees` consumes, PR
+  #4245, not a distinct fourth plugin). Both checklist items stay **open**
+  below until the remaining suite matrix is run and recorded.
 
 ### 2026-10-01 — Master checklist consolidation pass
 
@@ -3085,7 +3092,8 @@ _Pending._
     non-editable-install item and its Phase 1 twin. Review correctly
     pointed out that closing issues #4787/#4788 fixed the two *blocking
     bugs* but did not itself demonstrate the suite passes non-editably for
-    every real converted plugin — only 4 of ~12 are directly confirmed.
+    every real converted plugin — only 3 of 11 are directly confirmed
+    (`agent-worktrees`, `agent-vault`, `agent-ssh`).
     Both items are reverted to open; see the per-item status notes above
     for the precise remaining evidence gap.
 - Three items remain genuinely, accurately open: the `src-passthrough`

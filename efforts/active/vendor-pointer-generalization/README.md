@@ -451,9 +451,10 @@ shape before committing to a design)_
       up from `plugins/<plugin>/`, one level up from `worktree-manager/`).
       Covers both trees (`sync-vendored-libs.py`/`check-vendored-libs-
       sync.py` already scan both today). **All sub-items below are
-      complete; the sole standing exception is `customizing-copilot`'s
-      structurally-permanent `plugin-activation` pointer copy, which
-      cannot take this form at all — see its own sub-item for why.**
+      structurally complete; the sole standing exception is
+      `customizing-copilot`'s one current structural holdout — a
+      `plugin-activation` pointer copy that cannot take this form at all
+      (see its own sub-item for why).**
       - [x] **Re-convert the 7 libs already converted to `src-passthrough`**
             back to this form first, one at a time, using the exact same
             bounded-slice pattern already proven for the forward
@@ -472,9 +473,10 @@ shape before committing to a design)_
             instance of issue #3905 too, via a full real vendored copy
             (issue #4788, 2026-10-01) rather than `uv`-editable — the gap
             no longer applies to it either, just by a different mechanism.
-            Only `customizing-copilot`'s copy remains permanently on
-            `src-passthrough` and keeps issue #3905's gap open, by
-            structural design (see below).
+            Only `customizing-copilot`'s copy remains the current
+            structural exception on `src-passthrough` and keeps issue
+            #3905's gap open for it, pending the separate replacement
+            described below.
             - [x] **Ordering caveat found during `ssh-manager`'s
                   conversion (2026-09-28)**: a lib with its OWN dependency
                   on another vendored lib (per its `pyproject.toml`
@@ -616,8 +618,8 @@ shape before committing to a design)_
       copy is retired as of 2026-10-01 (full real vendored copy, issue
       #4788), so the old "two blocked leftovers" framing no longer
       applies. The only remaining real user is `customizing-copilot`'s
-      structurally-permanent pointer copy: it has no consuming
-      `pyproject.toml`, and its `installing-plugins/scripts/
+      current structural exception: a pointer copy with no consuming
+      `pyproject.toml`, whose `installing-plugins/scripts/
       plugin-activation.py` still resolves `state.py` by reading that
       local pointer's own `source` field directly. Repo-wide retirement of
       the pointer kind therefore **does not close yet** — doing so would
@@ -814,8 +816,6 @@ shape before committing to a design)_
       root with no sibling `worktree-manager/` present (PR #4796). The
       non-editable top-level-suite proof is therefore complete for every
       real converted plugin this effort touched.
-      regression coverage, so the remaining blocker on this checkbox is
-      now #4787 alone (wrapper assets still not self-contained).
 - [x] Editing the canonical `libs/<lib>` source and re-running a
       converted plugin's tests **without reinstalling** picks up the edit
       — the "in-place test scripts in `dev`" / "call across folders"

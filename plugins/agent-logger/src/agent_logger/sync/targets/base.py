@@ -19,12 +19,16 @@ Concrete targets:
 
 from __future__ import annotations
 
+import platform
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_procutil import no_window_kwargs
+
 from agent_logger.sync.detritus import rsync_exclude
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 # On Windows, child processes (rsync, ssh) launched from a windowless parent --
 # e.g. pythonw.exe under a Scheduled Task -- each allocate a fresh console
@@ -33,6 +37,29 @@ from agent_logger.sync.detritus import rsync_exclude
 # no console is spawned. Spread into every external-tool subprocess call as
 # ``**NO_WINDOW_KWARGS``.
 NO_WINDOW_KWARGS: dict = no_window_kwargs()
+
+
+def rsync_local_source(path: Path) -> str:
+    """The local *source* path argument for an rsync command line.
+
+    On Windows, the only generally-available ``rsync`` is an MSYS2/Cygwin-
+    runtime build whose argument parser treats a leading drive letter plus
+    colon (``C:\\...``) as a ``[user@]host:path`` remote-host prefix --
+    rejecting the command with "source and destination cannot both be
+    remote" once the destination argument is *also* host-prefixed (the
+    ``ssh``/``ingest`` targets). Converting to the MSYS/Cygwin ``/c/...``
+    ("cygdrive") form sidesteps the misparse entirely. A no-op on POSIX,
+    which has no drive letters to begin with.
+
+    Always trailing-slash'd, matching rsync's own "copy the CONTENTS of
+    this directory" convention that every caller here relies on.
+    """
+    text = str(path)
+    if _IS_WINDOWS and len(text) >= 2 and text[1] == ":":
+        drive = text[0].lower()
+        rest = text[2:].replace("\\", "/")
+        text = f"/{drive}{rest}"
+    return text.rstrip("/") + "/"
 
 
 @dataclass

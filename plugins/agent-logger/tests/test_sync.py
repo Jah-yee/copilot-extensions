@@ -1146,6 +1146,35 @@ def test_ssh_target_push_uses_sibling_ssh_in_command(monkeypatch, tmp_path: Path
     )
 
 
+def test_ssh_target_push_converts_windows_source_path(monkeypatch, tmp_path: Path):
+    """push()'s local source argument must go through the same cygdrive
+    conversion as rsync_local_source -- otherwise an MSYS2/Cygwin rsync
+    misparses a native ``C:\\...`` source as a remote-host prefix and
+    rejects the command once the destination is also host-prefixed."""
+    from agent_logger.sync.targets import base
+    from agent_logger.sync.targets import ssh as ssh_mod
+
+    monkeypatch.setattr(base, "_IS_WINDOWS", True)
+    monkeypatch.setattr(ssh_mod.shutil, "which", lambda _name: "rsync")
+    source = _make_source(tmp_path / "home")
+
+    captured_commands: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured_commands.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(ssh_mod.subprocess, "run", _fake_run)
+    SshTarget({"host": "user@example", "remote_path": "/srv"}).push(source, "m1")
+
+    assert captured_commands[-1][-2] == base.rsync_local_source(source)
+
+
 def test_ssh_executable_quoting_handles_spaces_in_path():
     from agent_logger.sync.targets.ssh import _quote_executable
 
@@ -2008,6 +2037,36 @@ def test_rsync_session_filters_scope_without_allowlist() -> None:
     # session-store.db is dropped when filtering by repo.
     assert "--include=session-store.db" not in filtered
     assert filtered[-1] == "--exclude=*"
+
+
+def test_rsync_local_source_converts_windows_path(monkeypatch):
+    """On Windows, the only generally-available rsync is an MSYS2/Cygwin-
+    runtime build whose argument parser treats a leading drive letter plus
+    colon (``C:\\...``) as a remote-host prefix -- rejecting the command
+    with "source and destination cannot both be remote" once the
+    destination is also host-prefixed (the ssh/ingest targets). The local
+    source argument must be converted to the MSYS/Cygwin cygdrive form."""
+    from agent_logger.sync.targets import base
+
+    monkeypatch.setattr(base, "_IS_WINDOWS", True)
+    assert (
+        base.rsync_local_source(Path(r"C:\Users\tmichon\.copilot"))
+        == "/c/Users/tmichon/.copilot/"
+    )
+
+
+def test_rsync_local_source_is_noop_on_posix(monkeypatch):
+    """Skipped on Windows: ``pathlib.WindowsPath`` re-renders a forward-slash
+    POSIX-style input with backslashes, which would make this assertion
+    about platform-rendering rather than about ``rsync_local_source``."""
+    if os.name == "nt":
+        pytest.skip("POSIX path rendering only -- WindowsPath would mangle it")
+    from agent_logger.sync.targets import base
+
+    monkeypatch.setattr(base, "_IS_WINDOWS", False)
+    assert base.rsync_local_source(Path("/home/tmichon/.copilot")) == (
+        "/home/tmichon/.copilot/"
+    )
 
 
 def test_rsync_session_filters_exclude_lock_sidecars_before_includes() -> None:

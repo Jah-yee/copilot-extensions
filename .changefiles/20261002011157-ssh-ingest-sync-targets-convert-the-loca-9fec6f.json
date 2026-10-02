@@ -1,0 +1,9 @@
+{
+  "comment": "ssh/ingest sync targets: convert the local source path to the MSYS2/Cygwin cygdrive form (/c/...) on Windows, since that rsync build misparses a native C:\\... path as a remote-host prefix once the destination is also host-prefixed.",
+  "changes": [
+    {
+      "plugin": "agent-logger",
+      "type": "patch"
+    }
+  ]
+}

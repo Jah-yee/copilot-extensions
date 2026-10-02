@@ -24,6 +24,7 @@ from agent_logger.sync.targets.base import (
     DoctorResult,
     PushResult,
     Target,
+    rsync_local_source,
     rsync_session_filters,
 )
 
@@ -76,7 +77,7 @@ class IngestTarget(Target):
             ]
             if pw:
                 cmd += [f"--password-file={pw}"]
-            cmd += [f"{source}/", dest]
+            cmd += [rsync_local_source(source), dest]
             try:
                 proc = subprocess.run(
                     cmd,

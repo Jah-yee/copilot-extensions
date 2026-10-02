@@ -22,6 +22,7 @@ from agent_logger.sync.targets.base import (
     DoctorResult,
     PushResult,
     Target,
+    rsync_local_source,
     rsync_session_filters,
 )
 
@@ -116,7 +117,7 @@ class SshTarget(Target):
                 *rsync_session_filters(include_sessions, detritus.roots),
                 "-e",
                 ssh_cmd,
-                f"{source}/",
+                rsync_local_source(source),
                 remote,
             ]
             try:

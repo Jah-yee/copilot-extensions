@@ -16,6 +16,8 @@ assert _SPEC is not None and _SPEC.loader is not None
 bpa = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bpa)
 
+uer = bpa.uer  # the real uv_editable_ref module build_python_artifacts imports
+
 
 # --- parse_wheel_filename -----------------------------------------------
 
@@ -38,6 +40,18 @@ def test_parse_wheel_filename_platform_specific():
     assert info["python_tag"] == "cp312"
     assert info["abi_tag"] == "cp312"
     assert info["platform_tag"] == "win_amd64"
+
+
+def test_parse_wheel_filename_with_build_tag():
+    # Regression: a wheel filename may carry an optional numeric build tag
+    # between version and the compatibility tags (PEP 427) -- it must not
+    # be absorbed into `version`.
+    info = bpa.parse_wheel_filename(Path("demo_pkg-1.2.3-1-py3-none-any.whl"))
+    assert info["name"] == "demo_pkg"
+    assert info["version"] == "1.2.3"
+    assert info["python_tag"] == "py3"
+    assert info["abi_tag"] == "none"
+    assert info["platform_tag"] == "any"
 
 
 def test_parse_wheel_filename_malformed_raises():
@@ -72,6 +86,15 @@ def test_overall_identity_tags_one_platform_specific_wins():
     }
 
 
+def test_overall_identity_tags_conflicting_specific_tags_raise():
+    infos = [
+        {"python_tag": "cp311", "abi_tag": "cp311", "platform_tag": "win_amd64"},
+        {"python_tag": "cp312", "abi_tag": "cp312", "platform_tag": "win_amd64"},
+    ]
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.overall_identity_tags(infos)
+
+
 # --- read_wheel_generator -------------------------------------------------
 
 
@@ -95,10 +118,11 @@ def test_read_wheel_generator_present(tmp_path: Path):
     assert bpa.read_wheel_generator(wheel) == "setuptools (84.1.0)"
 
 
-def test_read_wheel_generator_absent(tmp_path: Path):
+def test_read_wheel_generator_absent_raises(tmp_path: Path):
     wheel = tmp_path / "fake_pkg-1.0-py3-none-any.whl"
     _make_fake_wheel(wheel, generator=None)
-    assert bpa.read_wheel_generator(wheel) is None
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.read_wheel_generator(wheel)
 
 
 def test_read_wheel_generator_missing_dist_info_raises(tmp_path: Path):
@@ -122,6 +146,24 @@ def test_sha256_file_matches_hashlib(tmp_path: Path):
 
 
 # --- resolve_vendored_libs -------------------------------------------------
+#
+# `resolve_vendored_libs` validates every discovered consumer directory with
+# the REAL `uv_editable_ref.uv_editable_problems` -- the same acceptance
+# check `materialize_main.py` applies -- so these fixtures must satisfy it:
+# `editable = true`, the referenced `libs/<lib>` resolved exactly under
+# `uer.LIBS_DIR` (patched to the fake repo root below), a real directory
+# with both `src/` and `pyproject.toml` present, and no symlinks anywhere.
+
+
+@pytest.fixture
+def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(uer, "REPO", tmp_path)
+    monkeypatch.setattr(uer, "PLUGINS_DIR", tmp_path / "plugins")
+    monkeypatch.setattr(uer, "LIBS_DIR", tmp_path / "libs")
+    monkeypatch.setattr(bpa, "REPO", tmp_path)
+    monkeypatch.setattr(bpa, "PLUGINS_DIR", tmp_path / "plugins")
+    monkeypatch.setattr(bpa, "LIBS_DIR", tmp_path / "libs")
+    return tmp_path
 
 
 def _write_pyproject(path: Path, *, sources: dict[str, str] | None = None) -> None:
@@ -135,24 +177,39 @@ def _write_pyproject(path: Path, *, sources: dict[str, str] | None = None) -> No
     (path / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_resolve_vendored_libs_direct(tmp_path: Path):
-    plugin_dir = tmp_path / "plugins" / "demo"
-    lib_dir = tmp_path / "libs" / "widget"
-    _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
+def _seed_valid_lib(repo: Path, lib: str) -> Path:
+    """A `libs/<lib>` directory that passes `uv_editable_problems` on its own
+    (real directory, `src/` present, `pyproject.toml` present, no symlinks)."""
+    lib_dir = repo / "libs" / lib
+    pkg = lib.replace("-", "_")
+    (lib_dir / "src" / pkg).mkdir(parents=True, exist_ok=True)
+    (lib_dir / "src" / pkg / "__init__.py").write_text("", encoding="utf-8")
     _write_pyproject(lib_dir)
+    return lib_dir
+
+
+def test_resolve_vendored_libs_direct(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_dir = _seed_valid_lib(fake_repo, "widget")
+    _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
 
     libs = bpa.resolve_vendored_libs(plugin_dir)
 
     assert libs == [("widget", lib_dir.resolve())]
 
 
-def test_resolve_vendored_libs_recurses_nested(tmp_path: Path):
-    plugin_dir = tmp_path / "plugins" / "demo"
-    lib_a = tmp_path / "libs" / "a"
-    lib_b = tmp_path / "libs" / "b"
+def test_resolve_vendored_libs_recurses_nested(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_a = _seed_valid_lib(fake_repo, "a")
+    lib_b = _seed_valid_lib(fake_repo, "b")
     _write_pyproject(plugin_dir, sources={"demo-a": "../../libs/a"})
-    _write_pyproject(lib_a, sources={"demo-b": "../b"})
-    _write_pyproject(lib_b)
+    # Overwrite lib_a's pyproject with its own nested reference to lib_b,
+    # keeping the src/ fixture _seed_valid_lib already created.
+    (lib_a / "pyproject.toml").write_text(
+        '[project]\nname = "a"\nversion = "0.1.0"\n\n'
+        '[tool.uv.sources]\ndemo-b = { path = "../b", editable = true }\n',
+        encoding="utf-8",
+    )
 
     libs = dict(bpa.resolve_vendored_libs(plugin_dir))
 
@@ -160,97 +217,127 @@ def test_resolve_vendored_libs_recurses_nested(tmp_path: Path):
     assert libs["b"] == lib_b.resolve()
 
 
-def test_resolve_vendored_libs_no_sources_is_empty(tmp_path: Path):
-    plugin_dir = tmp_path / "plugins" / "demo"
+def test_resolve_vendored_libs_no_sources_is_empty(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
     _write_pyproject(plugin_dir)
 
     assert bpa.resolve_vendored_libs(plugin_dir) == []
 
 
-def test_resolve_vendored_libs_unsafe_name_raises(tmp_path: Path):
-    plugin_dir = tmp_path / "plugins" / "demo"
+def test_resolve_vendored_libs_unsafe_name_raises(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
     # A `path` whose final component is ".." resolves outside the consumer
     # root (so `find_uv_editable_refs` includes it) but its derived `lib`
-    # name (`Path(raw_path).name`) is empty -- `is_safe_lib_name` must
-    # reject that rather than let an empty/unsafe name reach `libs/<lib>`.
+    # name (`Path(raw_path).name`) is literally "..", which
+    # `is_safe_lib_name` (invoked inside `uv_editable_problems`) must
+    # reject rather than let reach `libs/<lib>`.
     _write_pyproject(plugin_dir, sources={"demo-evil": "../../.."})
 
     with pytest.raises(bpa.ArtifactBuildError):
         bpa.resolve_vendored_libs(plugin_dir)
 
 
-# --- git_tree_sha / compute_payload_hash -----------------------------------
+def test_resolve_vendored_libs_non_editable_raises(fake_repo: Path):
+    # Missing `editable = true` would resolve to a frozen, non-live copy on
+    # `dev` -- `uv_editable_problems` rejects it, and so must this script.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _seed_valid_lib(fake_repo, "widget")
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n\n'
+        '[tool.uv.sources]\ndemo-widget = { path = "../../libs/widget" }\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
 
 
-def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+def test_resolve_vendored_libs_missing_canonical_dir_raises(fake_repo: Path):
+    # References a lib that was never seeded under libs/ at all.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
 
 
-@pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git("init", "-q", cwd=repo)
-    _git("config", "user.email", "test@example.com", cwd=repo)
-    _git("config", "user.name", "Test", cwd=repo)
-    (repo / "plugins" / "demo").mkdir(parents=True)
-    (repo / "plugins" / "demo" / "file.txt").write_text("hello\n", encoding="utf-8")
-    _git("add", "-A", cwd=repo)
-    _git("commit", "-q", "-m", "init", cwd=repo)
-    return repo
+# --- directory_content_hash / compute_payload_hash -------------------------
 
 
-def test_git_tree_sha_stable_for_unchanged_content(git_repo: Path):
-    sha1 = bpa.git_tree_sha(git_repo, "plugins/demo")
-    sha2 = bpa.git_tree_sha(git_repo, "plugins/demo")
-    assert sha1 == sha2
-    assert len(sha1) == 40
+def test_directory_content_hash_stable_for_unchanged_content(tmp_path: Path):
+    d = tmp_path / "pkg"
+    d.mkdir()
+    (d / "a.py").write_text("x = 1\n", encoding="utf-8")
+    assert bpa.directory_content_hash(d) == bpa.directory_content_hash(d)
 
 
-def test_git_tree_sha_changes_with_content(git_repo: Path):
-    before = bpa.git_tree_sha(git_repo, "plugins/demo")
-    (git_repo / "plugins" / "demo" / "file.txt").write_text("changed\n", encoding="utf-8")
-    _git("add", "-A", cwd=git_repo)
-    _git("commit", "-q", "-m", "change", cwd=git_repo)
-    after = bpa.git_tree_sha(git_repo, "plugins/demo")
+def test_directory_content_hash_changes_with_content(tmp_path: Path):
+    d = tmp_path / "pkg"
+    d.mkdir()
+    (d / "a.py").write_text("x = 1\n", encoding="utf-8")
+    before = bpa.directory_content_hash(d)
+    (d / "a.py").write_text("x = 2\n", encoding="utf-8")
+    after = bpa.directory_content_hash(d)
     assert before != after
 
 
-def test_git_tree_sha_missing_path_raises(git_repo: Path):
-    with pytest.raises(bpa.ArtifactBuildError):
-        bpa.git_tree_sha(git_repo, "plugins/does-not-exist")
+def test_directory_content_hash_ignores_pycache_and_build_dirs(tmp_path: Path):
+    d = tmp_path / "pkg"
+    d.mkdir()
+    (d / "a.py").write_text("x = 1\n", encoding="utf-8")
+    before = bpa.directory_content_hash(d)
+    (d / "__pycache__").mkdir()
+    (d / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"\x00\x01")
+    (d / "build").mkdir()
+    (d / "build" / "stuff.txt").write_text("noise", encoding="utf-8")
+    after = bpa.directory_content_hash(d)
+    assert before == after
+
+
+def test_directory_content_hash_reflects_uncommitted_working_tree_mutation(
+    tmp_path: Path,
+):
+    # The whole point of hashing the working tree instead of git HEAD:
+    # a promotion-time mutation (e.g. a version bump) that was never
+    # committed must still change the payload hash.
+    d = tmp_path / "pkg"
+    d.mkdir()
+    (d / "pyproject.toml").write_text('version = "0.1.0"\n', encoding="utf-8")
+    before = bpa.directory_content_hash(d)
+    (d / "pyproject.toml").write_text('version = "0.1.0.dev99"\n', encoding="utf-8")
+    after = bpa.directory_content_hash(d)
+    assert before != after
 
 
 def test_compute_payload_hash_deterministic_regardless_of_order(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+    fake_repo: Path,
 ):
-    monkeypatch.setattr(bpa, "REPO", git_repo)
-    (git_repo / "libs" / "widget").mkdir(parents=True)
-    (git_repo / "libs" / "widget" / "f.txt").write_text("x\n", encoding="utf-8")
-    _git("add", "-A", cwd=git_repo)
-    _git("commit", "-q", "-m", "add lib", cwd=git_repo)
+    plugin_dir = fake_repo / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "f.py").write_text("x\n", encoding="utf-8")
+    lib_dir = fake_repo / "libs" / "widget"
+    lib_dir.mkdir(parents=True)
+    (lib_dir / "f.py").write_text("y\n", encoding="utf-8")
 
-    dirs = [git_repo / "plugins" / "demo", git_repo / "libs" / "widget"]
+    dirs = [plugin_dir, lib_dir]
     h1 = bpa.compute_payload_hash(dirs)
     h2 = bpa.compute_payload_hash(list(reversed(dirs)))
     assert h1 == h2
     assert h1.startswith("sha256:")
 
 
-def test_compute_payload_hash_changes_when_either_dir_changes(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(bpa, "REPO", git_repo)
-    (git_repo / "libs" / "widget").mkdir(parents=True)
-    (git_repo / "libs" / "widget" / "f.txt").write_text("x\n", encoding="utf-8")
-    _git("add", "-A", cwd=git_repo)
-    _git("commit", "-q", "-m", "add lib", cwd=git_repo)
-    dirs = [git_repo / "plugins" / "demo", git_repo / "libs" / "widget"]
+def test_compute_payload_hash_changes_when_either_dir_changes(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "f.py").write_text("x\n", encoding="utf-8")
+    lib_dir = fake_repo / "libs" / "widget"
+    lib_dir.mkdir(parents=True)
+    (lib_dir / "f.py").write_text("y\n", encoding="utf-8")
+    dirs = [plugin_dir, lib_dir]
     before = bpa.compute_payload_hash(dirs)
 
-    (git_repo / "libs" / "widget" / "f.txt").write_text("y\n", encoding="utf-8")
-    _git("add", "-A", cwd=git_repo)
-    _git("commit", "-q", "-m", "change lib", cwd=git_repo)
+    (lib_dir / "f.py").write_text("z\n", encoding="utf-8")
     after = bpa.compute_payload_hash(dirs)
 
     assert before != after
@@ -300,20 +387,13 @@ def test_build_wheel_ambiguous_output_raises(tmp_path: Path, monkeypatch: pytest
 
 
 def test_build_plugin_artifacts_end_to_end(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(bpa, "REPO", git_repo)
-    monkeypatch.setattr(bpa, "PLUGINS_DIR", git_repo / "plugins")
-    monkeypatch.setattr(bpa, "LIBS_DIR", git_repo / "libs")
-
-    plugin_dir = git_repo / "plugins" / "demo"
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _seed_valid_lib(fake_repo, "widget")
     _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
-    lib_dir = git_repo / "libs" / "widget"
-    _write_pyproject(lib_dir)
-    _git("add", "-A", cwd=git_repo)
-    _git("commit", "-q", "-m", "add demo + widget", cwd=git_repo)
 
-    out_dir = tmp_path / "dist"
+    out_dir = fake_repo / "dist"
 
     def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
         out.mkdir(parents=True, exist_ok=True)
@@ -332,9 +412,44 @@ def test_build_plugin_artifacts_end_to_end(
     assert manifest["python_tag"] == "py3"
     assert {e["role"] for e in manifest["wheels"]} == {"plugin", "vendored-lib"}
     assert len(manifest["wheels"]) == 2
-    manifest_path = out_dir / f"demo-0.1.0-manifest.json"
+    manifest_path = out_dir / "demo-0.1.0-manifest.json"
     assert manifest_path.is_file()
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+
+
+def test_build_plugin_artifacts_artifact_id_changes_with_wheel_bytes(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression: artifact_id must fold in the wheels' own digests, not just
+    # payload hash/tags/toolchain -- two byte-distinct wheel sets built from
+    # identical source must not collide on the same artifact_id.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_pyproject(plugin_dir)
+    out_dir = fake_repo / "dist"
+
+    def make_builder(payload: bytes):
+        def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+            out.mkdir(parents=True, exist_ok=True)
+            wheel = out / "demo-0.1.0-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as zf:
+                zf.writestr(
+                    "demo-0.1.0.dist-info/WHEEL",
+                    "Wheel-Version: 1.0\nGenerator: setuptools (84.1.0)\n",
+                )
+                zf.writestr("demo/payload.bin", payload)
+            return wheel
+
+        return fake_build_wheel
+
+    monkeypatch.setattr(bpa, "build_wheel", make_builder(b"aaa"))
+    manifest1 = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+    (out_dir / "demo-0.1.0-py3-none-any.whl").unlink()
+    monkeypatch.setattr(bpa, "build_wheel", make_builder(b"bbb"))
+    manifest2 = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+
+    assert manifest1["payload_hash"] == manifest2["payload_hash"]
+    assert manifest1["wheels"][0]["sha256"] != manifest2["wheels"][0]["sha256"]
+    assert manifest1["artifact_id"] != manifest2["artifact_id"]
 
 
 def test_build_plugin_artifacts_unknown_plugin_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

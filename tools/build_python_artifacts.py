@@ -14,19 +14,29 @@ manifest describing them, and does not publish or sign anything.
 **Artifact identity.** Per the effort's resolved Open Design Questions, an
 artifact set's identity folds together:
 
-* a **payload hash** -- the git tree SHA of the plugin's own directory plus
-  every vendored lib directory it needs (so any content change to any of
-  them changes the identity);
+* a **payload hash** -- a content hash of the plugin's own directory plus
+  every vendored lib directory it needs, walked directly on disk (not
+  `git HEAD`: promotion builds from a scratch tree already mutated by
+  version bumps and materialization, so the bytes actually fed to the
+  build can differ from `HEAD` even though both describe "this commit" --
+  hashing the working tree is the only way the identity matches what was
+  actually built);
 * the **platform/python tags** read directly off the built wheels'
   filenames (the canonical, self-describing source for this -- never
-  guessed from the running interpreter); and
+  guessed from the running interpreter), with a conflicting pair of
+  non-universal tags across the wheel set treated as a hard failure rather
+  than resolved by whichever wheel happened to be built first;
 * the **build-tool closure** actually used -- read from each wheel's own
   `dist-info/WHEEL` ``Generator:`` line after the build, not assumed in
-  advance. A promotion run that locks one shared toolchain version for
-  every wheel it builds (the effort's own resolved direction) will
-  naturally produce one shared value here; this script does not perform
-  that locking itself -- it faithfully reports whatever toolchain a given
-  invocation's `uv build` actually used.
+  advance. A missing `Generator:` line fails the build closed rather than
+  silently recording an unknown toolchain. A promotion run that locks one
+  shared toolchain version for every wheel it builds (the effort's own
+  resolved direction) will naturally produce one shared value here; this
+  script does not perform that locking itself -- it faithfully reports
+  whatever toolchain a given invocation's `uv build` actually used; and
+* every **wheel's own filename and digest** -- two artifact sets with the
+  same source/tags/toolchain but byte-different wheels must never collide
+  on the same `artifact_id`.
 
 Usage::
 
@@ -52,11 +62,8 @@ LIBS_DIR = REPO / "libs"
 MANIFEST_SCHEMA = "copilot-extensions.python-artifact-manifest"
 MANIFEST_SCHEMA_VERSION = 1
 
-_WHEEL_NAME_RE = re.compile(
-    r"^(?P<name>.+)-(?P<version>[^-]+)-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)"
-    r"-(?P<platform_tag>[^-]+)\.whl$"
-)
 _GENERATOR_RE = re.compile(r"^Generator:\s*(.+?)\s*$", re.MULTILINE)
+_BUILD_TAG_RE = re.compile(r"^[0-9][^-]*$")
 
 # Tags considered "universal" (compatible everywhere) -- any other tag is
 # strictly more specific and wins when picking the artifact set's own
@@ -76,7 +83,13 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
     resolved to its canonical `libs/<lib>` directory, then the same lookup
     repeated on that lib's own `pyproject.toml` -- mirrors
     `materialize_main.py`'s own recursion so promotion's artifact set and
-    its materialized-tree enumeration never disagree. Returns
+    its materialized-tree enumeration never disagree. Each discovered
+    consumer directory is validated with `uv_editable_ref.uv_editable_problems`
+    -- the same acceptance check `materialize_main.py` applies before
+    trusting a reference (rejects a missing `editable = true`, a path
+    resolving outside canonical `libs/<lib>`, a missing/incomplete
+    directory, or a symlinked tree) -- so this script can never build or
+    describe a source a real materialization would have refused. Returns
     ``(lib_name, canonical_dir)`` pairs, each lib listed once (by name) even
     if more than one consumer along the walk references it."""
     out: dict[str, Path] = {}
@@ -88,66 +101,123 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
         if current_r in seen_dirs:
             continue
         seen_dirs.add(current_r)
+        consumer_label = current_r.name
+        problems = uer.uv_editable_problems(consumer_label, current)
+        if problems:
+            raise ArtifactBuildError(
+                f"{current}: rejected by uv_editable_problems: {'; '.join(problems)}"
+            )
         try:
             refs = uer.find_uv_editable_refs(current)
         except uer.ManifestUnreadable as exc:
             raise ArtifactBuildError(str(exc)) from exc
         for _name, raw_path, lib, _editable in refs:
             canonical = (current / raw_path).resolve()
-            if not uer.is_safe_lib_name(lib):
-                raise ArtifactBuildError(
-                    f"{current}: unsafe vendored-lib name {lib!r} in [tool.uv.sources]"
-                )
             if lib not in out:
                 out[lib] = canonical
                 pending.append(canonical)
     return sorted(out.items())
 
 
-def git_tree_sha(repo: Path, rel_path: str, *, rev: str = "HEAD") -> str:
-    """The git tree object SHA for ``rel_path`` at ``rev`` -- content-addressed
-    by git itself, so it changes exactly when the directory's tracked
-    content changes and is stable across checkouts/platforms."""
-    result = subprocess.run(
-        ["git", "rev-parse", f"{rev}:{rel_path}"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise ArtifactBuildError(
-            f"git rev-parse {rev}:{rel_path} failed: {result.stderr.strip()}"
-        )
-    return result.stdout.strip()
+_PAYLOAD_IGNORE_DIR_NAMES = {
+    ".git", "__pycache__", ".pytest_cache", "build", "dist",
+    ".mypy_cache", ".ruff_cache",
+}
+_PAYLOAD_IGNORE_SUFFIXES = (".pyc", ".pyo")
 
 
-def compute_payload_hash(dirs: list[Path], *, rev: str = "HEAD") -> str:
+def directory_content_hash(d: Path) -> str:
+    """A hex digest over every regular file's relative path and content
+    under ``d`` (skipping VCS/cache/build-artifact noise), sorted so
+    traversal order never affects the result. This hashes the actual
+    working tree `build_wheel` is about to read -- never `git HEAD` --
+    because promotion builds from a scratch tree already mutated by
+    version bumps and materialization: the bytes a build actually consumes
+    can differ from `HEAD` even when both nominally describe the same
+    commit, and the payload hash must track what was really built."""
+    entries = []
+    for p in sorted(d.rglob("*")):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(d).parts
+        if any(part in _PAYLOAD_IGNORE_DIR_NAMES for part in rel_parts[:-1]):
+            continue
+        if p.suffix in _PAYLOAD_IGNORE_SUFFIXES:
+            continue
+        rel = p.relative_to(d).as_posix()
+        entries.append(f"{rel}:{hashlib.sha256(p.read_bytes()).hexdigest()}")
+    return hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
+
+
+def compute_payload_hash(dirs: list[Path]) -> str:
     """A single hash over every directory in ``dirs`` (plugin + vendored
-    libs), each identified by its repo-relative path and git tree SHA.
-    Sorted so key order never affects the hash, and the relative path is
-    included so swapping which lib lives at which path is itself a change
-    (not just the content)."""
-    parts = []
-    for d in dirs:
-        rel = d.resolve().relative_to(REPO).as_posix()
-        parts.append(f"{rel}={git_tree_sha(REPO, rel, rev=rev)}")
+    libs), each identified by its repo-relative path and its own working-
+    tree content hash (`directory_content_hash`). Sorted so key order never
+    affects the hash, and the relative path is included so swapping which
+    lib lives at which path is itself a change (not just the content)."""
+    parts = [
+        f"{d.resolve().relative_to(REPO).as_posix()}={directory_content_hash(d)}"
+        for d in dirs
+    ]
     digest = hashlib.sha256("\n".join(sorted(parts)).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
 
 def parse_wheel_filename(path: Path) -> dict[str, str]:
-    m = _WHEEL_NAME_RE.match(path.name)
-    if not m:
+    """Parses a wheel filename's identity components by tokenizing from the
+    RIGHT (PEP 427's own grammar: `{name}-{version}(-{build tag})?-{python
+    tag}-{abi tag}-{platform tag}.whl`), rather than a single greedy regex:
+    a regex's leftmost-longest backtracking prefers absorbing the optional
+    numeric build tag into an over-long `name`/`version` match whenever
+    that also happens to satisfy the pattern, silently mis-parsing a wheel
+    that legitimately carries one (e.g. `demo_pkg-1.2.3-1-py3-none-any.whl`
+    would report `version="1"` instead of `"1.2.3"`). The three
+    compatibility tags never contain hyphens, so they are unambiguously the
+    last three '-'-delimited tokens; an optional build tag (if present) is
+    exactly the token before them, and must start with a digit."""
+    if not path.name.endswith(".whl"):
         raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
-    return m.groupdict()
+    tokens = path.name[: -len(".whl")].split("-")
+    if len(tokens) < 5:
+        raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
+    platform_tag, abi_tag, python_tag = tokens[-1], tokens[-2], tokens[-3]
+    rest = tokens[:-3]
+    if len(rest) >= 3 and _BUILD_TAG_RE.match(rest[-1]):
+        rest = rest[:-1]
+    if len(rest) < 2:
+        raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
+    name = "-".join(rest[:-1])
+    version = rest[-1]
+    if not name or not version:
+        raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
+    return {
+        "name": name,
+        "version": version,
+        "python_tag": python_tag,
+        "abi_tag": abi_tag,
+        "platform_tag": platform_tag,
+    }
 
 
-def _more_specific(a: str, b: str) -> str:
-    """Prefer whichever of two same-slot tags is NOT a universal wildcard;
-    if both (or neither) are universal, prefer the one already chosen."""
+def _more_specific(a: str, b: str, *, slot: str) -> str:
+    """Prefer whichever of two same-slot tags is NOT a universal wildcard.
+    Two DIFFERENT non-universal tags in the same slot (e.g. `cp311` and
+    `cp312`) mean the wheel set genuinely has no single valid identity for
+    that slot -- silently keeping whichever was encountered first would
+    advertise the narrower set as compatible with an environment that
+    cannot actually use part of it. Fail closed instead of guessing."""
+    if a == b:
+        return a
     if a in _UNIVERSAL_TAGS and b not in _UNIVERSAL_TAGS:
         return b
-    return a
+    if b in _UNIVERSAL_TAGS and a not in _UNIVERSAL_TAGS:
+        return a
+    if a in _UNIVERSAL_TAGS and b in _UNIVERSAL_TAGS:
+        return a
+    raise ArtifactBuildError(
+        f"conflicting {slot} tags in one artifact set: {a!r} vs {b!r} -- "
+        "no single wheel-compatibility identity covers both"
+    )
 
 
 def overall_identity_tags(wheel_infos: list[dict[str, str]]) -> dict[str, str]:
@@ -155,17 +225,18 @@ def overall_identity_tags(wheel_infos: list[dict[str, str]]) -> dict[str, str]:
     specific tag present in any single wheel wins per slot, since a
     platform-specific wheel anywhere in the set makes the whole set only
     valid for that platform even if other wheels in the set are universal
-    pure-Python wheels."""
+    pure-Python wheels. Raises `ArtifactBuildError` if two wheels disagree
+    on a genuinely conflicting, non-universal tag for the same slot."""
     python_tag = abi_tag = platform_tag = None
     for info in wheel_infos:
         python_tag = info["python_tag"] if python_tag is None else _more_specific(
-            python_tag, info["python_tag"]
+            python_tag, info["python_tag"], slot="python_tag"
         )
         abi_tag = info["abi_tag"] if abi_tag is None else _more_specific(
-            abi_tag, info["abi_tag"]
+            abi_tag, info["abi_tag"], slot="abi_tag"
         )
         platform_tag = info["platform_tag"] if platform_tag is None else _more_specific(
-            platform_tag, info["platform_tag"]
+            platform_tag, info["platform_tag"], slot="platform_tag"
         )
     return {
         "python_tag": python_tag or "py3",
@@ -174,11 +245,15 @@ def overall_identity_tags(wheel_infos: list[dict[str, str]]) -> dict[str, str]:
     }
 
 
-def read_wheel_generator(wheel_path: Path) -> str | None:
+def read_wheel_generator(wheel_path: Path) -> str:
     """The ``Generator:`` line from the wheel's own `dist-info/WHEEL` file
     -- the build backend + version that actually produced it (e.g.
     ``"setuptools (84.1.0)"``), read from the artifact itself rather than
-    assumed from `pyproject.toml`'s open-floor `requires`."""
+    assumed from `pyproject.toml`'s open-floor `requires`. A manifest that
+    cannot name the toolchain that built a wheel is exactly the
+    unreproducible state this effort's build-hermeticity resolution exists
+    to close, so a wheel with no (or unreadable) `Generator:` line fails
+    the build rather than recording an unknown toolchain."""
     with zipfile.ZipFile(wheel_path) as zf:
         wheel_meta_names = [
             n for n in zf.namelist() if n.endswith(".dist-info/WHEEL")
@@ -187,7 +262,12 @@ def read_wheel_generator(wheel_path: Path) -> str | None:
             raise ArtifactBuildError(f"{wheel_path}: no dist-info/WHEEL entry found")
         text = zf.read(wheel_meta_names[0]).decode("utf-8", errors="replace")
     m = _GENERATOR_RE.search(text)
-    return m.group(1) if m else None
+    if not m:
+        raise ArtifactBuildError(
+            f"{wheel_path}: dist-info/WHEEL has no Generator: line -- refusing "
+            "to record an artifact with an unknown build toolchain"
+        )
+    return m.group(1)
 
 
 def sha256_file(path: Path) -> str:
@@ -248,8 +328,7 @@ def build_plugin_artifacts(
     plugin_wheel = build_wheel(plugin_dir, out_dir, python=python)
     plugin_info = parse_wheel_filename(plugin_wheel)
     plugin_generator = read_wheel_generator(plugin_wheel)
-    if plugin_generator:
-        generators.add(plugin_generator)
+    generators.add(plugin_generator)
     wheel_infos.append(plugin_info)
     entries.append(
         {
@@ -266,8 +345,7 @@ def build_plugin_artifacts(
         lib_wheel = build_wheel(lib_dir, out_dir, python=python)
         lib_info = parse_wheel_filename(lib_wheel)
         lib_generator = read_wheel_generator(lib_wheel)
-        if lib_generator:
-            generators.add(lib_generator)
+        generators.add(lib_generator)
         wheel_infos.append(lib_info)
         rel_source = lib_dir.resolve().relative_to(REPO).as_posix()
         entries.append(
@@ -284,6 +362,9 @@ def build_plugin_artifacts(
     identity_tags = overall_identity_tags(wheel_infos)
     payload_hash = compute_payload_hash(all_dirs)
     toolchain = sorted(generators)
+    wheel_digest_input = "\n".join(
+        sorted(f"{e['filename']}={e['sha256']}" for e in entries)
+    )
     artifact_id_input = "|".join(
         [
             payload_hash,
@@ -291,6 +372,7 @@ def build_plugin_artifacts(
             identity_tags["abi_tag"],
             identity_tags["platform_tag"],
             ",".join(toolchain),
+            wheel_digest_input,
         ]
     )
     artifact_id = "sha256:" + hashlib.sha256(

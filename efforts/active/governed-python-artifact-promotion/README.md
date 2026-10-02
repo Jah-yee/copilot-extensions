@@ -98,21 +98,29 @@ distribution unit.
 
 ### Phase 2 — Promotion-built, content-addressed first-party artifacts
 
-- [x] **Done (2026-10-02).** Build first-party wheels and manifests during
-      promotion, keyed by plugin payload hash, platform, architecture, and
-      Python ABI, covering the plugin's own wheel and every vendored
-      `libs/<lib>` wheel it requires after materialization.
+- [x] **Tool built (2026-10-02); pipeline wiring still open.**
       `tools/build_python_artifacts.py` builds a plugin's own wheel plus
-      every vendored lib wheel it needs (reusing `uv_editable_ref`'s
-      existing enumeration, recursively), and writes a manifest recording
-      the payload hash (git tree SHAs), the wheel filenames' own
-      python/abi/platform tags, each wheel's sha256, and the build-tool
-      `Generator:` actually used (read from each built wheel's own
-      `dist-info/WHEEL`, not assumed) — folded together into one
-      `artifact_id`. Not yet wired into the real promotion pipeline
-      (`promote_release.py`) or integrated with a per-run shared
-      build-toolchain lock (still built per-wheel via the normal isolated
-      PEP 517 build) — both are follow-up slices.
+      every vendored `libs/<lib>` wheel it needs (reusing
+      `uv_editable_ref`'s existing enumeration, recursively, and its
+      `uv_editable_problems` acceptance check), and writes a manifest
+      recording the payload hash (a working-tree content hash — not `git
+      HEAD`, since promotion's scratch tree is mutated by version bumps and
+      materialization before the build runs), the wheel filenames' own
+      python/abi/platform tags (with a hard failure on a genuinely
+      conflicting tag across the set, never a silent first-match guess),
+      each wheel's sha256, and the build-tool `Generator:` actually used
+      (read from each built wheel's own `dist-info/WHEEL`, required —
+      a wheel with no readable `Generator:` fails the build rather than
+      recording an unknown toolchain) — all folded together into one
+      `artifact_id`, including every wheel's own digest. **Not yet done:**
+      wiring this into the real promotion pipeline (`promote_release.py`)
+      — `build_python_artifacts.py` is a standalone, independently usable
+      tool today, not yet invoked anywhere in `validate-and-promote.yml`'s
+      actual promotion flow — and a per-run shared build-toolchain lock
+      (this tool still builds each wheel via the normal isolated PEP 517
+      build rather than one pre-resolved, pinned environment reused across
+      every wheel in a run). This checklist item stays open until
+      promotion actually invokes the builder.
 - [ ] Resolve and pin a dependency closure for the third-party portion only,
       using a lag-tolerant selection policy informed by Phase 1, and record
       it in the manifest.
@@ -342,23 +350,42 @@ win grows with build complexity.
   --wheel`), enumerating the vendored set by reusing
   `uv_editable_ref.find_uv_editable_refs` recursively (the same primitive
   `materialize_main.py` already uses, so artifact coverage and the
-  materialized tree can never disagree about which libs are in scope).
-- Manifest fields: `payload_hash` (git tree SHA of the plugin dir + every
-  vendored lib dir, order-independent), each wheel's `python_tag`/
-  `abi_tag`/`platform_tag` (parsed from the wheel filename itself -- the
-  canonical, self-describing source, never guessed from the running
-  interpreter), each wheel's sha256, and the build `Generator:` actually
-  read from each wheel's own `dist-info/WHEEL` (the build-hermeticity
-  resolution's own mechanism, applied for real rather than only described).
-  All of it folds into one `artifact_id`.
-- 23 unit tests (`tools/test_build_python_artifacts.py`), all green;
+  materialized tree can never disagree about which libs are in scope), and
+  validating each discovered reference with `uv_editable_problems` -- the
+  same acceptance check materialization itself applies -- so this tool can
+  never build or describe a source materialization would have refused.
+- Manifest fields: `payload_hash` (a working-tree content hash of the
+  plugin dir + every vendored lib dir, order-independent -- deliberately
+  NOT `git HEAD`, since promotion builds from a scratch tree already
+  mutated by version bumps/materialization before the build runs), each
+  wheel's `python_tag`/`abi_tag`/`platform_tag` (parsed from the wheel
+  filename itself -- the canonical, self-describing source, never guessed
+  from the running interpreter, with a hard failure on a genuinely
+  conflicting tag across the wheel set), each wheel's sha256, and the
+  build `Generator:` actually read from each wheel's own `dist-info/WHEEL`
+  (required -- an unreadable/missing one fails the build). All of it,
+  including every wheel's own digest, folds into one `artifact_id`.
+- Automated PR review (`ThomasMichon/copilot-extensions#4961`) found 8 real
+  issues in the first draft, all fixed before merge: vendored-reference
+  discovery accepted what materialization would reject (fixed by reusing
+  `uv_editable_problems`); the payload hash used `git HEAD` instead of the
+  actual working tree the build reads (fixed with a direct content hash);
+  the wheel-filename parser mis-parsed an optional PEP 427 build tag
+  (rewritten as right-to-left tokenizing instead of a single backtracking
+  regex); conflicting platform/ABI tags across a wheel set were silently
+  resolved by whichever wheel came first (now a hard failure); a missing
+  `Generator:` was silently recorded as unknown (now a hard failure); the
+  `artifact_id` omitted the wheels' own digests (now included); and two
+  documentation-process findings (keep the Phase 2 plan item open until
+  pipeline-wired; add the required Documentation impact statement).
+- 29 unit tests (`tools/test_build_python_artifacts.py`), all green;
   confirmed zero regressions against the rest of `tools/`'s suite (the only
   failures in a full `pytest tools/` run are 45 pre-existing,
   environment-specific `clean-room`/WSL-bash failures unrelated to this
-  change). Smoke-tested for real against `agent-bridge`: built all 10
-  wheels (the plugin + its 9 vendored libs), every one reporting
-  `setuptools (84.0.0)` as its actual generator, manifest written
-  correctly.
+  change). Smoke-tested for real against `agent-bridge` both before and
+  after the review fixes: built all 10 wheels (the plugin + its 9 vendored
+  libs), every one reporting `setuptools (84.0.0)` as its actual generator,
+  manifest written correctly.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

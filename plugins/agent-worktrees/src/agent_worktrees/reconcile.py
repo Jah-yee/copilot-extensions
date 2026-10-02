@@ -1149,6 +1149,7 @@ HOOK_SHIM_FILES = (
     "statelessness_guard.py", "cross_repo_guard.py", "anchor_write_guard.py",
     "pr_supersede_guard.py",
     "registry_root.py",
+    "anchor_shell_parser.py",
 )
 
 

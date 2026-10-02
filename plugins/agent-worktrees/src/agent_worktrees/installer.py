@@ -376,6 +376,7 @@ def deploy_wrappers(repo_dir: str | Path) -> bool:
                  "bootstrap-check.ps1", "bootstrap-check.sh",
                  "statelessness_guard.py", "cross_repo_guard.py",
                  "anchor_write_guard.py", "pr_supersede_guard.py", "registry_root.py",
+                 "anchor_shell_parser.py",
                  "nudge_status.py", "bind_nudge.py", "hook_client.py"):
         src = scripts / name
         if src.exists():

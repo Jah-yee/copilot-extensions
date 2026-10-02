@@ -367,6 +367,7 @@ def test_shell_git_alias_with_quoted_separator_from_anchor_denies(
     [
         'echo "$(echo ok; git commit --allow-empty -m example)"',
         'echo "$(echo "$(git commit --allow-empty -m example)")"',
+        'echo "$(printf ")"; git commit --allow-empty -m example)"',
         "echo `git commit --allow-empty -m example`",
     ],
 )
@@ -428,6 +429,21 @@ def test_powershell_git_command_substitution_from_anchor_denies(
         "cwd": str(gp),
         "toolArgs": {
             "command": 'Write-Output "$(git commit --allow-empty -m example)"'
+        },
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_cmd_apostrophe_does_not_quote_separator(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "cmd",
+        "cwd": str(gp),
+        "toolArgs": {
+            "command": (
+                "echo 'ignored & git commit --allow-empty -m example'"
+            )
         },
     }
     d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)

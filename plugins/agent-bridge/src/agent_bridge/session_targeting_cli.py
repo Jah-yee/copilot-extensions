@@ -95,7 +95,11 @@ def _cmd_send(args: argparse.Namespace) -> None:
     live = client.resolve_live_session(target)
     if live:
         expected_session_id = getattr(args, "expected_session_id", None)
-        if expected_session_id and live["session_id"] != expected_session_id:
+        # Alias-aware: a renamed (resumed) session still is the expected one;
+        # the server re-checks this atomically when enqueuing.
+        expected = (client.resolve_live_session(expected_session_id) or {}).get(
+            "session_id") if expected_session_id else None
+        if expected_session_id and live["session_id"] not in (expected_session_id, expected):
             print(
                 f"[FAIL] Target {target!r} now resolves to session "
                 f"{live['session_id']!r}, not expected session "

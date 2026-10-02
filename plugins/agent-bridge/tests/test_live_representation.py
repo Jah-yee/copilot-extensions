@@ -839,6 +839,48 @@ def test_a_duplicate_before_the_predecessors_tail_keeps_exact_refs_and_safe_curs
     assert translate_reconnect_cursor(store, merged, succ_continuity, 1) == 2
 
 
+def test_detail_refs_map_exactly_or_are_left_for_validation() -> None:
+    """Predecessor A(1), B(2); successor dup A(1), new C(2) -> merged A(1), B(2), C(3).
+    An out-of-range event ref, or a span whose members are no longer one
+    contiguous run, is not rewritten to unrelated content."""
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.result_tokens import _event_ref, _position_token, _span_ref, retarget
+
+    store = LiveEventStore()
+    a = {"type": "assistant.message", "id": "sdk-a", "data": {"content": "A"}}
+    b = {"type": "assistant.message", "id": "sdk-b", "data": {"content": "B"}}
+    c = {"type": "assistant.message", "id": "sdk-c", "data": {"content": "C"}}
+    store.ingest("placeholder", [a, b])
+    store.ingest("resumed", [a, c])
+    cont = store.get("resumed").continuity_id
+    store.alias("placeholder", "resumed")
+    history = store.merged_history()
+
+    beyond = _event_ref("represented", "resumed", cont, 9)
+    assert retarget(beyond, history) == beyond
+    mixed = _span_ref("represented", "resumed", cont, 1, 2)  # A then C: B sits between
+    assert retarget(mixed, history) == mixed
+    only_c = _span_ref("represented", "resumed", cont, 2, 2)
+    assert retarget(only_c, history) != only_c
+    zero = _position_token("represented", "resumed", cont, 0)  # cursor-only zero mapping
+    assert retarget(zero, history) != zero
+
+
+def test_a_span_with_unique_events_before_a_duplicate_never_reverses() -> None:
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.result_tokens import _span_ref, retarget
+
+    store = LiveEventStore()
+    a = {"type": "assistant.message", "id": "sdk-a", "data": {"content": "A"}}
+    n = {"type": "assistant.message", "id": "sdk-n", "data": {"content": "N"}}
+    store.ingest("placeholder", [a])
+    store.ingest("resumed", [n, a])  # unique N first, then duplicate A
+    cont = store.get("resumed").continuity_id
+    store.alias("placeholder", "resumed")
+    span = _span_ref("represented", "resumed", cont, 1, 2)  # would map to [2, 1]
+    assert retarget(span, store.merged_history()) == span
+
+
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
     import pytest
 

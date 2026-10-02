@@ -124,3 +124,34 @@ def test_send_with_a_protocol_floor_sends_nothing_to_an_older_daemon(monkeypatch
         m._cmd_send(args)
     assert exc.value.code == 3
     assert "predates protocol 20" in capsys.readouterr().err
+
+
+def _expected_session_send(monkeypatch, resolved: dict, expected: str):
+    from agent_bridge import session_targeting_cli as stc
+
+    client = BridgeClient("http://127.0.0.1:57585", "tok")
+    monkeypatch.setattr(client, "resolve_live_session", lambda handle: resolved.get(handle))
+    delivered = []
+    monkeypatch.setattr(stc, "_deliver_to_live_session",
+                        lambda _c, _a, sid, _p: delivered.append(sid))
+    monkeypatch.setattr(m, "_get_client", lambda: client)
+    args = argparse.Namespace(target="agent-x", prompt="hello", prompt_file=None, new=False,
+                              expected_session_id=expected)
+    m._cmd_send(args)
+    return delivered
+
+
+def test_send_accepts_a_renamed_expected_session(monkeypatch):
+    resumed = {"session_id": "resumed"}
+    resolved = {"agent-x": resumed, "placeholder": resumed}  # alias placeholder -> resumed
+    assert _expected_session_send(monkeypatch, resolved, "placeholder") == ["resumed"]
+
+
+def test_send_still_rejects_an_unrelated_replacement(monkeypatch, capsys):
+    import pytest
+
+    resolved = {"agent-x": {"session_id": "stranger"}, "placeholder": None}
+    with pytest.raises(SystemExit) as exc:
+        _expected_session_send(monkeypatch, resolved, "placeholder")
+    assert exc.value.code == 1
+    assert "not expected session" in capsys.readouterr().err

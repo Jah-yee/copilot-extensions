@@ -319,6 +319,18 @@ def test_shell_git_commit_with_attached_quoted_dashC_denies(tmp_path, anchor):
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize("empty_path", ['""', "''"])
+def test_shell_git_empty_dashC_from_anchor_denies(
+    tmp_path, anchor, empty_path,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(
+        _shell(f"git -C {empty_path} commit -m example", gp),
+        env={}, home=tmp_path, anchors=anchor,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell backslash separator")
 def test_powershell_git_dashC_trailing_separator_denies(tmp_path, anchor):
     gp = anchor[0]["path"]

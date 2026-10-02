@@ -200,6 +200,7 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
     powershell_escapes = tool.lower() in {"powershell", "pwsh"}
     tokens: list[str] = []
     current: list[str] = []
+    token_started = False
     quote = None
     index = 0
     while index < len(seg):
@@ -227,11 +228,13 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
             else:
                 current.append(char)
         elif char in {"'", '"'}:
+            token_started = True
             quote = char
         elif char.isspace():
-            if current:
+            if token_started:
                 tokens.append("".join(current))
                 current = []
+                token_started = False
         elif (
             posix_escapes
             and char == "\\"
@@ -239,14 +242,17 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
             and (seg[index + 1].isspace() or seg[index + 1] in {"'", '"', "\\"})
         ):
             current.append(seg[index + 1])
+            token_started = True
             index += 1
         elif powershell_escapes and char == "`" and index + 1 < len(seg):
             current.append(seg[index + 1])
+            token_started = True
             index += 1
         else:
             current.append(char)
+            token_started = True
         index += 1
-    if current:
+    if token_started:
         tokens.append("".join(current))
     return tokens
 

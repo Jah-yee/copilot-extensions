@@ -248,6 +248,16 @@ def test_shell_git_commit_with_dashC_forms_still_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+def test_shell_git_commit_with_attached_quoted_dashC_denies(tmp_path, anchor):
+    spaced = _main_checkout(tmp_path, "anchor with spaces")
+    anchors = [*anchor, {"name": "spaced", "path": str(spaced)}]
+    d = guard.decide(
+        _shell(f'git -C"{spaced}" commit -m example', tmp_path),
+        env={}, home=tmp_path, anchors=anchors,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
 @pytest.mark.parametrize(
     "option",
     [
@@ -274,6 +284,19 @@ def test_shell_git_dir_elsewhere_overrides_anchor_cwd(tmp_path, anchor):
         _shell(f'git --git-dir "{other / ".git"}" commit -m example', gp),
         env={}, home=tmp_path, anchors=anchor,
     ) is None
+
+
+def test_shell_work_tree_elsewhere_keeps_anchor_repository_target(
+    tmp_path, anchor,
+):
+    other = tmp_path / "other-work-tree"
+    other.mkdir()
+    gp = anchor[0]["path"]
+    d = guard.decide(
+        _shell(f'git --work-tree "{other}" commit -m example', gp),
+        env={}, home=tmp_path, anchors=anchor,
+    )
+    assert d and d["permissionDecision"] == "deny"
 
 
 @pytest.mark.parametrize(

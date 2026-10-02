@@ -144,7 +144,7 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({
     "clean", "rm", "mv", "stash", "merge", "rebase", "pull", "cherry-pick",
     "revert", "init",
 })
-_GIT_TOKEN = re.compile(r""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+""")
+_GIT_TOKEN = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
 _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
     "--namespace", "--super-prefix",
 })
@@ -206,8 +206,9 @@ def _git_invocation(
 
     Git accepts global options before the subcommand. Parse only that prefix;
     arguments after the subcommand cannot change which operation is running.
-    The final boolean records an explicit target even when its value cannot be
-    resolved, preserving the guard's existing fail-open behavior for variables.
+    The final boolean records an explicit repository/cwd override even when its
+    value cannot be resolved, preserving the guard's existing fail-open behavior
+    for variables.
     """
     tokens = [_unquote_shell_token(token) for token in _GIT_TOKEN.findall(seg)]
     if not tokens:
@@ -218,7 +219,7 @@ def _git_invocation(
 
     git_cwd = cwd
     targets: list[tuple[str, str]] = []
-    has_explicit_target = False
+    has_repo_override = False
     index = 1
     while index < len(tokens):
         token = tokens[index]
@@ -227,9 +228,9 @@ def _git_invocation(
             index += 1
             break
         if lower in _GIT_TERMINAL_OPTIONS:
-            return None, targets, has_explicit_target
+            return None, targets, has_repo_override
         if token == "-C":
-            has_explicit_target = True
+            has_repo_override = True
             if index + 1 < len(tokens):
                 value = tokens[index + 1]
                 if "$" not in value and "%" not in value:
@@ -238,7 +239,7 @@ def _git_invocation(
             index += 2
             continue
         if token.startswith("-C") and token != "-C":
-            has_explicit_target = True
+            has_repo_override = True
             value = _unquote_shell_token(token[2:])
             if value and "$" not in value and "%" not in value:
                 git_cwd = _resolve(value, git_cwd)
@@ -252,7 +253,7 @@ def _git_invocation(
             index += 1
             continue
         if lower in {"--git-dir", "--work-tree"}:
-            has_explicit_target = True
+            has_repo_override = has_repo_override or lower == "--git-dir"
             if index + 1 < len(tokens):
                 value = tokens[index + 1]
                 if "$" not in value and "%" not in value:
@@ -262,7 +263,7 @@ def _git_invocation(
         matched_target = False
         for option in ("--git-dir", "--work-tree"):
             if lower.startswith(option + "="):
-                has_explicit_target = True
+                has_repo_override = has_repo_override or option == "--git-dir"
                 value = _unquote_shell_token(token.split("=", 1)[1])
                 if value and "$" not in value and "%" not in value:
                     targets.append((option[2:], _resolve(value, git_cwd)))
@@ -283,10 +284,10 @@ def _git_invocation(
         if token.startswith("-"):
             index += 1
             continue
-        return lower, targets, has_explicit_target
+        return lower, targets, has_repo_override
     if index < len(tokens):
-        return tokens[index].lower(), targets, has_explicit_target
-    return None, targets, has_explicit_target
+        return tokens[index].lower(), targets, has_repo_override
+    return None, targets, has_repo_override
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An
@@ -610,7 +611,7 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         eff = _effective_seg(seg)
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))
         is_git = bool(_GIT_START.match(eff))
-        subcmd, git_targets, has_explicit_target = (
+        subcmd, git_targets, has_repo_override = (
             _git_invocation(eff, eff_cwd) if is_git else (None, [], False)
         )
         git_write = subcmd in _GIT_WRITE_SUBCOMMANDS
@@ -646,7 +647,7 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         # 3b. Without an explicit target, a repo-scoped git write targets the
         #     EFFECTIVE cwd's repo -- catches ``cd <anchor>; git commit`` as
         #     well as a session already inside the anchor.
-        if git_write and not has_explicit_target:
+        if git_write and not has_repo_override:
             a = _cwd_anchor_dict(eff_cwd, canon_anchor)
             if a is not None:
                 return {**a, "reason": _deny_reason(a["name"], a["path"])}

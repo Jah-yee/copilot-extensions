@@ -296,6 +296,106 @@ _Pending review of this plan._
 
 ## Journal
 
+### 2026-10-02 — Incident: `select.py` shadowed the stdlib, blocking every real promotion for ~3h
+Operator asked me to check whether this effort's own coverage-artifact work
+might have blocked the real `dev`→`main` promotion pipeline. It had.
+
+**What happened:** PR #4902's own "Coverage baseline - agent-ssh" step in
+`validate-and-promote.yml`'s `full` matrix job invokes
+`python tools/coverage_guided_selection/baseline.py ...` as a plain script.
+Running a script that way prepends *its own directory*
+(`tools/coverage_guided_selection/`) to `sys.path` -- and that directory
+contained a module literally named `select.py` (the diff-scoped-selection
+module from the Phase 0 pilot). That shadowed the **stdlib** `select`
+module for every later import in the same process, including
+`subprocess`'s own transitive `import selectors -> import select` --
+`baseline.py`'s own first line, `import subprocess`, crashed outright with
+`AttributeError: module 'select' has no attribute 'select'`, before any of
+this package's own logic ever ran.
+
+Because PR #4902 also added a **hard** "Verify enrolled coverage baselines
+were actually collected" gate in the `promote` job (by design, so a missing
+baseline is never silently swallowed), every single promotion attempt from
+2026-10-02 ~09:27 UTC onward failed at that gate -- correctly refusing to
+promote without `agent-ssh`'s evidence, but for the wrong underlying reason
+(a crash, not a transient collection hiccup). Confirmed via
+`gh run list --workflow validate-and-promote.yml`: 14 consecutive failed
+runs before a fix landed, the last success at 08:06:54 UTC.
+
+**Fix:** landed as #4916 (authored directly by the repo owner, in parallel
+with an equivalent fix prepared here) -- renamed `select.py` ->
+`selection.py` (no stdlib collision) and updated the one import site.
+Verified directly afterward: ran the exact failing CLI invocation and
+confirmed it now produces a real baseline (214 tests, 10 covered files)
+instead of crashing.
+
+**Follow-up (#4918):** #4916's own fix didn't add a test that would catch a
+*future* stdlib-name collision under a different module name -- the rest of
+the suite imports the package normally, which never prepends this directory
+to `sys.path` the way the real script-style invocation does. Added
+`TestNoStdlibModuleNameCollisions`: a fast static check (no `.py` file here
+may collide with `sys.stdlib_module_names`) plus a direct subprocess smoke
+test running `baseline.py --help` as a plain script. Verified the static
+check actually catches the original bug by temporarily reintroducing a
+colliding module name and confirming it fails with the exact collision
+named.
+
+**Lesson for this effort going forward:** a script invoked directly (not via
+`python -m`) always has its own directory prepended to `sys.path` -- any
+future module added to this package needs a quick stdlib-name collision
+check before landing, not just a local test pass (the fast test suite *did*
+pass before this incident, since it only ever imports the package normally).
+
+### 2026-10-02 (later) — Phase 1: enroll `agent-codespaces` and `agent-containers`
+Operator chose the next two Phase 1 plugins to wire ("incrementally work
+towards full coverage across all plugins"), out of the 8 remaining in
+`validate-and-promote.yml`'s own `full` matrix.
+
+**Generalized the per-plugin wiring** rather than copy-pasting a third
+near-identical `if: matrix.plugin == '...'` block: the `full` job's
+Coverage-baseline/Upload-coverage-baseline steps now gate on
+`contains(fromJSON('["agent-ssh","agent-codespaces","agent-containers"]'),
+matrix.plugin)`, and `--cov-source` is derived from `matrix.plugin` itself
+(`plugins/<plugin>/src/<plugin-with-underscores>` -- every enrolled plugin's
+own `src/` package name follows this exact rule) instead of a hardcoded
+per-plugin path. The `promote` job's enrolled-baseline hard-gate list
+(`for plugin in agent-ssh agent-codespaces agent-containers`) stays in the
+same commit, per the existing "keep both lists in sync" contract. Scaling to
+a 4th+ plugin going forward only ever touches these two lists.
+
+**Found a real environment-isolation gap enrolling `agent-containers`:**
+running `baseline.py` against its real suite failed one test
+(`test_profile_spec_can_describe_project_scoped_picker_source`) that passes
+cleanly under the trusted `run-plugin-tests.py` runner. Root-caused (not
+guessed): this machine's ambient `AGENT_RT_ROOT` env var leaked into
+`baseline.py`'s ephemeral collection subprocess (`_subprocess_env` copied
+`os.environ` wholesale), and `agent-containers`' own `provider_ssh.py` reads
+`AGENT_RT_ROOT` ahead of the test's monkeypatched `RUNTIME_DIR` substitute --
+`run-plugin-tests.py`'s own `isolated_environment` already scrubs this exact
+var (and others) for the trusted path, `baseline.py` never did. Exported
+`plugin_test_containment.py`'s existing `_ALWAYS_SCRUB_NAMES` as a public
+`ALWAYS_SCRUB_NAMES` and reused it in `_subprocess_env`, so a baseline is
+only ever collected under the same containment the real validation gate
+already guarantees -- re-ran `baseline.py` against `agent-containers` after
+the fix and it now collects cleanly, with no regression against the
+existing `agent-ssh` pilot. Added a fast, mocked regression test
+(`test_subprocess_env_scrubs_ambient_containment_variables`) asserting
+every `ALWAYS_SCRUB_NAMES` entry is absent from `_subprocess_env`'s own
+built env, so this exact containment gap can't regress unseen.
+
+**Verified directly**, not just by code reading: `baseline.py` run against
+both new plugins' real test suites (a local `--measured-commit` smoke run
+of each) now produces a clean baseline end to end, and
+`tools/test_coverage_guided_selection.py` +
+`tools/test_plugin_test_containment.py` (CI's own exact invocation of both)
+pass unchanged.
+
+**Not yet done:** watching a real promotion after this wiring lands and
+confirming `.github/coverage-baselines/agent-codespaces.json` and
+`agent-containers.json` actually appear on `main` (same sequencing caveat
+as `agent-ssh`'s own entry below), and the operator's next choice of which
+plugin(s) to enroll after these two.
+
 ### 2026-10-02 — Phase 1 pilot: real promotion-gate wiring for `agent-ssh`
 Operator asked to actually get a baseline committed to `main`, "so we can
 incrementally work towards full coverage across all plugins" -- driving

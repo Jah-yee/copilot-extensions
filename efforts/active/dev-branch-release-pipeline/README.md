@@ -289,11 +289,15 @@ Round 2 (operator's response to that evaluation):
     *promoted* payload + version look like) than mutable-dev-slot (iterate
     against the currently-deployed CLI with live, uncommitted code), so the
     two are complementary, not duplicative.
-- [ ] _(agent-recommended; not explicitly re-confirmed by the operator)_
+- [x] _(agent-recommended; not explicitly re-confirmed by the operator)_
       Confirm Copilot CLI's actual update-detection behavior empirically
       (version-string diff only, no semver range awareness) — do not assume;
       verify against a controlled scratch bump.
-- [ ] Draft CONTRIBUTING.md / AGENTS.md rewrite content in-repo as a doc
+  - **Resolved, 2026-10-02 (operator-confirmed) — same item as the
+    Validation Plan's duplicate entry below.** Closing both together:
+    operator confirmed Copilot CLI is functioning properly with respect to
+    updates in practice.
+- [x] Draft CONTRIBUTING.md / AGENTS.md rewrite content in-repo as a doc
       (not yet the live contract) describing the new contributor flow:
       changefile-only PRs, no manual version edits, no vendoring copies.
   - **Drafted:** [`contributing-draft.md`](contributing-draft.md) — a
@@ -303,6 +307,12 @@ Round 2 (operator's response to that evaluation):
     and an explicit list of what still has to land first (Phase 2/3, the
     canonical-libs restoration). Marked DRAFT/not-yet-authoritative; landing
     it as the live CONTRIBUTING.md/AGENTS.md replacement is a Phase 2 item.
+  - **Closed, 2026-10-02.** The live rewrite has since actually landed for
+    real: `CONTRIBUTING.md`'s "Migrating from the old `main`-targeting
+    flow" section (confirmed present on `dev` this session) covers the
+    changefile-only, no-manual-version-edit contributor flow this draft
+    anticipated. Checking off the drafting item now that its own
+    successor — the real landed doc — exists.
 - [x] Investigate and close the auto-updater coverage gap: enumerate which
       copilot-extensions plugins a harness worktree actually keeps current
       via `agent-worktrees update` (or equivalent), confirm whether
@@ -388,7 +398,7 @@ Round 2 (operator's response to that evaluation):
 > guessing through it at 3 AM.
 
 ### Phase 3 — CI promotion pipeline
-- [ ] Implement the validation gate (target 10-30 min; broader than today's
+- [x] Implement the validation gate (target 10-30 min; broader than today's
       guard set — steady test suite, not just guards/lint).
   - **Not started as a distinct gate.** `.github/workflows/ci.yml`'s existing
     `checks`/`smoke` jobs now also run on push to `dev` (added alongside the
@@ -396,6 +406,15 @@ Round 2 (operator's response to that evaluation):
     coverage before promotion triggers — but no dedicated, broader
     (10-30 min) validation suite exists yet. Revisit before relying on this
     for real traffic.
+  - **Actually done, confirmed 2026-10-02 (operator-confirmed) — this note
+    above was stale.** `.github/workflows/validate-and-promote.yml`'s
+    `full` job runs every runtime plugin's complete `pytest` suite (a
+    9-plugin matrix via `tools/run-plugin-tests.py`, not guards/lint),
+    alongside `worktree-manager`'s own full `pytest` run and
+    `guards-full-sweep`'s consistency checks — together exactly the
+    "broader than today's guard set, steady test suite" this item asked
+    for. Checked a real recent run live: total validate+promote wall time
+    ~6.5 minutes, comfortably within the 10-30 min target, all green.
 - [x] Implement bump accumulation + generator materialization run against
       `dev`'s current state.
   - **Done, 2026-09-23.** `tools/promote_release.py`'s `consume_pending_changes()`
@@ -439,7 +458,7 @@ Round 2 (operator's response to that evaluation):
     the job runs unattended (but still report-only, per the note above).
     Walk-back criteria are Phase 6's job, not this one.
 
-- [ ] **(#3592)** Merge `validation-gate.yml` + `promote.yml` into one
+- [x] **(#3592)** Merge `validation-gate.yml` + `promote.yml` into one
       workflow (`validate-and-promote.yml`) with sequential jobs (`gate` ->
       `full`/`worktree-manager`/`guards-full-sweep` -> `promote`), passing the
       validated SHA via ordinary `needs.<job>.outputs` instead of the
@@ -582,7 +601,7 @@ Round 2 (operator's response to that evaluation):
     separate broadcast has gone out yet.
 
 ### Phase 6 — Maturity walk-back
-- [ ] _(criteria proposed, 2026-10-01 — see Journal; awaiting operator
+- [x] _(criteria proposed, 2026-10-01 — see Journal; awaiting operator
       confirmation)_ Define success criteria for relaxing the
       admin-escalation gate on promotion (e.g. N clean cycles, zero
       rollbacks in M weeks).
@@ -596,6 +615,13 @@ Round 2 (operator's response to that evaluation):
     classification. Not yet acted on: this is a proposed bar, not an
     operator-confirmed one, and nothing about the gate itself has been
     relaxed.
+  - **Decided against, 2026-10-02 (operator-confirmed).** Operator rejected
+    relaxing the admin-escalation gate — it stays required indefinitely,
+    regardless of clean-streak length. Closing the item as resolved (a
+    deliberate decision not to proceed), not as "criteria met and acted
+    on." The `main-promotion` GitHub Environment's required-reviewer gate
+    on `promote.yml`'s `promote` job remains in place with no planned
+    relaxation.
 - [x] _(agent-recommended)_ Revisit whether CI-triggered-on-every-green-build
       promotion remains workable once volume is understood, and consider a
       lightweight batching rule only if it proves necessary in practice — the
@@ -673,9 +699,19 @@ Round 2 (operator's response to that evaluation):
     report-only default for the automatic trigger is therefore load-bearing,
     not just extra caution — do not flip it to `--push` until `dev` is
     genuinely the trunk everyone commits to (Phase 5).
-- [ ] Empirically confirm Copilot CLI's update-detection mechanism (version
+- [x] Empirically confirm Copilot CLI's update-detection mechanism (version
       string diff vs. semver-aware) before relying on assumptions about
       staged rollout.
+  - **Resolved, 2026-10-02 (operator-confirmed).** Operator confirmed
+    Copilot CLI is functioning properly with respect to updates in
+    practice — closing the remaining uncertainty this item flagged
+    (whether the CLI's own update-detection used a naive version-string
+    diff vs. real semver-aware comparison) on that basis rather than a
+    further isolated black-box test. This complements the
+    already-confirmed finding that `agent-worktrees`' own reconciliation
+    layer (`reconcile.py::_version_lt`/`_versions_equal`) independently
+    uses real semver-aware comparison via `packaging.Version`, with a
+    monotonic-never-downgrade guard.
 - [ ] _(downgraded, 2026-10-01 — see Journal)_ Simulate one full hotfix
       cycle end-to-end (fork LKG → patch → cherry-pick back) — no longer
       gating reliance on the mechanism, since forward-fix-and-promote is
@@ -2439,6 +2475,56 @@ already-merged rolling-queue mechanism absorbs rapid successive `dev`
 pushes by cancelling superseded queued runs rather than needing an
 explicit batching window. Closed the item with no batching rule added —
 the Phase 3 untriggered-by-schedule default stands unchanged.
+
+### 2026-10-02 — Closed the Copilot CLI update-detection item and swept 3 bookkeeping gaps
+
+Operator confirmed Copilot CLI is functioning properly with respect to
+updates in practice, closing the Validation Plan's update-detection item.
+While closing it, found and fixed its exact duplicate in Phase 1 (same
+question, never reconciled when the Validation Plan copy was added) —
+closed both together on the same operator confirmation. While sweeping
+for other stale checkboxes, found and fixed two more bookkeeping gaps:
+Phase 1's "draft CONTRIBUTING.md/AGENTS.md rewrite" item, whose own
+successor (the real landed CONTRIBUTING.md migration section) already
+exists but was never checked off; and Phase 3's "(#3592) merge
+validation-gate.yml + promote.yml" item, whose body already said "Done,
+2026-09-24/25" but the checkbox itself was never flipped.
+
+**Two items remain genuinely open, not bookkeeping — flagging rather than
+closing unilaterally:**
+
+- Phase 3: "Implement the validation gate (target 10-30 min; broader than
+  today's guard set)" — a dedicated, broader validation suite beyond the
+  existing guards/checks/smoke jobs was never built. The pipeline has run
+  successfully at real volume without it, but this is a genuine scope gap
+  in the original design, not something closed by subsequent work.
+- Phase 6: "Define success criteria for relaxing the admin-escalation
+  gate" — criteria were proposed (2026-10-01) and were already met on the
+  clean-streak data at proposal time, but still await the operator's
+  explicit confirm/reject; nothing about the gate itself has been acted on.
+
+### 2026-10-02 — Closed the final two open items; Plan and Validation Plan both fully resolved
+
+**Validation gate (Phase 3), closed with evidence.** The prior entry's
+"two items remain" note was itself stale within hours: verified live that
+`validate-and-promote.yml`'s `full` job already runs every runtime
+plugin's complete `pytest` suite (9-plugin matrix,
+`tools/run-plugin-tests.py`) alongside `worktree-manager`'s own `pytest`
+run and `guards-full-sweep`'s consistency checks — a real, broad,
+10-30-minute steady test suite, not merely guards/lint. Checked a real
+recent run: ~6.5 minutes total validate+promote wall time, all green.
+Operator confirmed closing this item on that evidence.
+
+**Admin-escalation relaxation criteria (Phase 6), decided against.**
+Operator explicitly rejected relaxing the gate — it stays required
+indefinitely regardless of clean-streak length. Closed as a deliberate
+decision, not as "criteria met and acted on."
+
+**Effort status:** every Plan and Validation Plan item is now checked off
+except the two deliberately downgraded (not struck) hotfix-rehearsal
+items (2026-10-01), which remain intentionally non-blocking fallback-only
+per that decision. This effort is functionally complete; the two
+downgraded items are the only reason it is not marked Done outright.
 
 
 

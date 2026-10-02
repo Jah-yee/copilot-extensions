@@ -579,6 +579,28 @@ def test_retarget_leaves_a_malformed_continuity_for_validation() -> None:
         assert retarget(token, merged) == token  # no TypeError -> the route's 4xx path
 
 
+def test_retarget_leaves_non_integer_ids_on_their_old_continuity() -> None:
+    """A merged-history token whose ids are "1", 1.0 or true must not get the new
+    continuity with an untranslated id (``int()`` would then name unrelated
+    merged events); it is left for validation to report the replaced history."""
+    from agent_bridge.result_tokens import _decode_token, _encode_token, retarget
+
+    merged = {"old-log": ("new-log", {1: 3, 2: 4})}
+    base = {"source": "represented", "session_id": "s", "continuity": "old-log"}
+    for bad in ("1", 1.0, True):
+        for payload in (
+            {"kind": "position", "event_id": bad},
+            {"kind": "event", "event_id": bad},
+            {"kind": "span", "start_event_id": bad, "end_event_id": 2},
+            {"kind": "span", "start_event_id": 1, "end_event_id": bad},
+        ):
+            token = _encode_token({**base, **payload})
+            assert retarget(token, merged) == token, payload
+    ok = _decode_token(retarget(_encode_token({**base, "kind": "event", "event_id": 1}), merged),
+                       source="represented", session_id="s", kinds=frozenset({"event"}))
+    assert (ok["continuity"], ok["event_id"]) == ("new-log", 3)
+
+
 def test_retarget_never_launders_an_oversized_or_non_base64_token() -> None:
     import base64
     import json

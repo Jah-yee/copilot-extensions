@@ -72,11 +72,24 @@ def _live_box(capture: str) -> bool:
     )
 
 
+#: A shell prompt at the start of a line, even with typed text after it
+#: (``user@host:~/dir$ ...``, ``PS C:\repo> ...``, ``C:\repo> ...``).
+_SHELL_HEAD = re.compile(
+    r"^\s*(?:[\w.-]+@[\w.-]+(?::\S*)?\s*[$#%>]|PS\s+\S[^>]*>|[A-Za-z]:\\[^>]*>)"
+)
+
+
 def _live_footer(region: str) -> bool:
     """The "esc ... interrupt" footer as the live bottom line: anything below it
-    (a prompt, an exit line, ``Connection closed``) means it is stale."""
+    (a prompt, an exit line, ``Connection closed``) means it is stale, and a
+    shell-shaped line that merely contains both words (``user@host:~/esc-interrupt$``)
+    is a shell, not Copilot."""
     lines = [line for line in region.splitlines() if line.strip()]
-    return bool(lines) and "esc" in lines[-1].lower() and "interrupt" in lines[-1].lower()
+    if not lines:
+        return False
+    last = lines[-1]
+    return ("esc" in last.lower() and "interrupt" in last.lower()
+            and not _SHELL_TAIL.search(last) and not _SHELL_HEAD.match(last))
 
 
 def ready_signature(capture: str) -> str | None:

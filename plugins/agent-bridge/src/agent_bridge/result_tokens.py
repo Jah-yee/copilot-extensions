@@ -160,34 +160,43 @@ def retarget(token: str | None, merged: dict[str, tuple[str, dict[int, int]]]) -
     value = {**value, "continuity": continuity}
     if value.get("kind") == "position":
         # A read cursor: the furthest merged id at or before it (never moves back).
-        if isinstance(value.get("event_id"), int):
-            value["event_id"] = max([v for k, v in ids.items() if k <= value["event_id"]],
-                                    default=0)
+        # Only an exact integer can be mapped; "1", 1.0 or true keep their old
+        # continuity so validation reports the replaced history instead.
+        if not _is_id(value.get("event_id")):
+            return token
+        value["event_id"] = max([v for k, v in ids.items() if k <= value["event_id"]],
+                                default=0)
     elif not _retarget_detail(value, ids):
         return token  # unmapped or no longer contiguous: normal validation reports it
     value.pop("v", None)
     return _encode_token(value)
 
 
+def _is_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _retarget_detail(value: dict[str, Any], ids: dict[int, int]) -> bool:
     """Map an event/span reference to the exact merged events, in place. A span
     is kept only while its members are still one contiguous run in order (a
     merge that dropped duplicates can interleave other events). False when the
-    reference can't be mapped exactly."""
+    reference can't be mapped exactly -- including any non-integer id."""
     exact = {k: v for k, v in ids.items() if k > 0}
-    if isinstance(value.get("event_id"), int):
-        if value["event_id"] not in exact:
+    if value.get("kind") != "span":
+        if not _is_id(value.get("event_id")) or value["event_id"] not in exact:
             return False
         value["event_id"] = exact[value["event_id"]]
+        return True
     start, end = value.get("start_event_id"), value.get("end_event_id")
-    if isinstance(start, int) and isinstance(end, int):
-        # Client-controlled bounds: never iterate wider than the mappings.
-        if not 0 < start <= end or end - start + 1 > len(exact):
-            return False
-        members = [exact.get(k) for k in range(start, end + 1)]
-        if not members or None in members or members != list(
-            range(members[0], members[0] + len(members))
-        ):
-            return False
-        value["start_event_id"], value["end_event_id"] = members[0], members[-1]
+    if not (_is_id(start) and _is_id(end)):
+        return False
+    # Client-controlled bounds: never iterate wider than the mappings.
+    if not 0 < start <= end or end - start + 1 > len(exact):
+        return False
+    members = [exact.get(k) for k in range(start, end + 1)]
+    if not members or None in members or members != list(
+        range(members[0], members[0] + len(members))
+    ):
+        return False
+    value["start_event_id"], value["end_event_id"] = members[0], members[-1]
     return True

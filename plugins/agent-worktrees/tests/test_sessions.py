@@ -1955,6 +1955,24 @@ def test_an_attached_powershell_or_cmd_prompt_is_not_ready():
     assert pane_readiness.ready_signature("press esc to interrupt\n") == "interrupt-footer"
 
 
+def test_a_shell_prompt_containing_the_footer_words_is_not_ready():
+    """A shell prompt whose path happens to contain "esc" and "interrupt" is not
+    Copilot's footer: typing the seed there would run it in the shell."""
+    from agent_worktrees import pane_readiness
+
+    for prompt in (
+        "user@host:~/escape-interrupt$",
+        "user@host:~/escape-interrupt$ ",
+        "root@box:/srv/esc-interrupt#",
+        "user@host ~/esc/interrupt %",
+        "user@host:~/escape-interrupt$ echo hi",
+        "PS C:\\esc\\interrupt> dir",
+        "C:\\esc\\interrupt> dir",
+    ):
+        assert pane_readiness.ready_signature(prompt + "\n") is None, prompt
+    assert pane_readiness.ready_signature("press esc to interrupt\n") == "interrupt-footer"
+
+
 def test_seed_readiness_never_outlasts_the_hard_cap():
     busy = [f" /work/repo   Session\n ◉ Resuming session... {i}\n" for i in range(500)]
     driver = _SeedDriver(ready_caps=busy, echo_caps=[])

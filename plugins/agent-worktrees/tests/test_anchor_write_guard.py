@@ -454,6 +454,26 @@ def test_powershell_git_array_subexpression_from_anchor_denies(
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        "Write-Output foo#bar; git commit --allow-empty -m example",
+        "<# note #>; git commit --allow-empty -m example",
+    ],
+)
+def test_powershell_comment_boundaries_preserve_git_command(
+    tmp_path, anchor, command,
+):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(gp),
+        "toolArgs": {"command": command},
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
     ("tool", "command"),
     [
         (
@@ -920,6 +940,19 @@ def test_shell_explicit_linked_worktree_targets_allow(tmp_path, anchor):
         f'git --git-dir "{git_dir}" --work-tree "{wt}" commit -m example'
     )
     assert guard.decide(_shell(command, anchor_root), env={},
+                        home=tmp_path, anchors=anchor) is None
+
+
+def test_shell_linked_worktree_git_dir_from_cwd_allows(tmp_path, anchor):
+    anchor_root = Path(anchor[0]["path"])
+    git_dir = anchor_root / ".git" / "worktrees" / "cwd-only"
+    git_dir.mkdir(parents=True)
+    wt = tmp_path / "myrepo.worktrees" / "cwd-only"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    command = f'git --git-dir "{git_dir}" commit -m example'
+    assert guard.decide(_shell(command, wt), env={},
                         home=tmp_path, anchors=anchor) is None
 
 

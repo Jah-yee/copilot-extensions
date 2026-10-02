@@ -765,12 +765,18 @@ def _git_target_anchor(
 
 def _linked_worktree_git_dir(
     targets: list[tuple[str, str]],
+    effective_cwd: str,
 ) -> str | None:
     by_kind = dict(targets)
     git_dir = by_kind.get("git-dir")
     work_tree = by_kind.get("work-tree")
-    if not git_dir or not work_tree:
+    if not git_dir:
         return None
+    if not work_tree:
+        cwd_root = find_repo_root(effective_cwd)
+        if cwd_root is None or not is_linked_worktree(cwd_root):
+            return None
+        work_tree = str(cwd_root)
     resolved_git_dir = _real_canon(git_dir)
     git_dir_path = Path(resolved_git_dir)
     if (
@@ -857,7 +863,7 @@ def _shell_hit(
         # 3a. A git mutation with an explicit ``-C`` / ``--git-dir`` /
         #     ``--work-tree`` target writes any anchor named by those options.
         if git_write:
-            linked_git_dir = _linked_worktree_git_dir(git_targets)
+            linked_git_dir = _linked_worktree_git_dir(git_targets, eff_cwd)
             for kind, target in git_targets:
                 if kind == "git-dir" and _real_canon(target) == linked_git_dir:
                     continue

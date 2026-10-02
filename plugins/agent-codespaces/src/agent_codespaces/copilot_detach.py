@@ -713,6 +713,12 @@ def cmd_detach(
             args.name, plan["tenant"], daemon_port=daemon_port,
             mux_session=plan["mux_session"], confirmed=True,
         )
+        # A resume can re-register under a new id after the claim; only a daemon
+        # with live-session aliases carries a bridge message (seed or note) across it.
+        from venue_copilot import LIVE_SESSION_ALIAS_PROTOCOL, may_switch_session_id
+
+        alias_floor = ({"min_daemon_protocol": LIVE_SESSION_ALIAS_PROTOCOL}
+                       if may_switch_session_id(copilot_args) else {})
         if seed_needs_bridge:
             from venue_copilot.refs import deliver_note
 
@@ -721,15 +727,7 @@ def cmd_detach(
                 "seed was never typed; delivering over bridge"
             )
             _progress("seed-bridge", detail)
-            # A resume can re-register under a new id after the claim; only a
-            # daemon with live-session aliases carries this message across it.
-            from venue_copilot import LIVE_SESSION_ALIAS_PROTOCOL, may_switch_session_id
-
-            seed_delivery_status = "bridge" if deliver_note(
-                session_id, seed,
-                **({"min_daemon_protocol": LIVE_SESSION_ALIAS_PROTOCOL}
-                   if may_switch_session_id(copilot_args) else {}),
-            ) else "failed"
+            seed_delivery_status = "bridge" if deliver_note(session_id, seed, **alias_floor) else "failed"
         refs_delivered = None
         if refs_note_text:
             # A typed new session got the note in its seed; a running one (or a
@@ -741,7 +739,9 @@ def cmd_detach(
             elif seed_needs_bridge and seed_delivery_status == "bridge":
                 refs_delivered = "message"
             elif not created:
-                refs_delivered = "message" if deliver_note(session_id, refs_note_text) else "failed"
+                refs_delivered = (
+                    "message" if deliver_note(session_id, refs_note_text, **alias_floor) else "failed"
+                )
             else:
                 refs_delivered = "failed"
         ok = True

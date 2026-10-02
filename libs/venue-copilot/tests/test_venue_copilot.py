@@ -637,6 +637,26 @@ class TestDetachedRunner:
         assert payload["refs_delivered"] == "message"
         assert sent and sent[0][0] == "sid-42" and "trace.har" in sent[0][1]
 
+    @pytest.mark.parametrize("daemon_has_aliases", [True, False])
+    def test_a_resumed_rejoins_ref_note_needs_a_daemon_that_follows_renames(
+        self, monkeypatch, daemon_has_aliases,
+    ) -> None:
+        from venue_copilot import detached, refs
+
+        self._patch_bridge(monkeypatch)
+        sent = []
+        monkeypatch.setattr(
+            refs, "deliver_note", lambda sid, note, **kw: sent.append(kw) or daemon_has_aliases,
+        )
+        adapter = _Adapter({"ok": True, "created": False, "session": "wt-anchor-repo"})
+        rc, payload = detached.launch_detached(
+            adapter, self._plan(), seed=None, driver=None, copilot_args=["--resume=abc"],
+            ensure_mux=True, register_timeout=0.0, progress=lambda *a: None, refs=self._refs(),
+        )
+        assert rc == 0
+        assert sent == [{"min_daemon_protocol": detached.LIVE_SESSION_ALIAS_PROTOCOL}]
+        assert payload["refs_delivered"] == ("message" if daemon_has_aliases else "failed")
+
     def test_a_failed_ref_copy_fails_before_launch(self, monkeypatch) -> None:
         from venue_copilot import detached
 

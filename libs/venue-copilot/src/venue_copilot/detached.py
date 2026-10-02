@@ -303,6 +303,10 @@ def launch_detached(
                 error="the session is running but never registered with the host bridge",
             )
         ok = True
+        # A resume can re-register under a new id after the claim; only a daemon
+        # with live-session aliases carries a bridge message (seed or note) across it.
+        alias_floor = ({"min_daemon_protocol": LIVE_SESSION_ALIAS_PROTOCOL}
+                       if may_switch_session_id(copilot_args) else {})
         if seed_needs_bridge:
             from .refs import deliver_note
 
@@ -311,13 +315,7 @@ def launch_detached(
                 "seed was never typed; delivering over bridge"
             )
             progress("seed-bridge", detail)
-            # A resume can re-register under a new id after the claim; only a
-            # daemon with live-session aliases carries this message across it.
-            seed_delivery_status = "bridge" if deliver_note(
-                session_id, seed,
-                **({"min_daemon_protocol": LIVE_SESSION_ALIAS_PROTOCOL}
-                   if may_switch_session_id(copilot_args) else {}),
-            ) else "failed"
+            seed_delivery_status = "bridge" if deliver_note(session_id, seed, **alias_floor) else "failed"
         refs_extra: dict[str, Any] = {}
         if notes:
             # A typed new session got the note in its seed; a running one (or a
@@ -330,7 +328,7 @@ def launch_detached(
             elif seed_needs_bridge and seed_delivery_status == "bridge":
                 refs_delivered = "message"
             elif not created:
-                refs_delivered = "message" if deliver_note(session_id, notes) else "failed"
+                refs_delivered = "message" if deliver_note(session_id, notes, **alias_floor) else "failed"
             refs_extra = {
                 "ref_files": notes.splitlines()[1:],
                 "refs_delivered": refs_delivered,

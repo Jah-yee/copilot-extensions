@@ -1072,3 +1072,24 @@ def test_a_token_follows_a_transitive_merge() -> None:
     assert a.get_events(0)[decoded["event_id"] - 1].data.get("text") == "c2"
     cyclic = {"x": ("y", {1: 1}), "y": ("x", {1: 1})}
     assert retarget(_encode_token({"kind": "position", "continuity": "x", "event_id": 1}), cyclic)
+
+def test_two_merges_between_reader_polls_translate_from_the_readers_numbering() -> None:
+    """C:2 -> B:3 after one merge; a heartbeat-only poll leaves the reader's
+    cursor at 2; the next merge must continue from B:3 (-> A:4), never treat
+    2 as B's number and replay an event."""
+    from agent_bridge.live_representation import MergeFollowingLog
+
+    store = LiveEventStore()
+    a, b, c = (store.get_or_create(k) for k in ("A", "B", "C"))
+    a.append("agent_message", {"text": "a1"})
+    b.append("agent_message", {"text": "b1"})
+    c.append("agent_message", {"text": "c1"})
+    c.append("agent_message", {"text": "c2"})
+    view = MergeFollowingLog(store, "C", c)
+    cursor = c.latest_id  # read through c2
+    store.alias("B", "C")
+    log, moved = view._follow(cursor)
+    assert log is b and b.get_events(0)[moved - 1].data.get("text") == "c2"
+    store.alias("A", "B")
+    log, moved = view._follow(cursor)  # the reader still hasn't advanced
+    assert log is a and a.get_events(0)[moved - 1].data.get("text") == "c2"

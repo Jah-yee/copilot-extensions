@@ -62,9 +62,13 @@ _REGISTER_SQL = (
     "    AND s.status IN ('running', 'idle')"
     ") "
     "ON CONFLICT(session_id) DO UPDATE SET "
-    "machine=excluded.machine, cwd=excluded.cwd, "
-    "worktree_id=excluded.worktree_id, repo=excluded.repo, "
-    "branch=excluded.branch, pid=COALESCE(excluded.pid, live_sessions.pid), role=excluded.role, "
+    # A heartbeat that omits metadata (only the id, while the extension's own
+    # metadata resolves) keeps what's known, like pid: never erase targeting.
+    "machine=COALESCE(excluded.machine, live_sessions.machine), cwd=COALESCE(excluded.cwd, live_sessions.cwd), "
+    "worktree_id=COALESCE(excluded.worktree_id, live_sessions.worktree_id), "
+    "repo=COALESCE(excluded.repo, live_sessions.repo), "
+    "branch=COALESCE(excluded.branch, live_sessions.branch), pid=COALESCE(excluded.pid, live_sessions.pid), "
+    "role=COALESCE(excluded.role, live_sessions.role), "
     "driven_by=COALESCE(excluded.driven_by, live_sessions.driven_by), "
     "venue=COALESCE(excluded.venue, live_sessions.venue), process_started_at="
     "COALESCE(excluded.process_started_at, live_sessions.process_started_at), "

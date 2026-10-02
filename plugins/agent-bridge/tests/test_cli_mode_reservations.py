@@ -832,3 +832,19 @@ def test_deregister_reports_whether_it_deleted_the_exact_registration(tmp_db: Da
     assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
     assert tmp_db.deregister_live_session("resumed") is True
     assert tmp_db.get_live_session("placeholder") is None
+
+
+def test_a_metadata_free_alias_heartbeat_keeps_the_successors_targeting(tmp_db: Database) -> None:
+    """A late heartbeat through the retired id carrying only the id (the
+    extension's metadata still resolving) must not erase what's known."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    assert tmp_db.register_live_session(
+        "placeholder", machine=None, cwd=None, worktree_id=None, repo=None, branch=None,
+        pid=None, role=None, now=now + 3) == "live"
+    row = tmp_db.get_live_session("resumed")
+    assert (row["machine"], row["worktree_id"], row["cwd"], row["pid"], row["role"]) == (
+        "m", "wt-R", "/w", 4242, "picker")
+    assert _register(tmp_db, "resumed-again", "wt-R", now + 4, pid=4242) == "live"  # still rolls over
+    assert tmp_db.get_live_session("resumed")["session_id"] == "resumed-again"

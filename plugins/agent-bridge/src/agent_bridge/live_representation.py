@@ -680,13 +680,19 @@ class MergeFollowingLog:
         self._moved: tuple[int, int] | None = None  # (old cursor, translated)
 
     def _follow(self, cursor: int) -> tuple[EventLog, int]:
+        original = cursor
+        pending = self._moved is not None and cursor == self._moved[0]
+        if pending:
+            cursor = self._moved[1]  # not advanced since the last merge: already in self._log's numbering
         current = self._store.get(self._session_id) or self._log
         if current is not self._log:
+            # Translate from the numbering the cursor is actually in, so two merges
+            # with only a heartbeat poll between them (C:2 -> B:3 -> A:4) chain.
             moved = translate_merged_cursor(self._log, current, cursor)
-            self._moved = (cursor, moved) if moved is not None else None
             self._log = current
-        if self._moved is not None and cursor == self._moved[0]:
-            cursor = self._moved[1]  # until the reader advances past the merge
+            self._moved = (original, moved) if moved is not None else None
+            if moved is not None:
+                cursor = moved
         return current, cursor
 
     async def wait_for_events_snapshot(self, cursor: int, *, timeout: float):

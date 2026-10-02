@@ -66,6 +66,8 @@ class EventLog:
         self._lock = Lock()
         self._next_id = 1
         self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
+        #: Set when this log was merged into another: (target log, old id -> new id).
+        self.merged_into: tuple[EventLog, dict[int, int]] | None = None
         self._db = db
         self._session_id = session_id
         self._telemetry = telemetry.SessionTraceReducer(

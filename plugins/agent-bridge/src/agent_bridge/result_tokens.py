@@ -1,0 +1,158 @@
+"""Opaque, versioned result position and detail-reference tokens.
+
+Split out of ``result_snapshot`` (module-size cap): encoding, decoding and the
+session/kind checks every delegated-result token goes through.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+from typing import Any
+
+_MAX_DETAIL_TOKEN_CHARS = 2048
+_TOKEN_PREFIX = "abr1."
+
+
+class ResultTokenError(ValueError):
+    """An opaque result position or detail reference is malformed."""
+
+
+class ResultHistoryChangedError(ResultTokenError):
+    """A valid detail reference names a replaced event-log history."""
+
+
+
+def _encode_token(payload: dict[str, Any]) -> str:
+    raw = json.dumps(
+        {"v": 1, **payload}, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return _TOKEN_PREFIX + encoded
+
+
+def _decode_token(
+    token: str,
+    *,
+    source: str,
+    session_id: str,
+    kinds: frozenset[str],
+    retired_ids: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """``retired_ids``: earlier ids of the same session (a resume renamed it);
+    their tokens stay valid, still subject to the history-continuity checks."""
+    if not token or len(token) > _MAX_DETAIL_TOKEN_CHARS or not token.startswith(
+        _TOKEN_PREFIX
+    ):
+        raise ResultTokenError("invalid result token")
+    encoded = token[len(_TOKEN_PREFIX):]
+    padding = "=" * (-len(encoded) % 4)
+    try:
+        raw = base64.b64decode(
+            encoded + padding, altchars=b"-_", validate=True
+        )
+        value = json.loads(raw.decode("utf-8"))
+    except (
+        binascii.Error,
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ResultTokenError("invalid result token") from exc
+    if not isinstance(value, dict) or value.get("v") != 1:
+        raise ResultTokenError("unsupported result token version")
+    token_session = value.get("session_id")
+    if value.get("source") != source or not isinstance(token_session, str) or (
+        token_session != session_id and token_session not in retired_ids
+    ):
+        raise ResultTokenError("result token targets a different session")
+    if value.get("kind") not in kinds:
+        raise ResultTokenError("result token has the wrong kind")
+    return value
+
+
+def _position_token(
+    source: str, session_id: str, continuity: str, event_id: int
+) -> str:
+    return _encode_token(
+        {
+            "kind": "position",
+            "source": source,
+            "session_id": session_id,
+            "continuity": continuity,
+            "event_id": event_id,
+        }
+    )
+
+
+def _event_ref(
+    source: str, session_id: str, continuity: str, event_id: int
+) -> str:
+    return _encode_token(
+        {
+            "kind": "event",
+            "source": source,
+            "session_id": session_id,
+            "continuity": continuity,
+            "event_id": event_id,
+        }
+    )
+
+
+def _span_ref(
+    source: str,
+    session_id: str,
+    continuity: str,
+    start_event_id: int,
+    end_event_id: int,
+    *,
+    scope: str | None = None,
+) -> str:
+    payload = {
+        "kind": "span",
+        "source": source,
+        "session_id": session_id,
+        "continuity": continuity,
+        "start_event_id": start_event_id,
+        "end_event_id": end_event_id,
+    }
+    if scope:
+        payload["scope"] = scope
+    return _encode_token(payload)
+
+
+def _turn_ref(session_id: str, turn_index: int) -> str:
+    return _encode_token(
+        {
+            "kind": "turn",
+            "source": "owned",
+            "session_id": session_id,
+            "turn_index": turn_index,
+        }
+    )
+
+
+def retarget(token: str | None, merged: dict[str, tuple[str, dict[int, int]]]) -> str | None:
+    """Rewrite a token minted on a log that was since merged into another
+    (``merged``: old continuity -> (new continuity, old event id -> new id)),
+    so its event ids and continuity name the merged history. Anything else --
+    including a malformed token -- is returned unchanged for normal validation."""
+    if not token or not merged or not token.startswith(_TOKEN_PREFIX):
+        return token
+    encoded = token[len(_TOKEN_PREFIX):]
+    try:
+        value = json.loads(base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_"))
+    except (binascii.Error, ValueError, TypeError, UnicodeDecodeError):
+        return token
+    target = merged.get(value.get("continuity")) if isinstance(value, dict) else None
+    if target is None:
+        return token
+    continuity, ids = target
+    value = {**value, "continuity": continuity}
+    for key in ("event_id", "start_event_id", "end_event_id"):
+        if isinstance(value.get(key), int):
+            value[key] = ids.get(value[key], max([v for k, v in ids.items() if k <= value[key]], default=0))
+    value.pop("v", None)
+    return _encode_token(value)

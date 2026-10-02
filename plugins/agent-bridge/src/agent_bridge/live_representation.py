@@ -447,6 +447,7 @@ class LiveEventStore:
         # membership; the deque bounds it FIFO). Guarded by ``_lock``.
         self._seen_ids: dict[str, set[str]] = {}
         self._seen_order: dict[str, deque[str]] = {}
+        self._merged_history: dict[str, tuple[str, dict[int, int]]] = {}
         self._lock = Lock()
 
     def get(self, session_id: str) -> EventLog | None:
@@ -496,9 +497,19 @@ class LiveEventStore:
             self._seen_ids[new_id] = seen
             self._seen_order[new_id] = order
         if merged is not None:
-            for evt in merged.get_events(0):
-                old.append(evt.event, evt.data)
+            prior = merged.continuity_id
+            ids = {evt.id: old.append(evt.event, evt.data).id for evt in merged.get_events(0)}
+            merged.merged_into = (old, ids)
+            if prior and old.continuity_id:
+                with self._lock:
+                    self._merged_history[prior] = (old.continuity_id, ids)
             merged.wake_waiters()
+
+    def merged_history(self) -> dict[str, tuple[str, dict[int, int]]]:
+        """Continuity of each log merged away -> (merged continuity, id map), so
+        result tokens minted on it can be retargeted (``result_tokens.retarget``)."""
+        with self._lock:
+            return dict(self._merged_history)
 
     def ids_of(self, session_id: str) -> list[str]:
         """Every key sharing ``session_id``'s log (itself and its retired ids)."""
@@ -615,6 +626,12 @@ async def await_turn_reply(
         if remaining <= 0:
             break
         events: list[SseEvent] = await log.wait_for_events(cursor, timeout=remaining)
+        if log.merged_into is not None:
+            # A session-id change merged this log into another: follow it, with
+            # the cursor translated to the merged numbering.
+            log, ids = log.merged_into
+            cursor = ids.get(cursor, max([v for k, v in ids.items() if k <= cursor], default=cursor))
+            continue
         if not events:
             break  # timed out with no new events
         for e in events:

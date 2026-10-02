@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -52,6 +51,7 @@ from ..live_representation import (
     build_progress_snapshot,
     derive_turn_state,
 )
+from ..result_tokens import retarget
 from ..result_snapshot import (
     DEFAULT_MAX_ITEMS,
     DEFAULT_MAX_TEXT_CHARS,
@@ -75,7 +75,6 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/v1/live-sessions", tags=["live-sessions"])
 
 
-@dataclass
 class _RepresentedSession:
     """Minimal object satisfying ``_sse_event_stream``'s duck-typed access.
 
@@ -86,14 +85,16 @@ class _RepresentedSession:
     follows its session's log when a session-id change merges it into another.
     """
 
-    session_id: str
-    log: EventLog
-    store: LiveEventStore | None = None
+    def __init__(self, session_id: str, event_log: EventLog,
+                 store: LiveEventStore | None = None) -> None:
+        self.session_id = session_id
+        self._log = event_log
+        self._store = store
 
     @property
     def event_log(self) -> EventLog:
-        current = self.store.get(self.session_id) if self.store is not None else None
-        return current if current is not None else self.log
+        current = self._store.get(self.session_id) if self._store is not None else None
+        return current if current is not None else self._log
 
 
 def _db(request: Request) -> Database:
@@ -409,6 +410,7 @@ def get_live_result_snapshot(
     row = _resolve_registration(db, session_ref)
     if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
+    position = retarget(position, _store(request).merged_history())
     log = _store(request).get(row["session_id"])
     if log is None:
         log = EventLog(
@@ -447,6 +449,7 @@ def get_live_result_detail(
             status_code=404,
             detail="represented event history is no longer available",
         )
+    ref = retarget(ref, _store(request).merged_history()) or ref
     try:
         return expand_represented_result_ref(
             event_log=log,
@@ -596,7 +599,7 @@ async def stream_live_events(
     log = store.get_or_create(
         session_id, worktree_id=registration.get("worktree_id")
     )
-    shim = _RepresentedSession(session_id=session_id, log=log, store=store)
+    shim = _RepresentedSession(session_id=session_id, event_log=log, store=store)
     server = getattr(request.app.state, "uvicorn_server", None)
     return StreamingResponse(
         _sse_event_stream(

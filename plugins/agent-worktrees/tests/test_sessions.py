@@ -1915,6 +1915,14 @@ def test_a_stale_box_above_a_shell_prompt_is_not_ready():
     assert pane_readiness.ready_signature(_BOXED_INPUT) == "boxed-input"
 
 
+def test_a_stale_interrupt_footer_above_a_shell_is_not_ready():
+    from agent_worktrees import pane_readiness
+
+    assert pane_readiness.ready_signature("press esc to interrupt\nCopilot exited\n/tmp\n❯\n") is None
+    # A Copilot caret ABOVE the footer is fine.
+    assert pane_readiness.ready_signature("❯ \npress esc to interrupt\n") == "interrupt-footer"
+
+
 def test_seed_readiness_never_outlasts_the_hard_cap():
     busy = [f" /work/repo   Session\n ◉ Resuming session... {i}\n" for i in range(500)]
     driver = _SeedDriver(ready_caps=busy, echo_caps=[])

@@ -54,6 +54,17 @@ def _live_box(capture: str) -> bool:
     return len(tail) <= _MAX_FOOTER_LINES and not any(_SHELL_TAIL.search(line) for line in tail)
 
 
+def _live_footer(region: str) -> bool:
+    """The "esc ... interrupt" footer at the live bottom: nothing shell-like
+    (a prompt, an exit line) below it, as a footer left above a shell is not."""
+    lines = region.splitlines()
+    last = max((i for i, line in enumerate(lines)
+                if "esc" in line.lower() and "interrupt" in line.lower()), default=None)
+    if last is None:
+        return False
+    return not any(_SHELL_TAIL.search(line) for line in lines[last + 1:])
+
+
 def ready_signature(capture: str) -> str | None:
     """Stable cue for a live Copilot input prompt, or ``None`` when not ready."""
     region = input_region(capture)
@@ -66,6 +77,6 @@ def ready_signature(capture: str) -> str | None:
     # Older Copilot builds expose a footer while the input is live. Require
     # the footer in the bottom region; a bare shell prompt that happens to use
     # the same caret glyph is not enough.
-    if "esc" in low and "interrupt" in low:
+    if _live_footer(region):
         return "interrupt-footer"
     return None

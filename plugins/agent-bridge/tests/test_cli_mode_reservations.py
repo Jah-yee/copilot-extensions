@@ -546,3 +546,12 @@ def test_rollover_moves_delivered_messages_so_retries_stay_idempotent(tmp_db: Da
         tmp_db.resolve_live_session_id("placeholder"), sender="op", body="seed",
         now=now + 5, idempotency_key="k1")
     assert (again, reason) == (mid, None)
+
+
+
+def test_a_rename_keeps_its_place_behind_a_newer_process(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)  # pid 4242, registered at now+1
+    assert _register(tmp_db, "newer", "wt-R", now + 2, pid=99) == "live"
+    assert _register(tmp_db, "resumed", "wt-R", now + 3, pid=4242) == "live"
+    assert tmp_db.current_live_session_for_worktree("wt-R", now=now + 3) == "newer"

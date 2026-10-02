@@ -536,3 +536,46 @@ def test_route_no_wait_returns_immediately(client: TestClient) -> None:
     body = r.json()
     assert body["replied"] is False
     assert body["message_id"] > 0
+
+
+
+def test_a_merge_keeps_successor_waiters_and_tokens_valid() -> None:
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore, await_turn_reply
+    from agent_bridge.result_tokens import _decode_token, _position_token, retarget
+
+    store = LiveEventStore()
+
+    async def scenario():
+        pred = store.get_or_create("placeholder")
+        pred.append("agent_message", {"text": "before"})
+        succ = store.get_or_create("resumed")  # registered before its PID resolved
+        succ.append("agent_message", {"text": "early"})
+        token = _position_token("represented", "resumed", succ.continuity_id, succ.latest_id)
+        waiting = asyncio.create_task(await_turn_reply(succ, after=succ.latest_id, timeout=5))
+        await asyncio.sleep(0.05)
+        store.alias("placeholder", "resumed")
+        pred.append("agent_message", {"text": "the reply"})
+        pred.append("turn_complete", {"stop_reason": "end_turn"})
+        reply = await asyncio.wait_for(waiting, 5)
+        moved = retarget(token, store.merged_history())
+        decoded = _decode_token(moved, source="represented", session_id="resumed",
+                                kinds=frozenset({"position"}))
+        return reply, decoded, pred
+
+    reply, decoded, pred = asyncio.run(scenario())
+    assert reply["replied"] and reply["reply"] == "the reply"
+    assert decoded["continuity"] == pred.continuity_id
+    assert [e.data.get("text") for e in pred.get_events(0)][decoded["event_id"] - 1] == "early"
+
+
+def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
+    import pytest
+
+    from agent_bridge.result_tokens import ResultTokenError, _decode_token, _encode_token
+
+    bad = _encode_token({"kind": "position", "source": "represented", "session_id": [], "event_id": 1})
+    with pytest.raises(ResultTokenError):
+        _decode_token(bad, source="represented", session_id="s", kinds=frozenset({"position"}),
+                      retired_ids=frozenset({"old"}))

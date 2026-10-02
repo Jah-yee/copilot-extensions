@@ -64,10 +64,12 @@ def inherit_cli_mode_claim_for_session_id_change(
                 "WHERE worktree_id=? AND claimed_by_session_id=?",
                 (session_id, worktree_id, predecessor_id),
             )
+            # Same process, so it keeps its place in the worktree's registration
+            # order: a newer process that superseded it stays current.
             conn.execute(
                 "UPDATE live_sessions SET cli_mode=1, venue=?, driven_by=?, "
-                "updated_at=? WHERE session_id=?",
-                (venue, driven_by, now, session_id),
+                "registered_at=?, updated_at=? WHERE session_id=?",
+                (venue, driven_by, predecessor["registered_at"], now, session_id),
             )
             conn.execute(
                 "INSERT INTO live_session_aliases "

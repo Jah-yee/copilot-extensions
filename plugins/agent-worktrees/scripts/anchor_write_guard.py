@@ -497,13 +497,13 @@ def _git_invocation(
             index += 1
             continue
         resolved_targets = list(targets.items())
-        if git_cwd_overridden:
+        if git_cwd_overridden and "git-dir" not in targets:
             resolved_targets.append(("cwd", git_cwd))
         subcommand = "__configured-alias__" if lower in configured_aliases else lower
         return subcommand, tokens[index + 1:], resolved_targets, has_repo_override
     if index < len(tokens):
         resolved_targets = list(targets.items())
-        if git_cwd_overridden:
+        if git_cwd_overridden and "git-dir" not in targets:
             resolved_targets.append(("cwd", git_cwd))
         subcommand = tokens[index].lower()
         if subcommand in configured_aliases:
@@ -846,6 +846,12 @@ def _linked_worktree_git_dir(
     git_dir = by_kind.get("git-dir")
     work_tree = by_kind.get("work-tree")
     if not git_dir or not work_tree:
+        return None
+    git_dir_path = Path(git_dir)
+    if (
+        git_dir_path.parent.name.lower() != "worktrees"
+        or git_dir_path.parent.parent.name.lower() != ".git"
+    ):
         return None
     root = find_repo_root(work_tree)
     if root is None or not is_linked_worktree(root):

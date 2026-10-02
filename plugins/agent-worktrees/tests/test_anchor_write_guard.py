@@ -512,6 +512,18 @@ def test_shell_git_dir_elsewhere_overrides_anchor_cwd(tmp_path, anchor):
     ) is None
 
 
+def test_shell_git_dir_elsewhere_overrides_anchor_dashC(tmp_path, anchor):
+    other = _main_checkout(tmp_path, "other-repo")
+    gp = anchor[0]["path"]
+    assert guard.decide(
+        _shell(
+            f'git -C "{gp}" --git-dir "{other / ".git"}" commit -m example',
+            tmp_path,
+        ),
+        env={}, home=tmp_path, anchors=anchor,
+    ) is None
+
+
 @pytest.mark.parametrize("option", ["--git-dir", "--work-tree"])
 def test_shell_repeated_repository_target_uses_final_value(
     tmp_path, anchor, option,
@@ -722,6 +734,25 @@ def test_shell_explicit_linked_worktree_targets_allow(tmp_path, anchor):
     )
     assert guard.decide(_shell(command, anchor_root), env={},
                         home=tmp_path, anchors=anchor) is None
+
+
+def test_shell_fake_linked_worktree_pointing_at_anchor_git_dir_denies(
+    tmp_path, anchor,
+):
+    anchor_root = Path(anchor[0]["path"])
+    external = tmp_path / "external-work-tree"
+    external.mkdir()
+    (external / ".git").write_text(
+        f"gitdir: {anchor_root / '.git'}\n",
+        encoding="utf-8",
+    )
+    command = (
+        f'git --git-dir "{anchor_root / ".git"}" '
+        f'--work-tree "{external}" commit -m example'
+    )
+    d = guard.decide(_shell(command, tmp_path), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
 
 
 def test_shell_git_read_from_anchor_cwd_allows(tmp_path, anchor):

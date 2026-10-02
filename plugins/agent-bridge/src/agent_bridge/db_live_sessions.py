@@ -442,10 +442,9 @@ class _LiveSessionsMixin:
                 f"DELETE FROM live_sessions WHERE session_id IN ({_in(dead_ids)})",
                 tuple(dead_ids),
             )
-            self.execute_write(
-                f"DELETE FROM live_session_aliases WHERE target_session_id IN ({_in(dead_ids)}) "
-                f"OR alias_session_id IN ({_in(dead_ids)})",
-                (*dead_ids, *dead_ids),
+            self.execute_write(  # by purged target only: a rollover since may alias a dead id
+                f"DELETE FROM live_session_aliases WHERE target_session_id IN ({_in(dead_ids)})",
+                tuple(dead_ids),
             )
         return demoted
 

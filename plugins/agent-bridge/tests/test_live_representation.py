@@ -928,6 +928,21 @@ def test_an_oversized_or_reversed_mapped_span_is_rejected_before_iterating(monke
         assert retarget(span, history) == span
 
 
+def test_a_merge_replay_keeps_each_events_original_timestamp() -> None:
+    from agent_bridge.live_representation import LiveEventStore
+
+    store = LiveEventStore()
+    pred = store.get_or_create("placeholder")
+    pred.append("agent_message", {"text": "p1"}, timestamp=1000.0)
+    succ = store.get_or_create("resumed")
+    succ.append("agent_message", {"text": "s1"}, timestamp=2000.0)
+    succ.append("agent_message", {"text": "s2"}, timestamp=3000.0)
+    store.alias("placeholder", "resumed")
+    merged = store.get("resumed")
+    assert [(e.data["text"], e.timestamp) for e in merged.get_events(0)] == [
+        ("p1", 1000.0), ("s1", 2000.0), ("s2", 3000.0),
+    ]
+
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
     import pytest
 

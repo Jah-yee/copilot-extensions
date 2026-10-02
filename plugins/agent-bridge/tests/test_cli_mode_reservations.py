@@ -607,6 +607,31 @@ def test_rollover_moves_delivered_messages_so_retries_stay_idempotent(tmp_db: Da
 
 
 
+def test_a_rollover_after_the_purge_snapshot_keeps_its_alias(tmp_db: Database, monkeypatch) -> None:
+    """The reaper listed the expired placeholder, then the same process
+    re-registered as ``resumed`` before the purge ran: the new alias survives."""
+    now = time.time()
+    tmp_db.create_cli_mode_reservation("wt-R", now=now)
+    assert _register(tmp_db, "placeholder", "wt-R", now + 1, pid=4242, started=now - 600) == "live"
+    tmp_db.execute_write("UPDATE live_sessions SET status='expired' WHERE session_id='placeholder'")
+    real_read = tmp_db.execute_read
+
+    def _rollover_after_snapshot(sql, params=()):
+        rows = real_read(sql, params)
+        if "status IN ('expired', 'taken-over')" in sql:
+            rows = [{"session_id": "placeholder"}]
+            assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242,
+                             started=now - 599.5) == "live"
+        return rows
+
+    monkeypatch.setattr(tmp_db, "execute_read", _rollover_after_snapshot)
+    tmp_db.reap_stale_live_sessions(
+        now=now + 3, stale_seconds=10**9, purge_seconds=0, pid_alive=lambda _p: True,
+    )
+    monkeypatch.undo()
+    assert tmp_db.resolve_live_session_id("placeholder") == "resumed"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+
 def test_a_heartbeat_that_resolved_before_a_rename_never_reverses_it(
     tmp_db: Database, monkeypatch
 ) -> None:

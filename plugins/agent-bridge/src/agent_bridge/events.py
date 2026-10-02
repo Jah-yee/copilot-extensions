@@ -117,13 +117,16 @@ class EventLog:
             log._next_id = max_id + 1
         return log
 
-    def append(self, event_type: str, data: dict[str, Any]) -> SseEvent:
-        """Append an event and return it with its assigned ID.
+    def append(
+        self, event_type: str, data: dict[str, Any], *, timestamp: float | None = None,
+    ) -> SseEvent:
+        """Append an event and return it with its assigned ID. `timestamp`
+        keeps a replayed event's original occurrence time (default: now).
 
         Adds the event to the in-memory list and wakes SSE consumers before
         queueing the durable write, so live delivery is not blocked by SQLite.
         """
-        ts = time.time()
+        ts = time.time() if timestamp is None else timestamp
 
         with self._lock:
             event_id = self._next_id

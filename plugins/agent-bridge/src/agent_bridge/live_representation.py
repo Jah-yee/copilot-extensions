@@ -524,7 +524,7 @@ class LiveEventStore:
                     # ``merged_cursor``, which never moves back.
                     ids[evt.id] = retained[min(i, len(retained) - 1)]
                     continue
-                appended = ids[evt.id] = old.append(evt.event, evt.data).id
+                appended = ids[evt.id] = old.append(evt.event, evt.data, timestamp=evt.timestamp).id
                 if sdk:
                     with self._lock:
                         old_sdk.setdefault(sdk, []).append(appended)

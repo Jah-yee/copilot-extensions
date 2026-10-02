@@ -1146,16 +1146,19 @@ def test_ssh_target_push_uses_sibling_ssh_in_command(monkeypatch, tmp_path: Path
     )
 
 
-def test_ssh_target_push_converts_windows_source_path(monkeypatch, tmp_path: Path):
-    """push()'s local source argument must go through the same cygdrive
-    conversion as rsync_local_source -- otherwise an MSYS2/Cygwin rsync
-    misparses a native ``C:\\...`` source as a remote-host prefix and
-    rejects the command once the destination is also host-prefixed."""
-    from agent_logger.sync.targets import base
+def test_ssh_target_push_uses_converted_source_path(monkeypatch, tmp_path: Path):
+    """push() must place `rsync_local_source`'s result (not the raw source)
+    in the command -- otherwise an MSYS2/Cygwin rsync misparses a native
+    ``C:\\...`` source as a remote-host prefix and rejects the command once
+    the destination is also host-prefixed. Stubs `rsync_local_source` to a
+    sentinel so this stays independent of the conversion's own behavior
+    (that's `rsync_local_source`'s own test's job) and effective on any
+    platform/CI, not only one where `tmp_path` happens to have a drive
+    letter."""
     from agent_logger.sync.targets import ssh as ssh_mod
 
-    monkeypatch.setattr(base, "_IS_WINDOWS", True)
     monkeypatch.setattr(ssh_mod.shutil, "which", lambda _name: "rsync")
+    monkeypatch.setattr(ssh_mod, "rsync_local_source", lambda _path: "SENTINEL/")
     source = _make_source(tmp_path / "home")
 
     captured_commands: list[list[str]] = []
@@ -1172,7 +1175,36 @@ def test_ssh_target_push_converts_windows_source_path(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(ssh_mod.subprocess, "run", _fake_run)
     SshTarget({"host": "user@example", "remote_path": "/srv"}).push(source, "m1")
 
-    assert captured_commands[-1][-2] == base.rsync_local_source(source)
+    assert captured_commands[-1][-2] == "SENTINEL/"
+
+
+def test_ingest_target_push_uses_converted_source_path(monkeypatch, tmp_path: Path):
+    """Same guard as the ssh target's own test, for the ingest target:
+    push() must place `rsync_local_source`'s result (not the raw source) in
+    the command, since IngestTarget's destination is also host-prefixed
+    (``host::module/path``) and equally susceptible to the
+    both-sides-look-remote misparse."""
+    from agent_logger.sync.targets import ingest as ingest_mod
+
+    monkeypatch.setattr(ingest_mod.shutil, "which", lambda _name: "rsync")
+    monkeypatch.setattr(ingest_mod, "rsync_local_source", lambda _path: "SENTINEL/")
+    source = _make_source(tmp_path / "home")
+
+    captured_commands: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured_commands.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _fake_run)
+    IngestTarget({"url": "rsync://h/mod"}).push(source, "m1")
+
+    assert captured_commands[-1][-2] == "SENTINEL/"
 
 
 def test_ssh_executable_quoting_handles_spaces_in_path():
@@ -2044,14 +2076,63 @@ def test_rsync_local_source_converts_windows_path(monkeypatch):
     runtime build whose argument parser treats a leading drive letter plus
     colon (``C:\\...``) as a remote-host prefix -- rejecting the command
     with "source and destination cannot both be remote" once the
-    destination is also host-prefixed (the ssh/ingest targets). The local
-    source argument must be converted to the MSYS/Cygwin cygdrive form."""
+    destination is also host-prefixed (the ssh/ingest targets). Without a
+    sibling ``cygpath`` to ask authoritatively, falls back to the MSYS2
+    ``/c/...`` convention."""
     from agent_logger.sync.targets import base
 
     monkeypatch.setattr(base, "_IS_WINDOWS", True)
+    monkeypatch.setattr(base, "_sibling_cygpath", lambda: None)
     assert (
-        base.rsync_local_source(Path(r"C:\Users\tmichon\.copilot"))
-        == "/c/Users/tmichon/.copilot/"
+        base.rsync_local_source(Path(r"C:\Users\someuser\.copilot"))
+        == "/c/Users/someuser/.copilot/"
+    )
+
+
+def test_rsync_local_source_uses_sibling_cygpath_when_available(monkeypatch):
+    """A sibling ``cygpath`` (same runtime as the resolved rsync -- Cygwin or
+    MSYS2) knows its own drive-mount convention authoritatively; it must be
+    preferred over the hard-coded MSYS2 fallback, since Cygwin's default
+    ``/cygdrive/c/...`` differs from MSYS2's ``/c/...``."""
+    from agent_logger.sync.targets import base
+
+    monkeypatch.setattr(base, "_IS_WINDOWS", True)
+    monkeypatch.setattr(base, "_sibling_cygpath", lambda: "cygpath.exe")
+
+    class _Proc:
+        returncode = 0
+        stdout = "/cygdrive/c/Users/someuser/.copilot\n"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        assert cmd[0] == "cygpath.exe"
+        assert cmd[1] == "-u"
+        return _Proc()
+
+    monkeypatch.setattr(base.subprocess, "run", _fake_run)
+    assert (
+        base.rsync_local_source(Path(r"C:\Users\someuser\.copilot"))
+        == "/cygdrive/c/Users/someuser/.copilot/"
+    )
+
+
+def test_rsync_local_source_falls_back_when_cygpath_fails(monkeypatch):
+    """A sibling cygpath that errors or times out must not abort the push --
+    fall back to the MSYS2 convention rather than propagate the failure."""
+    from agent_logger.sync.targets import base
+
+    monkeypatch.setattr(base, "_IS_WINDOWS", True)
+    monkeypatch.setattr(base, "_sibling_cygpath", lambda: "cygpath.exe")
+
+    class _FailedProc:
+        returncode = 1
+        stdout = ""
+        stderr = "cygpath: error"
+
+    monkeypatch.setattr(base.subprocess, "run", lambda cmd, **kwargs: _FailedProc())
+    assert (
+        base.rsync_local_source(Path(r"C:\Users\someuser\.copilot"))
+        == "/c/Users/someuser/.copilot/"
     )
 
 
@@ -2064,8 +2145,8 @@ def test_rsync_local_source_is_noop_on_posix(monkeypatch):
     from agent_logger.sync.targets import base
 
     monkeypatch.setattr(base, "_IS_WINDOWS", False)
-    assert base.rsync_local_source(Path("/home/tmichon/.copilot")) == (
-        "/home/tmichon/.copilot/"
+    assert base.rsync_local_source(Path("/home/someuser/.copilot")) == (
+        "/home/someuser/.copilot/"
     )
 
 

@@ -20,6 +20,8 @@ Concrete targets:
 from __future__ import annotations
 
 import platform
+import shutil
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,26 +41,69 @@ _IS_WINDOWS = platform.system() == "Windows"
 NO_WINDOW_KWARGS: dict = no_window_kwargs()
 
 
+def _sibling_cygpath() -> str | None:
+    """A ``cygpath.exe`` installed alongside the resolved ``rsync``, if any.
+
+    MSYS2 and Cygwin map a Windows drive letter to a POSIX path under
+    *different* prefixes by default (MSYS2: ``/c/...``; Cygwin:
+    ``/cygdrive/c/...``, itself configurable). Each runtime ships its own
+    ``cygpath`` that knows its own convention authoritatively, so asking the
+    rsync-adjacent one (same bin directory, hence same runtime -- the same
+    reasoning ``_ssh_executable`` in ``targets/ssh.py`` already applies)
+    avoids hard-coding either convention.
+    """
+    rsync_path = shutil.which("rsync")
+    if not rsync_path:
+        return None
+    sibling = Path(rsync_path).with_name("cygpath.exe")
+    return str(sibling) if sibling.is_file() else None
+
+
 def rsync_local_source(path: Path) -> str:
     """The local *source* path argument for an rsync command line.
 
-    On Windows, the only generally-available ``rsync`` is an MSYS2/Cygwin-
-    runtime build whose argument parser treats a leading drive letter plus
-    colon (``C:\\...``) as a ``[user@]host:path`` remote-host prefix --
+    On Windows, the only generally-available ``rsync`` is an MSYS2- or
+    Cygwin-runtime build whose argument parser treats a leading drive letter
+    plus colon (``C:\\...``) as a ``[user@]host:path`` remote-host prefix --
     rejecting the command with "source and destination cannot both be
     remote" once the destination argument is *also* host-prefixed (the
-    ``ssh``/``ingest`` targets). Converting to the MSYS/Cygwin ``/c/...``
-    ("cygdrive") form sidesteps the misparse entirely. A no-op on POSIX,
-    which has no drive letters to begin with.
+    ``ssh``/``ingest`` targets). Converting to that runtime's own POSIX path
+    form sidesteps the misparse entirely. A no-op on POSIX, which has no
+    drive letters to begin with.
+
+    Prefers the sibling ``cygpath.exe`` (same runtime as the resolved
+    ``rsync``) to perform the conversion authoritatively; falls back to the
+    MSYS2 ``/c/...`` convention when no sibling ``cygpath`` is found (e.g. an
+    unusual rsync distribution with no bundled ``cygpath``) -- the common
+    case in practice, since MSYS2 is the only generally-available Windows
+    rsync today.
 
     Always trailing-slash'd, matching rsync's own "copy the CONTENTS of
     this directory" convention that every caller here relies on.
     """
     text = str(path)
     if _IS_WINDOWS and len(text) >= 2 and text[1] == ":":
-        drive = text[0].lower()
-        rest = text[2:].replace("\\", "/")
-        text = f"/{drive}{rest}"
+        cygpath = _sibling_cygpath()
+        converted = None
+        if cygpath:
+            try:
+                proc = subprocess.run(
+                    [cygpath, "-u", text],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    **NO_WINDOW_KWARGS,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    converted = proc.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                converted = None
+        if converted is None:
+            drive = text[0].lower()
+            rest = text[2:].replace("\\", "/")
+            converted = f"/{drive}{rest}"
+        text = converted
     return text.rstrip("/") + "/"
 
 

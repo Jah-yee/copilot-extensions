@@ -592,6 +592,19 @@ def test_rollover_needs_the_same_known_pid(tmp_db: Database, pred_pid, succ_pid)
     assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
 
 
+def test_an_alias_heartbeat_without_a_pid_keeps_the_successors_pid(tmp_db: Database) -> None:
+    """A late heartbeat through the retired id that omits its pid must not clear
+    the successor's known pid, or its next rollover can't inherit the claim."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    assert _register(tmp_db, "placeholder", "wt-R", now + 3, pid=None) == "live"
+    assert tmp_db.get_live_session("resumed")["pid"] == 4242
+    assert _register(tmp_db, "resumed-again", "wt-R", now + 4, pid=4242) == "live"
+    assert tmp_db.get_live_session("resumed-again")["cli_mode"] == 1
+    assert tmp_db.get_live_session("resumed")["session_id"] == "resumed-again"
+
+
 def test_rollover_moves_delivered_messages_so_retries_stay_idempotent(tmp_db: Database) -> None:
     now = time.time()
     _claimed_placeholder(tmp_db, now)

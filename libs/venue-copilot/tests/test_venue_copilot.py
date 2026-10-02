@@ -674,6 +674,46 @@ class TestDetachedRunner:
         assert adapter.keeper_stopped is False
         assert not any("tmux kill-session" in command for kind, command in adapter.calls if kind == "run")
 
+    @pytest.mark.parametrize("reason", ["enter-failed", "seed-not-echoed"])
+    def test_a_typed_but_unsubmitted_seed_is_never_resent(self, monkeypatch, reason) -> None:
+        """The draft may still sit in Copilot's input: a bridge copy could run the
+        task twice, so the launch keeps the session and reports the seed failed."""
+        from venue_copilot import detached, refs
+
+        adapter = _Adapter({"ok": True, "created": True, "seeded": True,
+                            "seed_submitted": False, "seed_reason": reason})
+        sent = []
+        monkeypatch.setattr("venue_copilot.detached.resolve_daemon_port", lambda: 41234)
+        monkeypatch.setattr("venue_copilot.detached.resolve_local_auth_token", lambda: "tok")
+        monkeypatch.setattr(
+            "venue_copilot.detached.reserve_with_retry",
+            lambda scope, venue, **kw: {"reservation_id": "r1"},
+        )
+        monkeypatch.setattr("venue_copilot.detached.await_claim", lambda scope, rid, timeout: "sid-42")
+        monkeypatch.setattr(refs, "deliver_note", lambda *a, **k: sent.append(a) or True)
+        monkeypatch.setattr("venue_copilot.detached.release_cli_mode", lambda *a, **k: 1)
+
+        rc, payload = detached.launch_detached(
+            adapter, self._plan(), seed="do it", driver="d", copilot_args=[],
+            ensure_mux=True, register_timeout=0.0, progress=lambda *a: None,
+        )
+
+        assert rc == 0 and payload["session_id"] == "sid-42"
+        assert payload["seed_delivery"] == "failed"
+        assert payload["seeded"] is False
+        assert sent == []
+        assert adapter.keeper_stopped is False
+
+    def test_seed_outcome_matrix(self) -> None:
+        from venue_copilot import seed_outcome
+
+        assert seed_outcome({"seed_submitted": True}, created=True, seed="s") == ("typed", False)
+        assert seed_outcome({"seeded": True}, created=True, seed="s") == ("failed", False)
+        assert seed_outcome({"seeded": False}, created=True, seed="s") == (None, True)
+        assert seed_outcome({}, created=True, seed="s") == (None, True)
+        assert seed_outcome({}, created=False, seed="s") == (None, False)
+        assert seed_outcome({}, created=True, seed=None) == (None, False)
+
     def test_unsubmitted_seed_without_registration_stops_created_session(self, monkeypatch) -> None:
         from venue_copilot import detached
 

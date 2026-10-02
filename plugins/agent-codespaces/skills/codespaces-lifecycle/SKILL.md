@@ -235,7 +235,10 @@ succeeds once the session is registered with the host bridge. If the launch
 created a session but Copilot did not reach a confirmed input prompt in time,
 the command keeps the live session and delivers the seed over the existing
 host bridge's message lane; the JSON reports `seed_delivery: "bridge"` (or
-`"failed"` if that follow-up message could not be sent). Only a created session
+`"failed"` if that follow-up message could not be sent). A seed that was typed
+but not submitted (e.g. Enter failed) is never resent, since its draft may still
+be in Copilot's input: the session is kept and `seed_delivery` is `"failed"`.
+Only a created session
 that never registers is treated as unrepresented: the failure reports the screen
 (`pane_tail`) and stops what it started. `--register-timeout` covers the host
 bridge claim wait; the venue-side prompt wait can slide while Copilot is visibly

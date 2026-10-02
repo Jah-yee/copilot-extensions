@@ -56,6 +56,24 @@ def may_switch_session_id(copilot_args: list[str]) -> bool:
     """Whether these Copilot args resume a conversation (so its id can change)."""
     return any(a.split("=", 1)[0] in RESUME_SELECTORS for a in copilot_args)
 
+
+def seed_outcome(embodied: dict, *, created: bool, seed: str | None) -> tuple[str | None, bool]:
+    """How a launcher follows up a venue's typed seed: ``(status, bridge_send)``.
+
+    ``"typed"`` when it was submitted. When it was never typed into the pane
+    (``seeded`` false), ``bridge_send`` asks the caller to deliver it over the
+    bridge. When it was typed but not submitted (e.g. ``enter-failed``), the
+    draft may still sit in Copilot's input, so a bridge copy could run the task
+    twice: it reports ``"failed"`` and sends nothing.
+    """
+    if not (created and seed):
+        return None, False
+    if embodied.get("seed_submitted"):
+        return "typed", False
+    if embodied.get("seeded"):
+        return "failed", False
+    return None, True
+
 # The daemon's own config dir, matching agent-bridge's ``effective_config_dir()``
 # default -- overridable the same way, via ``AGENT_BRIDGE_CONFIG_DIR``.
 _DEFAULT_BRIDGE_CONFIG_DIR = (

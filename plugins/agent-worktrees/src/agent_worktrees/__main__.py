@@ -1161,6 +1161,15 @@ def _worktree_to_dict(
     if registered_sessions is not None:
         d["session_count"] = len(registered_sessions)
     head_session = getattr(rec, "resolved_head_session", None)
+    if not head_session:
+        # A head that yielded to a handoff no successor linked here (e.g. one
+        # consumed from another checkout) is still this worktree's resumable
+        # session; omitting it makes a Resume start a blank session instead.
+        latest = getattr(rec, "replayed_head_transition", None)
+        entry = rec.session_entry(latest.session_id) if latest and latest.session_id else None
+        if entry is not None and entry.state == "yielded":
+            head_session = latest.session_id
+            d["head_yielded"] = True
     if head_session:
         d["last_session_id"] = head_session
     if rec.execution_leg_opaque or rec.session_backend_opaque:

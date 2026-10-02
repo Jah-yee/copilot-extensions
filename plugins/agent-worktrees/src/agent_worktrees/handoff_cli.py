@@ -400,7 +400,7 @@ def cmd_embody(args: argparse.Namespace) -> int:
         pending_seed_result = {}
         if claimed:
             pending_seed_result = sessions.mux_seed_pane(
-                copilot_pane, claimed,
+                copilot_pane, claimed, session_name=sessions.mux_session_name(wt_id),
                 ready_timeout=getattr(args, "seed_ready_timeout", None) or 180.0,
             )
             if not pending_seed_result.get("ok"):
@@ -545,7 +545,8 @@ def cmd_embody(args: argparse.Namespace) -> int:
     # a slow-loading autopilot is still driven autonomously.
     seed_ready_timeout = getattr(args, "seed_ready_timeout", None) or 180.0
     seed_result = (
-        sessions.mux_seed_pane(new_pane, seed, ready_timeout=seed_ready_timeout)
+        sessions.mux_seed_pane(new_pane, seed, session_name=result.get("session"),
+                               ready_timeout=seed_ready_timeout)
         if (new_pane and seed)
         else {}
     )
@@ -707,7 +708,8 @@ def _cmd_embody_anchor(args: argparse.Namespace, config: cfg.Config) -> int:
     new_pane = result.get("new_pane")
     seed_ready_timeout = getattr(args, "seed_ready_timeout", None) or 180.0
     seed_result = (
-        sessions.mux_seed_pane(new_pane, seed, ready_timeout=seed_ready_timeout)
+        sessions.mux_seed_pane(new_pane, seed, session_name=result.get("session"),
+                               ready_timeout=seed_ready_timeout)
         if (new_pane and seed)
         else {}
     )

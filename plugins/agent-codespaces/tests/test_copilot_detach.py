@@ -198,6 +198,23 @@ def test_seed_never_submitted_but_registered_is_delivered_over_bridge(seams, mon
     assert seams.release_res == [("anchor-example-web@cs-1", "r1")]
 
 
+def test_a_typed_but_unsubmitted_seed_is_not_resent_over_bridge(seams, monkeypatch, capsys):
+    """An echo-confirmed draft may still be in Copilot's input; a bridge copy
+    could run the task twice, so the session is kept and the seed reported failed."""
+    from venue_copilot import refs as venue_refs
+
+    sent = []
+    monkeypatch.setattr(venue_refs, "deliver_note", lambda *a, **k: sent.append(a) or True)
+    drafted = json.dumps({"ok": True, "created": True, "seeded": True, "seed_submitted": False,
+                          "seed_reason": "enter-failed"})
+    rc = detach.cmd_detach(_args(), ssh_session=_ssh(seams, stdout=drafted))
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["seed_delivery"] == "failed" and out["seeded"] is False
+    assert out["session_id"] == "sid-42" and seams.releases == []
+    assert sent == []
+
+
 @pytest.mark.parametrize("daemon_has_aliases", [True, False])
 def test_a_resumed_seed_needs_a_daemon_that_follows_renames(
     seams, monkeypatch, capsys, daemon_has_aliases,

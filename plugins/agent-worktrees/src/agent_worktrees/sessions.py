@@ -2093,6 +2093,7 @@ def mux_seed_pane(
     pane_id: str,
     seed: str,
     *,
+    session_name: str | None = None,
     mux: str | None = None,
     ready_timeout: float = 20.0,
     hard_timeout: float = 900.0,
@@ -2115,14 +2116,19 @@ def mux_seed_pane(
     import subprocess
     import time
 
-    from . import pane_nudges, pane_readiness
+    from . import pane_nudges, pane_readiness, sessions_pane_retire
 
     mux_bin = _mux_bin(mux)
+    # Session-qualified: psmux numbers %N per session, so a bare id can hit another session's Copilot.
+    target = sessions_pane_retire._mux_qualified_pane_target(pane_id, mux_bin, session_name=session_name)
+    if not target:
+        return {"ok": False, "pane": pane_id, "ready": False, "sent": False, "submitted": False,
+                "reason": "pane-target-unresolved"}
 
     def _cap() -> str:
         try:
             r = subprocess.run(
-                [mux_bin, "capture-pane", "-p", "-t", pane_id],
+                [mux_bin, "capture-pane", "-p", "-t", target],
                 capture_output=True, text=True, timeout=5, encoding="utf-8", errors="replace",
             )
             return (r.stdout or "") if r.returncode == 0 else ""
@@ -2152,7 +2158,7 @@ def mux_seed_pane(
                 break
         elif not dismissed_nudge and pane_nudges.is_desktop_app_nudge(cap):
             dismissed_nudge, stable, last_ready_sig = True, 0, None
-            pane_nudges.dismiss(mux_bin, pane_id)
+            pane_nudges.dismiss(mux_bin, target)
         else:
             stable, last_ready_sig = 0, None
         if (pane_readiness.is_busy(region) or region != last_region) and idle_window > 0:
@@ -2164,17 +2170,12 @@ def mux_seed_pane(
     # blind keystrokes into a half-loaded TUI or a fallback shell could execute a
     # mistyped command. Degrade to "landed unseeded" (the operator can paste).
     if not ready:
-        return {
-            "ok": False, "pane": pane_id, "ready": False,
-            "sent": False, "submitted": False, "reason": "not-ready-timeout",
-        }
+        return {"ok": False, "pane": pane_id, "ready": False, "sent": False, "submitted": False,
+                "reason": "not-ready-timeout"}
 
     def _send(*a: str) -> bool:
         try:
-            r = subprocess.run(
-                [mux_bin, "send-keys", "-t", pane_id, *a],
-                capture_output=True, timeout=5,
-            )
+            r = subprocess.run([mux_bin, "send-keys", "-t", target, *a], capture_output=True, timeout=5)
             return r.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False

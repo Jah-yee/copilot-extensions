@@ -64,6 +64,31 @@ def _resolve_prompt(args: argparse.Namespace, *, required: bool) -> str | None:
     return None
 
 
+def _hold_protocol_floor(client: Any, floor: int) -> None:
+    """Keep ``--min-daemon-protocol`` true across the client's failover.
+
+    The preflight checks only the daemon it first reached; a connection
+    refusal makes the client follow the routing table to a replacement and
+    retry there. Probe each replacement first and refuse (426) one below the
+    floor, so an older daemon can never accept a message the floor exists for.
+    """
+    from .client import BridgeClient, BridgeClientError
+
+    resolve = getattr(client, "_reresolve", None)
+    if resolve is None:
+        return
+
+    def _checked() -> str | None:
+        base = resolve()
+        if base and base.rstrip("/") != client._base and not BridgeClient(
+                base, client._token, timeout=10, connect_grace=0.0).daemon_supports(floor):
+            raise BridgeClientError(426, f"the replacement bridge daemon at {base} predates "
+                                         f"protocol {floor}; not retrying the send there")
+        return base
+
+    client._reresolve = _checked
+
+
 def _companion_seed_prompt(prompt: str | None) -> str | None:
     text = (prompt or "").strip()
     if not text:
@@ -89,6 +114,8 @@ def _cmd_send(args: argparse.Namespace) -> None:
         print(f"[FAIL] The running bridge daemon predates protocol {min_protocol}; "
               "update agent-bridge, restart its daemon, then send again.", file=sys.stderr)
         sys.exit(3)
+    if min_protocol:
+        _hold_protocol_floor(client, min_protocol)
     target = args.target
     prompt = _resolve_prompt(args, required=True)
 

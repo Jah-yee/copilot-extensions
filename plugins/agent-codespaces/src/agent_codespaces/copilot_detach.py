@@ -558,11 +558,12 @@ def cmd_detach(
             plan["mux_session"] = actual_mux
             plan["venue"]["mux_session_name"] = actual_mux
             owner.hold(args.name, plan["tenant"], daemon_port=daemon_port, mux_session=actual_mux)
-        seed_delivery_status = None
-        seed_typed = bool(created and seed and embodied.get("seed_submitted"))
-        seed_needs_bridge = bool(created and seed and not embodied.get("seed_submitted"))
-        if seed_typed:
-            seed_delivery_status = "typed"
+        from venue_copilot import seed_outcome
+
+        seed_delivery_status, seed_needs_bridge = seed_outcome(embodied, created=created, seed=seed)
+        if seed_delivery_status == "failed":
+            _progress("seed-draft", f"typed seed was not submitted ({embodied.get('seed_reason')}); "
+                      "not resending: the draft may remain in Copilot's input")
         # A lost earlier attempt may have created (and maybe seeded) the session
         # this rejoin found: its seed's fate is unknown, so never resend it
         # blindly nor report it seeded.
@@ -584,8 +585,8 @@ def cmd_detach(
             from venue_copilot.refs import deliver_note
 
             reason = embodied.get("seed_reason")
-            detail = f"typed seed was not submitted ({reason}); delivering over bridge" if reason else (
-                "typed seed was not submitted; delivering over bridge"
+            detail = f"seed was never typed ({reason}); delivering over bridge" if reason else (
+                "seed was never typed; delivering over bridge"
             )
             _progress("seed-bridge", detail)
             # A resume can re-register under a new id after the claim; only a

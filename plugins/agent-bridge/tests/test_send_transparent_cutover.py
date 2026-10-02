@@ -126,6 +126,48 @@ def test_send_with_a_protocol_floor_sends_nothing_to_an_older_daemon(monkeypatch
     assert "predates protocol 20" in capsys.readouterr().err
 
 
+def test_a_protocol_floor_also_holds_for_the_replacement_daemon(monkeypatch):
+    """The preflight passed on a protocol-20 daemon, but its port then refused the
+    delivery; the routing table names a protocol-19 replacement. The send must
+    not be retried there (it couldn't carry the message across a rename)."""
+    import pytest
+
+    from agent_bridge.client import BridgeClientError
+
+    old_base, new_base = "http://127.0.0.1:57585", "http://127.0.0.1:47000"
+    client = BridgeClient(old_base, "tok", connect_grace=2.0, reresolve=lambda: new_base)
+    posted: list[str] = []
+
+    def by_port(req, timeout=None):
+        if req.full_url.endswith("/health"):
+            version = 20 if req.full_url.startswith(old_base) else 19
+            return _FakeResp({"status": "ok", "protocol_version": version,
+                              "min_protocol_version": 1})
+        if req.full_url.endswith("/api/v1/live-sessions/resolve?handle=agent-x"):
+            return _FakeResp({"session_id": "sess1", "status": "idle"})
+        posted.append(req.full_url)
+        if req.full_url.startswith(old_base):
+            raise urllib.error.URLError(ConnectionRefusedError("refused"))
+        return _FakeResp({"message_id": "m1", "replied": False})
+
+    monkeypatch.setattr("agent_bridge.client.urllib.request.urlopen", by_port)
+    monkeypatch.setattr(m, "_get_client", lambda: client)
+    monkeypatch.setattr(m, "_live_sender_label", lambda _args: "caller-A")
+    monkeypatch.setattr(m, "_live_reply_to", lambda _args: None)
+    monkeypatch.setattr(m, "_live_message_kind", lambda _args: "prompt")
+    monkeypatch.setattr(m, "_live_message_delivery", lambda _args: "queue")
+    args = argparse.Namespace(
+        target="agent-x", prompt="hello", prompt_file=None, new=False, json=False,
+        no_wait=True, reply_timeout=120.0, idempotency_key=None, expected_session_id=None,
+        min_daemon_protocol=20,
+    )
+
+    with pytest.raises(BridgeClientError) as exc:
+        m._cmd_send(args)
+    assert exc.value.status == 426
+    assert posted == [f"{old_base}/api/v1/live-sessions/sess1/messages"]  # never the replacement
+
+
 def _expected_session_send(monkeypatch, resolved: dict, expected: str):
     from agent_bridge import session_targeting_cli as stc
 

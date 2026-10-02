@@ -1275,10 +1275,40 @@ def _run_seed(driver, seed="Continue: build multi-account effort"):
     with patch("subprocess.run", side_effect=driver.run), \
          patch("time.sleep"), \
          patch("time.monotonic", side_effect=_Clock()), \
-         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"):
+         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"), \
+         patch("agent_worktrees.sessions_pane_retire._mux_qualified_pane_target",
+               return_value="=wt-x:0.0"):
         return mux_seed_pane(
-            "%9", seed, ready_timeout=100.0, poll_interval=0.0, settle=0.0,
+            "%9", seed, session_name="wt-x", ready_timeout=100.0, poll_interval=0.0, settle=0.0,
         )
+
+
+def test_seed_targets_the_pane_inside_its_own_session_only():
+    """psmux numbers ``%N`` per session: a bare ``-t %1`` typed one worktree's
+    seed into another worktree's live Copilot. Every capture/keystroke must use
+    the session-qualified target, and an unresolvable pane is never typed into."""
+    seen: list[tuple[str, str]] = []
+    ready = "press esc to interrupt"
+    driver = _SeedDriver(ready_caps=[ready, ready], echo_caps=[f"{ready}\nContinue: build"])
+
+    def _run(argv, **kw):
+        seen.append((argv[1], argv[argv.index("-t") + 1]))
+        return driver.run(argv, **kw)
+
+    with patch("subprocess.run", side_effect=_run), patch("time.sleep"), \
+         patch("time.monotonic", side_effect=_Clock()), \
+         patch("agent_worktrees.sessions._mux_bin", return_value="psmux"), \
+         patch("agent_worktrees.sessions_pane_retire._mux_qualified_pane_target",
+               side_effect=lambda pane, mux, session_name=None: (
+                   "wt-new:0.0" if (pane, session_name) == ("%1", "wt-new") else None)):
+        ok = mux_seed_pane("%1", "Continue: build", session_name="wt-new",
+                           ready_timeout=100.0, poll_interval=0.0, settle=0.0)
+        missing = mux_seed_pane("%1", "Continue: build", session_name="wt-other",
+                                ready_timeout=100.0, poll_interval=0.0, settle=0.0)
+    assert ok["submitted"] is True
+    assert seen and all(target == "wt-new:0.0" for _verb, target in seen)
+    assert missing["reason"] == "pane-target-unresolved" and missing["sent"] is False
+    assert len(seen) == len([s for s in seen if s[1] == "wt-new:0.0"])  # nothing sent for wt-other
 
 
 def test_seed_pane_not_ready_never_submits():
@@ -1979,7 +2009,9 @@ def test_seed_readiness_never_outlasts_the_hard_cap():
     with patch("subprocess.run", side_effect=driver.run), \
          patch("time.sleep"), \
          patch("time.monotonic", side_effect=_Clock()), \
-         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"):
+         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"), \
+         patch("agent_worktrees.sessions_pane_retire._mux_qualified_pane_target",
+               return_value="=wt-x:0.0"):
         result = mux_seed_pane(
             "%9", "seed", ready_timeout=1000.0, hard_timeout=100.0,
             poll_interval=0.0, settle=0.0,

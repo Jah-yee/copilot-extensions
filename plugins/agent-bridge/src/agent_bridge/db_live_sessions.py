@@ -88,7 +88,7 @@ class _LiveSessionsMixin:
             "ON CONFLICT(session_id) DO UPDATE SET "
             "machine=excluded.machine, cwd=excluded.cwd, "
             "worktree_id=excluded.worktree_id, repo=excluded.repo, "
-            "branch=excluded.branch, pid=excluded.pid, role=excluded.role, "
+            "branch=excluded.branch, pid=COALESCE(excluded.pid, live_sessions.pid), role=excluded.role, "
             "driven_by=COALESCE(excluded.driven_by, live_sessions.driven_by), "
             "venue=COALESCE(excluded.venue, live_sessions.venue), process_started_at="
             "COALESCE(excluded.process_started_at, live_sessions.process_started_at), "

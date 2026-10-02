@@ -283,8 +283,8 @@ def test_shell_git_repeated_dashC_uses_only_final_directory(tmp_path, anchor):
 @pytest.mark.parametrize(
     "option",
     [
-        '--git-dir "{}\\.git"',
-        '--git-dir="{}\\.git"',
+        '--git-dir "{}/.git"',
+        '--git-dir="{}/.git"',
         '--work-tree "{}"',
         '--work-tree="{}"',
     ],
@@ -390,6 +390,23 @@ def test_shell_git_pull_with_ff_only_argument_text_denies(
     d = guard.decide(_shell(command, gp), env={}, home=tmp_path,
                      anchors=anchor)
     assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_pull_last_no_ff_mode_denies(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    d = guard.decide(
+        _shell("git pull --ff-only --no-ff origin main", gp),
+        env={}, home=tmp_path, anchors=anchor,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_pull_last_ff_only_mode_allows(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    assert guard.decide(
+        _shell("git pull --no-ff --ff-only origin main", gp),
+        env={}, home=tmp_path, anchors=anchor,
+    ) is None
 
 
 def test_shell_git_commit_with_pull_ff_only_in_message_denies(

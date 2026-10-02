@@ -296,13 +296,15 @@ def _git_invocation(
     return None, [], targets, has_repo_override
 
 
-def _git_has_option(args: list[str], option: str) -> bool:
+def _git_effective_ff_mode(args: list[str]) -> str | None:
+    mode = None
     for arg in args:
         if arg == "--":
-            return False
-        if arg.lower() == option:
-            return True
-    return False
+            break
+        lower = arg.lower()
+        if lower in {"--ff", "--no-ff", "--ff-only"}:
+            mode = lower
+    return mode
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An
@@ -637,7 +639,11 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         # segment also explicitly carries ``--ff-only``. Any other write-sub
         # verb (or a pull lacking that flag) is untouched.
         is_pull = subcmd == "pull"
-        if git_write and is_pull and _git_has_option(git_args, "--ff-only"):
+        if (
+            git_write
+            and is_pull
+            and _git_effective_ff_mode(git_args) == "--ff-only"
+        ):
             git_write = False
         for a in anchors:
             gp = a.get("path")

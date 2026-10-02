@@ -331,6 +331,26 @@ def test_shell_git_empty_dashC_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize("suffix", ["%literal", "$literal"])
+def test_shell_git_quoted_literal_expansion_character_path_denies(
+    tmp_path, anchor, suffix,
+):
+    literal = _main_checkout(tmp_path, f"anchor{suffix}")
+    anchors = [*anchor, {"name": "literal", "path": str(literal)}]
+    d = guard.decide(
+        _shell(f"git -C '{literal}' commit -m example", tmp_path),
+        env={}, home=tmp_path, anchors=anchors,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_unresolved_dashC_variable_still_allows(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    command = f"$repo='{gp}'; git -C $repo commit -m example"
+    assert guard.decide(_shell(command, tmp_path), env={},
+                        home=tmp_path, anchors=anchor) is None
+
+
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell backslash separator")
 def test_powershell_git_dashC_trailing_separator_denies(tmp_path, anchor):
     gp = anchor[0]["path"]

@@ -301,15 +301,14 @@ def _git_invocation(
             has_repo_override = True
             if index + 1 < len(tokens):
                 value = tokens[index + 1]
-                if "$" not in value and "%" not in value:
-                    git_cwd = _resolve(value, git_cwd)
-                    git_cwd_overridden = True
+                git_cwd = _resolve(value, git_cwd)
+                git_cwd_overridden = True
             index += 2
             continue
         if token.startswith("-C") and token != "-C":
             has_repo_override = True
             value = _unquote_shell_token(token[2:])
-            if value and "$" not in value and "%" not in value:
+            if value:
                 git_cwd = _resolve(value, git_cwd)
                 git_cwd_overridden = True
             index += 1
@@ -331,8 +330,7 @@ def _git_invocation(
             has_repo_override = has_repo_override or lower == "--git-dir"
             if index + 1 < len(tokens):
                 value = tokens[index + 1]
-                if "$" not in value and "%" not in value:
-                    targets[lower[2:]] = _resolve(value, git_cwd)
+                targets[lower[2:]] = _resolve(value, git_cwd)
             index += 2
             continue
         matched_target = False
@@ -340,7 +338,7 @@ def _git_invocation(
             if lower.startswith(option + "="):
                 has_repo_override = has_repo_override or option == "--git-dir"
                 value = _unquote_shell_token(token.split("=", 1)[1])
-                if value and "$" not in value and "%" not in value:
+                if value:
                     targets[option[2:]] = _resolve(value, git_cwd)
                 matched_target = True
                 break

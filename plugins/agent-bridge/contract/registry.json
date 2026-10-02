@@ -73,7 +73,7 @@
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/models.py",
-          "sha256": "809eff80e98150bd2f994938602f3a3193990bb41f569f64a6c319c0d1d9a00f",
+          "sha256": "9a006111162f17555f50d4400bb01dc5097ce49cc1049adb03c3c120cc671de8",
           "semantic": false,
           "non_semantic_reason": "Live-message request/response models gained an optional delivery urgency field, and the live-session registration request an optional process_started_at; the representative session-create wire shape is unchanged."
         },

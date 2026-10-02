@@ -62,6 +62,10 @@ def shell_segments(cmd: str, tool: str) -> list[str]:
                 and cmd.startswith("$(", index)
             )
             or (
+                powershell_escapes
+                and cmd.startswith("@(", index)
+            )
+            or (
                 posix_escapes
                 and (
                     cmd.startswith("<(", index)
@@ -141,6 +145,10 @@ def shell_command_substitutions(seg: str, tool: str) -> list[str]:
             and (
                 seg.startswith("$(", index)
                 or (
+                    lower_tool in {"powershell", "pwsh"}
+                    and seg.startswith("@(", index)
+                )
+                or (
                     lower_tool in {"bash", "sh"}
                     and (
                         seg.startswith("<(", index)
@@ -167,7 +175,16 @@ def shell_command_substitutions(seg: str, tool: str) -> list[str]:
                     inner_quote = None if inner_quote == "'" else "'"
                 elif current == '"' and inner_quote != "'":
                     inner_quote = None if inner_quote == '"' else '"'
-                elif inner_quote != "'" and seg.startswith("$(", cursor):
+                elif (
+                    inner_quote != "'"
+                    and (
+                        seg.startswith("$(", cursor)
+                        or (
+                            lower_tool in {"powershell", "pwsh"}
+                            and seg.startswith("@(", cursor)
+                        )
+                    )
+                ):
                     depth += 1
                     cursor += 1
                 elif inner_quote is None:

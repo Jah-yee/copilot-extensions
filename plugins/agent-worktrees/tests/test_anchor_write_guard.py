@@ -435,6 +435,24 @@ def test_powershell_git_command_substitution_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+def test_powershell_git_array_subexpression_from_anchor_denies(
+    tmp_path, anchor,
+):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(gp),
+        "toolArgs": {
+            "command": (
+                "Write-Output @(git commit --allow-empty -m example; "
+                "Write-Output ok)"
+            )
+        },
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_cmd_apostrophe_does_not_quote_separator(tmp_path, anchor):
     gp = anchor[0]["path"]
     payload = {

@@ -144,6 +144,7 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({
     "clean", "rm", "mv", "stash", "merge", "rebase", "pull", "cherry-pick",
     "revert", "init", "__configured-alias__",
 })
+_GIT_READ_ONLY_DASHED_SUBCOMMANDS = frozenset({"merge-base"})
 _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
     "--namespace", "--super-prefix",
 })
@@ -196,6 +197,7 @@ def _unquote_shell_token(token: str) -> str:
 
 def _git_tokens(seg: str, tool: str) -> list[str]:
     posix_escapes = tool.lower() in {"bash", "sh"}
+    powershell_escapes = tool.lower() in {"powershell", "pwsh"}
     tokens: list[str] = []
     current: list[str] = []
     quote = None
@@ -214,6 +216,14 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
             ):
                 current.append(seg[index + 1])
                 index += 1
+            elif (
+                powershell_escapes
+                and quote == '"'
+                and char == "`"
+                and index + 1 < len(seg)
+            ):
+                current.append(seg[index + 1])
+                index += 1
             else:
                 current.append(char)
         elif char in {"'", '"'}:
@@ -228,6 +238,9 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
             and index + 1 < len(seg)
             and (seg[index + 1].isspace() or seg[index + 1] in {"'", '"', "\\"})
         ):
+            current.append(seg[index + 1])
+            index += 1
+        elif powershell_escapes and char == "`" and index + 1 < len(seg):
             current.append(seg[index + 1])
             index += 1
         else:
@@ -376,6 +389,15 @@ def _git_effective_ff_mode(args: list[str]) -> str | None:
         if lower in {"--ff", "--no-ff", "--ff-only"}:
             mode = lower
     return mode
+
+
+def _git_subcommand_is_write(subcommand: str | None) -> bool:
+    if not subcommand or subcommand in _GIT_READ_ONLY_DASHED_SUBCOMMANDS:
+        return False
+    if subcommand in _GIT_WRITE_SUBCOMMANDS:
+        return True
+    prefix, separator, _suffix = subcommand.partition("-")
+    return bool(separator and prefix in _GIT_WRITE_SUBCOMMANDS)
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An
@@ -705,7 +727,7 @@ def _shell_hit(
             _git_invocation(eff, eff_cwd, tool)
             if is_git else (None, [], [], False)
         )
-        git_write = subcmd in _GIT_WRITE_SUBCOMMANDS
+        git_write = _git_subcommand_is_write(subcmd)
         # A ``pull`` invocation is exempt from ``git_write`` ONLY when its
         # actual SUBCOMMAND (not merely the word ``pull`` anywhere in the
         # segment) is ``pull`` and the

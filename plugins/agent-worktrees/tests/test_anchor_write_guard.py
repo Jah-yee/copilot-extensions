@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import time
 from pathlib import Path
 
@@ -187,6 +188,22 @@ def test_shell_git_merge_base_from_anchor_cwd_allows(tmp_path, anchor):
                         env={}, home=tmp_path, anchors=anchor) is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git merge-file ours base theirs",
+        "git checkout-index --all",
+    ],
+)
+def test_shell_mutating_dashed_git_command_from_anchor_denies(
+    tmp_path, anchor, command,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell(command, gp), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_shell_git_exe_commit_from_anchor_cwd_denies(tmp_path, anchor):
     gp = anchor[0]["path"]
     d = guard.decide(_shell("git.exe commit -m example", gp), env={},
@@ -302,6 +319,7 @@ def test_shell_git_commit_with_attached_quoted_dashC_denies(tmp_path, anchor):
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell backslash separator")
 def test_powershell_git_dashC_trailing_separator_denies(tmp_path, anchor):
     gp = anchor[0]["path"]
     payload = {
@@ -310,6 +328,19 @@ def test_powershell_git_dashC_trailing_separator_denies(tmp_path, anchor):
         "toolArgs": {"command": f'git -C "{gp}\\" commit -m example'},
     }
     d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_powershell_git_dashC_backtick_spaces_denies(tmp_path, anchor):
+    spaced = _main_checkout(tmp_path, "anchor with spaces")
+    escaped = str(spaced).replace(" ", "` ")
+    anchors = [*anchor, {"name": "spaced", "path": str(spaced)}]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(tmp_path),
+        "toolArgs": {"command": f"git -C {escaped} commit -m example"},
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchors)
     assert d and d["permissionDecision"] == "deny"
 
 

@@ -185,11 +185,11 @@ export class SessionViewer {
         // lastId is numbered on this log; a reconnect names it so the bridge can
         // translate the cursor if a session-id change merges the log meanwhile.
         // The pair changes together: the bridge echoes the (translated) start.
-        const cont = r.headers.get("X-Agent-Bridge-Continuity");
-        if (cont) {
+        const echoed = r.headers.get("X-Agent-Bridge-Continuity");
+        if (echoed) {
           const start = Number(r.headers.get("X-Agent-Bridge-Cursor"));
           if (Number.isFinite(start)) this.model.lastId = start;
-          this.model.continuity = cont;
+          this.model.continuity = echoed;
         }
         w.state = "live";
         this._renderHead();

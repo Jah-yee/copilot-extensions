@@ -837,6 +837,8 @@ def test_rejoin_launch_failure_does_not_release_existing_keeper_hold(seams, monk
         return 0, "", ""
 
     monkeypatch.setattr(detach, "_remote", remote)
+    # A real launch failure: the created session never registers.
+    monkeypatch.setattr(venue_detached, "await_claim", lambda scope, rid, timeout: None)
 
     assert detach.cmd_detach(_args()) == 1
 

@@ -142,7 +142,7 @@ _GIT_START = re.compile(r"^\s*[\"']?git\b", re.IGNORECASE)
 _GIT_WRITE_SUBCOMMANDS = frozenset({
     "add", "commit", "apply", "checkout", "switch", "reset", "restore",
     "clean", "rm", "mv", "stash", "merge", "rebase", "pull", "cherry-pick",
-    "revert", "init",
+    "revert", "init", "__configured-alias__",
 })
 _GIT_TOKEN = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
 _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
@@ -195,6 +195,14 @@ def _unquote_shell_token(token: str) -> str:
     return token
 
 
+def _git_config_alias_name(value: str) -> str | None:
+    key, separator, _expansion = value.partition("=")
+    if not separator or not key.lower().startswith("alias."):
+        return None
+    name = key[len("alias."):]
+    return name.lower() if name else None
+
+
 def _git_invocation(
     seg: str, cwd: str,
 ) -> tuple[str | None, list[str], list[tuple[str, str]], bool]:
@@ -216,6 +224,7 @@ def _git_invocation(
     git_cwd = cwd
     git_cwd_overridden = False
     targets: list[tuple[str, str]] = []
+    configured_aliases: set[str] = set()
     has_repo_override = False
     index = 1
     while index < len(tokens):
@@ -244,9 +253,16 @@ def _git_invocation(
             index += 1
             continue
         if token == "-c":
+            if index + 1 < len(tokens):
+                alias = _git_config_alias_name(tokens[index + 1])
+                if alias:
+                    configured_aliases.add(alias)
             index += 2
             continue
         if token.startswith("-c") and token != "-c":
+            alias = _git_config_alias_name(token[2:])
+            if alias:
+                configured_aliases.add(alias)
             index += 1
             continue
         if lower in {"--git-dir", "--work-tree"}:
@@ -283,12 +299,16 @@ def _git_invocation(
             continue
         if git_cwd_overridden:
             targets.append(("work-tree", git_cwd))
-        return lower, tokens[index + 1:], targets, has_repo_override
+        subcommand = "__configured-alias__" if lower in configured_aliases else lower
+        return subcommand, tokens[index + 1:], targets, has_repo_override
     if index < len(tokens):
         if git_cwd_overridden:
             targets.append(("work-tree", git_cwd))
+        subcommand = tokens[index].lower()
+        if subcommand in configured_aliases:
+            subcommand = "__configured-alias__"
         return (
-            tokens[index].lower(),
+            subcommand,
             tokens[index + 1:],
             targets,
             has_repo_override,

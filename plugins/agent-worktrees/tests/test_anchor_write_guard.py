@@ -250,6 +250,26 @@ def test_shell_git_write_with_global_options_still_denies(tmp_path, anchor):
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        "alias.save=commit",
+        "alias.save=status",
+        "alias.save=other",
+        "alias.save=!echo saved",
+    ],
+)
+def test_shell_git_command_local_alias_from_anchor_denies(
+    tmp_path, anchor, config,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(
+        _shell(f'git -C "{gp}" -c "{config}" save -m example', tmp_path),
+        env={}, home=tmp_path, anchors=anchor,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
 @pytest.mark.parametrize("dash_c", ["-C", "-C{}"])
 def test_shell_git_commit_with_dashC_forms_still_denies(
     tmp_path, anchor, dash_c,

@@ -61,21 +61,21 @@
         "bare_session_transcript": 17,
         "remote_session_copilot_args": 18,
         "live_session_mode": 19,
-        "live_session_alias": 20
+        "cli_mode_unclaimed_release": 20
       },
       "durable_records": [],
       "source_paths": [
         {
           "path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
-          "sha256": "7f24648499c14b2402cf37db2b6fad469e07d8eada4584090cd4289086189414",
+          "sha256": "80ae2fd5e9c2d7ae739fd123e91812236acdf538814fe76e3c1710072efc232e",
           "semantic": true,
           "non_semantic_reason": null
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/models.py",
-          "sha256": "9a006111162f17555f50d4400bb01dc5097ce49cc1049adb03c3c120cc671de8",
+          "sha256": "713bf04a93fcf284b832459c2e295dd38ef5a9dfa5ded7a6b09367b3033c838e",
           "semantic": false,
-          "non_semantic_reason": "Live-message request/response models gained an optional delivery urgency field, and the live-session registration request an optional process_started_at; the representative session-create wire shape is unchanged."
+          "non_semantic_reason": "Live-message request/response models gained an optional delivery urgency field; the representative session-create wire shape is unchanged."
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/routes/health.py",
@@ -105,7 +105,7 @@
       "fixtures": [
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/health.json",
-          "sha256": "ee36065a5ecbf94751b995f46b9527b8620d45b5f59e4a06431d01568a79fc66",
+          "sha256": "df80aa9df7d3a14876a4df7dd59b8a675f669f1d3778be1205d34aca1004b03b",
           "role": "current health response",
           "generation": 20
         },
@@ -135,7 +135,7 @@
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/session-create-response.json",
-          "sha256": "1f996e7e06cc628b7025b738f7891862e05ef1fedc227172a7fe3d719d63b535",
+          "sha256": "1cf0cc2d4fc2328a450755995c11e55472083d7fba0321a5b06669719329a371",
           "role": "current session-create response",
           "generation": 20
         },
@@ -165,7 +165,7 @@
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/protocol-constants.json",
-          "sha256": "59f99cbda50edda77910652c819a71c45b6b3fabb150e3e583e73914e5ccb3b4",
+          "sha256": "f4b207bca02d6f36518a64ef555f59401275367bee0e2d7c803a81067ca28e61",
           "role": "current HTTP range and capability constants",
           "generation": 20
         },
@@ -201,6 +201,30 @@
         }
       ],
       "provenance": [
+        {
+          "commit": "e4fa49fe5b3fe3f16043ddf8f77d606432a630d6",
+          "plugin_version": "0.4.1-dev3",
+          "generation": 20,
+          "source_path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
+          "source_git_blob": "87aaa0e16e53d45e0ecad51c1ec73fcd4148744f",
+          "capture_method": "Read production constants from the pushed head revision; HTTP_PROTOCOL_VERSION is 20 and cli_mode_unclaimed_release is introduced at generation 20."
+        },
+        {
+          "commit": "e4fa49fe5b3fe3f16043ddf8f77d606432a630d6",
+          "plugin_version": "0.4.1-dev3",
+          "generation": 20,
+          "source_path": "plugins/agent-bridge/src/agent_bridge/models.py",
+          "source_git_blob": "ca098768745ddfebc4e0cf8b5f0161c99091ac58",
+          "capture_method": "Serialize StartSessionResponse from the pushed head revision; its protocol_version default follows HTTP generation 20."
+        },
+        {
+          "commit": "e4fa49fe5b3fe3f16043ddf8f77d606432a630d6",
+          "plugin_version": "0.4.1-dev3",
+          "generation": 20,
+          "source_path": "plugins/agent-bridge/src/agent_bridge/routes/health.py",
+          "source_git_blob": "366c8900d9b7823a48c1012ea754deeb2492b51d",
+          "capture_method": "Invoke the health route shape from the pushed head revision with controlled empty runtime state; the response advertises HTTP generation 20."
+        },
         {
           "commit": "851dfca5a0982a97eff672865648f9cbf0318229",
           "plugin_version": "0.4.0-dev500",
@@ -616,30 +640,6 @@
           "source_path": "plugins/agent-bridge/src/agent_bridge/routes/sessions.py",
           "source_git_blob": "0376764246259993a910c18c6fe386474ebefa45",
           "capture_method": "Re-attested for the generation-19 bump -- this file's own content is unchanged."
-        },
-        {
-          "commit": "fdd6ee8c9452297f7d9bdcdf27513d6880ea9d18",
-          "plugin_version": "0.4.1-dev3",
-          "generation": 20,
-          "source_path": "plugins/agent-bridge/src/agent_bridge/routes/health.py",
-          "source_git_blob": "366c8900d9b7823a48c1012ea754deeb2492b51d",
-          "capture_method": "Re-attested for HTTP generation 20 (live-session alias forwarding capability) from this exact source revision."
-        },
-        {
-          "commit": "fdd6ee8c9452297f7d9bdcdf27513d6880ea9d18",
-          "plugin_version": "0.4.1-dev3",
-          "generation": 20,
-          "source_path": "plugins/agent-bridge/src/agent_bridge/models.py",
-          "source_git_blob": "ca098768745ddfebc4e0cf8b5f0161c99091ac58",
-          "capture_method": "Re-attested for HTTP generation 20 (live-session alias forwarding capability) from this exact source revision."
-        },
-        {
-          "commit": "fdd6ee8c9452297f7d9bdcdf27513d6880ea9d18",
-          "plugin_version": "0.4.1-dev3",
-          "generation": 20,
-          "source_path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
-          "source_git_blob": "103448fec62ac935259e0bf8fdf3271ee373a9ad",
-          "capture_method": "Re-attested for HTTP generation 20 (live-session alias forwarding capability) from this exact source revision."
         }
       ],
       "support_window": "The daemon declares HTTP generations 1 through 19 supported; evidence currently exercises generations 9 through 19 (16 retained only via its own previous-generation health fixture, 17 and 18 likewise, not the current generation).",

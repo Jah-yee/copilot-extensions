@@ -470,6 +470,7 @@ class TestReservationVenueRoutes:
             json={
                 "session_id": "placeholder",
                 "worktree_id": "anchor-example@cs-1",
+                "machine": "host-1",
                 "pid": 4242,
                 "driven_by": "orchestrator",
             },
@@ -480,6 +481,7 @@ class TestReservationVenueRoutes:
             json={
                 "session_id": "resumed",
                 "worktree_id": "anchor-example@cs-1",
+                "machine": "host-1",
                 "pid": 4242,
             },
         )

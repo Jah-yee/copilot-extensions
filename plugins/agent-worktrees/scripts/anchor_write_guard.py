@@ -771,7 +771,8 @@ def _linked_worktree_git_dir(
     work_tree = by_kind.get("work-tree")
     if not git_dir or not work_tree:
         return None
-    git_dir_path = Path(git_dir)
+    resolved_git_dir = _real_canon(git_dir)
+    git_dir_path = Path(resolved_git_dir)
     if (
         git_dir_path.parent.name.lower() != "worktrees"
         or git_dir_path.parent.parent.name.lower() != ".git"
@@ -793,8 +794,8 @@ def _linked_worktree_git_dir(
     resolved = Path(pointer)
     if not resolved.is_absolute():
         resolved = root / resolved
-    expected = _canon(str(resolved))
-    return expected if expected == _canon(git_dir) else None
+    expected = _real_canon(str(resolved))
+    return expected if expected == resolved_git_dir else None
 
 
 def _shell_hit(
@@ -858,7 +859,7 @@ def _shell_hit(
         if git_write:
             linked_git_dir = _linked_worktree_git_dir(git_targets)
             for kind, target in git_targets:
-                if kind == "git-dir" and _canon(target) == linked_git_dir:
+                if kind == "git-dir" and _real_canon(target) == linked_git_dir:
                     continue
                 a = _git_target_anchor(kind, target, canon_anchor)
                 if a is not None:

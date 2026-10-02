@@ -454,6 +454,32 @@ def test_powershell_git_array_subexpression_from_anchor_denies(
 
 
 @pytest.mark.parametrize(
+    ("tool", "command"),
+    [
+        (
+            "bash",
+            "echo ok # $(\ngit commit --allow-empty -m example",
+        ),
+        (
+            "powershell",
+            "Write-Output ok # (\ngit commit --allow-empty -m example",
+        ),
+    ],
+)
+def test_shell_comment_openers_do_not_hide_next_git_command(
+    tmp_path, anchor, tool, command,
+):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": tool,
+        "cwd": str(gp),
+        "toolArgs": {"command": command},
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
     ("expression", "expected"),
     [
         ("git commit --allow-empty -m example", "deny"),
@@ -927,6 +953,30 @@ def test_shell_symlinked_anchor_git_dir_denies(tmp_path, anchor):
         _shell(f'git --git-dir "{alias}" commit -m example', tmp_path),
         env={}, home=tmp_path, anchors=anchor,
     )
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_spoofed_linked_git_dir_symlink_denies(tmp_path, anchor):
+    anchor_git = Path(anchor[0]["path"]) / ".git"
+    spoof_parent = tmp_path / "outside" / ".git" / "worktrees"
+    spoof_parent.mkdir(parents=True)
+    spoof = spoof_parent / "id"
+    try:
+        spoof.symlink_to(anchor_git, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    external = tmp_path / "external-work-tree"
+    external.mkdir()
+    (external / ".git").write_text(
+        f"gitdir: {spoof}\n",
+        encoding="utf-8",
+    )
+    command = (
+        f'git --git-dir "{spoof}" --work-tree "{external}" '
+        "commit -m example"
+    )
+    d = guard.decide(_shell(command, tmp_path), env={},
+                     home=tmp_path, anchors=anchor)
     assert d and d["permissionDecision"] == "deny"
 
 

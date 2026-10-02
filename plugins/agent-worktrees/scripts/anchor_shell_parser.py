@@ -14,9 +14,22 @@ def shell_segments(cmd: str, tool: str) -> list[str]:
     quote = None
     substitution_depth = 0
     backtick_substitution = False
+    line_comment = False
     index = 0
     while index < len(cmd):
         char = cmd[index]
+        if line_comment:
+            if char in {"\r", "\n"}:
+                line_comment = False
+                if substitution_depth or backtick_substitution:
+                    current.append(char)
+                else:
+                    segment = "".join(current)
+                    if segment.strip():
+                        segments.append(segment)
+                    current = []
+            index += 1
+            continue
         continuation_escape = (
             (posix_escapes and char == "\\")
             or (powershell_escapes and char == "`")
@@ -65,6 +78,21 @@ def shell_segments(cmd: str, tool: str) -> list[str]:
                 index += 1
             elif char == quote:
                 quote = None
+        elif (
+            char == "#"
+            and (
+                powershell_escapes
+                or (
+                    posix_escapes
+                    and (
+                        index == 0
+                        or cmd[index - 1].isspace()
+                        or cmd[index - 1] in {";", "|", "&"}
+                    )
+                )
+            )
+        ):
+            line_comment = True
         elif (
             (
                 lower_tool in {"bash", "sh", "powershell", "pwsh"}

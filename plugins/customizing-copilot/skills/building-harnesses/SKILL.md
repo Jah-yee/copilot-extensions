@@ -51,7 +51,7 @@ The runbook is the source of truth. Read it before acting.
   registration, agent-worktrees adoption of the harness + related repos,
   `AGENTS.md` + connective-tissue skills, private state binding, SSH +
   agent-bridge, Picker validation, efforts + visions, skill/agent review,
-  agent-mcp + MCP delegation.
+  authenticated MCP delegation.
 - **Unopinionated — the product:** target repo structure, where product code
   lives (don't force this repo's product organization onto a *related* repo, and
   don't copy a related repo's product in — but a harness may itself be a monorepo

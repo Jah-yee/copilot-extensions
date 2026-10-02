@@ -73,7 +73,15 @@ _REGISTER_SQL = (
     "venue=COALESCE(excluded.venue, live_sessions.venue), process_started_at="
     "COALESCE(excluded.process_started_at, live_sessions.process_started_at), "
     "status='live', updated_at=excluded.updated_at "
-    "WHERE live_sessions.status != 'taken-over'"
+    "WHERE live_sessions.status != 'taken-over' "
+    # An id-only heartbeat skips the insert guard above but keeps the row's
+    # worktree: the same ownership rule applies to that retained worktree.
+    "AND NOT EXISTS ("
+    "  SELECT 1 FROM worktree_ownership wo "
+    "  JOIN sessions s ON s.id = wo.session_id "
+    "  WHERE wo.worktree_id = COALESCE(excluded.worktree_id, live_sessions.worktree_id) "
+    "    AND s.status IN ('running', 'idle')"
+    ")"
 )
 
 

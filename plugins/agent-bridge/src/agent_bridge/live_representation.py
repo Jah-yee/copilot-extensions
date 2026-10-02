@@ -564,8 +564,13 @@ class LiveEventStore:
             self._seen_order.pop(session_id, None)
             self._sdk_events.pop(session_id, None)
             if log is not None and not any(v is log for v in self._logs.values()):
-                gone = log.continuity_id
-                for key in [k for k, (c, _) in self._merged_history.items() if gone in (k, c)]:
+                # The discarded continuity and every log merged into it,
+                # transitively (C -> B -> A): none can be retargeted any more.
+                gone = {log.continuity_id}
+                while extra := {k for k, (c, _) in self._merged_history.items()
+                                if c in gone and k not in gone}:
+                    gone |= extra
+                for key in [k for k, (c, _) in self._merged_history.items() if k in gone or c in gone]:
                     del self._merged_history[key]
 
     def _mark_seen(self, session_id: str, event_id: str) -> bool:
@@ -766,16 +771,18 @@ async def await_turn_reply(
     cursor = after
     texts: list[str] = []
     while True:
+        # A session-id change merged this log into another, maybe more than
+        # once (C -> B -> A) while we slept: follow every completed merge, with
+        # the cursor translated to each merged numbering, before waiting again.
+        while log.merged_into is not None:
+            merged_log = log.merged_into[0]
+            cursor = translate_merged_cursor(log, merged_log, cursor)
+            log = merged_log
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         events: list[SseEvent] = await log.wait_for_events(cursor, timeout=remaining)
         if log.merged_into is not None:
-            # A session-id change merged this log into another: follow it, with
-            # the cursor translated to the merged numbering.
-            merged_log = log.merged_into[0]
-            cursor = translate_merged_cursor(log, merged_log, cursor)
-            log = merged_log
             continue
         if not events:
             break  # timed out with no new events

@@ -678,6 +678,48 @@ def test_merge_mappings_outlive_an_alias_but_not_the_last_key() -> None:
     assert store.merged_history() == {}
 
 
+def test_dropping_the_last_key_clears_every_transitive_merge_mapping() -> None:
+    """C -> B -> A: once nothing serves A, both C's and B's mappings go, while
+    an unrelated merge's history stays."""
+    from agent_bridge.live_representation import LiveEventStore
+
+    store = LiveEventStore()
+    for key in ("A", "B", "C", "X", "Y"):
+        store.get_or_create(key).append("agent_message", {"text": key})
+    store.alias("B", "C")
+    store.alias("A", "B")
+    store.alias("X", "Y")
+    unrelated = {k: v for k, v in store.merged_history().items()
+                 if v[0] == store.get("X").continuity_id}
+    assert len(store.merged_history()) == 3 and len(unrelated) == 1
+    for key in ("A", "B", "C"):
+        store.drop(key)
+    assert store.merged_history() == unrelated
+
+
+def test_a_waiter_follows_two_merges_that_happened_while_it_slept() -> None:
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore, await_turn_reply
+
+    store = LiveEventStore()
+
+    async def scenario():
+        a, b, c = (store.get_or_create(k) for k in ("A", "B", "C"))
+        a.append("agent_message", {"text": "a1"})
+        b.append("agent_message", {"text": "b1"})
+        waiting = asyncio.create_task(await_turn_reply(c, after=c.latest_id, timeout=2))
+        await asyncio.sleep(0.05)
+        store.alias("B", "C")  # C -> B
+        store.alias("A", "B")  # B -> A, before the waiter runs again
+        a.append("agent_message", {"text": "the reply"})
+        a.append("turn_complete", {"stop_reason": "end_turn"})
+        return await asyncio.wait_for(waiting, 5)
+
+    reply = asyncio.run(scenario())
+    assert reply["replied"] and reply["reply"] == "the reply"
+
+
 def test_an_open_successor_stream_follows_a_merge_without_replaying() -> None:
     import asyncio
 

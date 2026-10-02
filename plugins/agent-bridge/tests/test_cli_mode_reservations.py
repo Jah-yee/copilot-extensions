@@ -848,3 +848,20 @@ def test_a_metadata_free_alias_heartbeat_keeps_the_successors_targeting(tmp_db: 
         "m", "wt-R", "/w", 4242, "picker")
     assert _register(tmp_db, "resumed-again", "wt-R", now + 4, pid=4242) == "live"  # still rolls over
     assert tmp_db.get_live_session("resumed")["session_id"] == "resumed-again"
+
+
+@pytest.mark.parametrize("heartbeat_id", ["resumed", "placeholder"])
+def test_an_id_only_heartbeat_never_revives_a_registration_on_an_owned_worktree(
+    tmp_db: Database, heartbeat_id: str,
+) -> None:
+    """An id-only heartbeat keeps the row's worktree, so a running bridge-owned
+    session on that worktree refuses it, through the canonical id or an alias."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    tmp_db.create_session("acp-1", "owned", "agent", "/w", "local", "running", now + 3)
+    assert tmp_db.reserve_worktree_ownership("wt-R", "acp-1", now=now + 3, reclaim=True) is True
+    assert tmp_db.register_live_session(
+        heartbeat_id, machine=None, cwd=None, worktree_id=None, repo=None, branch=None,
+        pid=None, role=None, now=now + 4) == "reserved"
+    assert tmp_db.get_live_session("resumed")["updated_at"] < now + 4

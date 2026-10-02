@@ -4,6 +4,17 @@ Pure stdlib, operates only on the portable JSON baseline `baseline.py`
 produces -- no `coverage.py` dependency at selection time. This is the
 "CI-time counterpart of the baseline's offline evidence" the vision's
 `diff-scoped selection` Concept names.
+
+Named `selection.py`, never `select.py`: `baseline.py` is invoked directly
+as a script (`python tools/coverage_guided_selection/baseline.py ...`, the
+documented CLI usage and how `validate-and-promote.yml` runs it), which
+prepends this package's own directory to `sys.path`. A module here literally
+named `select.py` would then shadow the stdlib `select` module for every
+later import in that process -- including `subprocess`'s own transitive
+`import selectors -> import select` -- breaking collection outright with an
+`AttributeError: module 'select' has no attribute 'select'` that has
+nothing to do with this package's own logic. Never reintroduce a module name
+in this package that collides with a stdlib top-level module name.
 """
 
 from __future__ import annotations

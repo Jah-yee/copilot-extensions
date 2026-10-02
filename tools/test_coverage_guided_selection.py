@@ -35,7 +35,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.coverage_guided_selection import baseline as baseline_mod  # noqa: E402
 from tools.coverage_guided_selection import correlation  # noqa: E402
-from tools.coverage_guided_selection import fallback, select  # noqa: E402
+from tools.coverage_guided_selection import fallback, selection  # noqa: E402
 
 
 def _synthetic_baseline() -> dict:
@@ -73,12 +73,12 @@ def _synthetic_baseline() -> dict:
 
 class TestSelectTests:
     def test_selects_exact_covering_tests_for_a_changed_line(self) -> None:
-        result = select.select_tests(_synthetic_baseline(), {"file.py": [1]})
+        result = selection.select_tests(_synthetic_baseline(), {"file.py": [1]})
         assert result.selected_tests == ("test_a",)
         assert not result.fallback_triggered
 
     def test_selects_union_across_multiple_changed_lines(self) -> None:
-        result = select.select_tests(
+        result = selection.select_tests(
             _synthetic_baseline(), {"file.py": [1, 3], "other.py": [11]}
         )
         assert result.selected_tests == ("test_a", "test_b", "test_c")
@@ -88,13 +88,13 @@ class TestSelectTests:
         # file.py line 4 has no key at all -- a partially-attributed file is
         # not a fully-covered one; this must trigger fallback, not silently
         # select nothing.
-        result = select.select_tests(_synthetic_baseline(), {"file.py": [4]})
+        result = selection.select_tests(_synthetic_baseline(), {"file.py": [4]})
         assert result.selected_tests == ()
         assert result.fallback_triggered
         assert result.fallback_reasons[0].reason == "line_not_attributed"
 
     def test_falls_back_for_a_file_absent_from_the_baseline(self) -> None:
-        result = select.select_tests(_synthetic_baseline(), {"third.py": [1]})
+        result = selection.select_tests(_synthetic_baseline(), {"third.py": [1]})
         assert result.selected_tests == ()
         assert result.fallback_triggered
         assert result.fallback_reasons[0].reason == "no_baseline_entry"
@@ -104,7 +104,7 @@ class TestSelectTests:
     ) -> None:
         # Fallback for one line never suppresses a real selection for
         # another, correctly-attributed line in the same diff.
-        result = select.select_tests(
+        result = selection.select_tests(
             _synthetic_baseline(), {"file.py": [1, 4]}
         )
         assert result.selected_tests == ("test_a",)
@@ -411,11 +411,11 @@ def test_collect_baseline_round_trips_against_a_real_plugin_suite() -> None:
                 "duration map collected from the same run"
             )
 
-    # The round-tripped baseline must be directly usable by select/fallback
+    # The round-tripped baseline must be directly usable by selection/fallback
     # without any further transformation.
-    selection = select.select_tests(result, {covered_file: [int(next(iter(per_line)))]})
-    assert selection.selected_tests
-    assert not selection.fallback_triggered
+    selection_result = selection.select_tests(result, {covered_file: [int(next(iter(per_line)))]})
+    assert selection_result.selected_tests
+    assert not selection_result.fallback_triggered
 
     fb = fallback.compute_fallback_set(result, runtime_budget_s=5.0)
     assert fb.covered_fraction > 0.0

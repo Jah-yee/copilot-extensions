@@ -712,6 +712,34 @@ def _git_target_anchor(
     return None
 
 
+def _linked_worktree_git_dir(
+    targets: list[tuple[str, str]],
+) -> str | None:
+    by_kind = dict(targets)
+    git_dir = by_kind.get("git-dir")
+    work_tree = by_kind.get("work-tree")
+    if not git_dir or not work_tree:
+        return None
+    root = find_repo_root(work_tree)
+    if root is None or not is_linked_worktree(root):
+        return None
+    try:
+        text = (root / ".git").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not text.lower().startswith(prefix):
+        return None
+    pointer = text[len(prefix):].strip()
+    if not pointer:
+        return None
+    resolved = Path(pointer)
+    if not resolved.is_absolute():
+        resolved = root / resolved
+    expected = _canon(str(resolved))
+    return expected if expected == _canon(git_dir) else None
+
+
 def _shell_hit(
     cmd: str, cwd: str, anchors: list[dict], tool: str,
 ) -> dict | None:
@@ -767,7 +795,10 @@ def _shell_hit(
         # 3a. A git mutation with an explicit ``-C`` / ``--git-dir`` /
         #     ``--work-tree`` target writes any anchor named by those options.
         if git_write:
+            linked_git_dir = _linked_worktree_git_dir(git_targets)
             for kind, target in git_targets:
+                if kind == "git-dir" and _canon(target) == linked_git_dir:
+                    continue
                 a = _git_target_anchor(kind, target, canon_anchor)
                 if a is not None:
                     return {**a, "reason": _deny_reason(a["name"], a["path"])}

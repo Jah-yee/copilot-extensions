@@ -637,6 +637,21 @@ def test_shell_git_dashC_worktree_from_anchor_cwd_allows(tmp_path, anchor):
     assert d is None
 
 
+def test_shell_explicit_linked_worktree_targets_allow(tmp_path, anchor):
+    anchor_root = Path(anchor[0]["path"])
+    git_dir = anchor_root / ".git" / "worktrees" / "explicit"
+    git_dir.mkdir(parents=True)
+    wt = tmp_path / "myrepo.worktrees" / "explicit"
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    command = (
+        f'git --git-dir "{git_dir}" --work-tree "{wt}" commit -m example'
+    )
+    assert guard.decide(_shell(command, anchor_root), env={},
+                        home=tmp_path, anchors=anchor) is None
+
+
 def test_shell_git_read_from_anchor_cwd_allows(tmp_path, anchor):
     # A read-only git command from the anchor cwd is fine (no write verb).
     assert guard.decide(_shell("git status", anchor[0]["path"]),

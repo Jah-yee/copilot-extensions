@@ -140,6 +140,11 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({
     "revert", "init", "__configured-alias__",
 })
 _GIT_READ_ONLY_DASHED_SUBCOMMANDS = frozenset({"merge-base"})
+_GIT_WORKTREE_WRITE_SUBCOMMANDS = frozenset({
+    "apply", "checkout", "checkout-index", "cherry-pick", "clean", "merge",
+    "merge-file", "mv", "pull", "rebase", "reset", "restore", "revert", "rm",
+    "stash", "switch", "__configured-alias__",
+})
 _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
     "--namespace", "--super-prefix",
 })
@@ -195,6 +200,25 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
     index = 0
     while index < len(cmd):
         char = cmd[index]
+        continuation_escape = (
+            (posix_escapes and char == "\\")
+            or (powershell_escapes and char == "`")
+            or (cmd_escapes and char == "^")
+        )
+        if (
+            quote != "'"
+            and continuation_escape
+            and index + 1 < len(cmd)
+            and cmd[index + 1] in {"\r", "\n"}
+        ):
+            index += 2
+            if (
+                index < len(cmd)
+                and cmd[index - 1] == "\r"
+                and cmd[index] == "\n"
+            ):
+                index += 1
+            continue
         if quote:
             current.append(char)
             if (
@@ -496,18 +520,18 @@ def _git_invocation(
         if token.startswith("-"):
             index += 1
             continue
-        resolved_targets = list(targets.items())
-        if git_cwd_overridden and "git-dir" not in targets:
-            resolved_targets.append(("cwd", git_cwd))
         subcommand = "__configured-alias__" if lower in configured_aliases else lower
+        resolved_targets = _git_resolved_targets(
+            targets, git_cwd, git_cwd_overridden, subcommand,
+        )
         return subcommand, tokens[index + 1:], resolved_targets, has_repo_override
     if index < len(tokens):
-        resolved_targets = list(targets.items())
-        if git_cwd_overridden and "git-dir" not in targets:
-            resolved_targets.append(("cwd", git_cwd))
         subcommand = tokens[index].lower()
         if subcommand in configured_aliases:
             subcommand = "__configured-alias__"
+        resolved_targets = _git_resolved_targets(
+            targets, git_cwd, git_cwd_overridden, subcommand,
+        )
         return (
             subcommand,
             tokens[index + 1:],
@@ -515,6 +539,24 @@ def _git_invocation(
             has_repo_override,
         )
     return None, [], list(targets.items()), has_repo_override
+
+
+def _git_resolved_targets(
+    targets: dict[str, str],
+    git_cwd: str,
+    git_cwd_overridden: bool,
+    subcommand: str,
+) -> list[tuple[str, str]]:
+    resolved = list(targets.items())
+    if "git-dir" in targets:
+        if (
+            "work-tree" not in targets
+            and _git_subcommand_writes_worktree(subcommand)
+        ):
+            resolved.append(("cwd", git_cwd))
+    elif git_cwd_overridden:
+        resolved.append(("cwd", git_cwd))
+    return resolved
 
 
 def _git_effective_ff_mode(args: list[str]) -> str | None:
@@ -535,6 +577,13 @@ def _git_subcommand_is_write(subcommand: str | None) -> bool:
         return True
     prefix, separator, _suffix = subcommand.partition("-")
     return bool(separator and prefix in _GIT_WRITE_SUBCOMMANDS)
+
+
+def _git_subcommand_writes_worktree(subcommand: str) -> bool:
+    if subcommand in _GIT_WORKTREE_WRITE_SUBCOMMANDS:
+        return True
+    prefix, separator, _suffix = subcommand.partition("-")
+    return bool(separator and prefix in _GIT_WORKTREE_WRITE_SUBCOMMANDS)
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An

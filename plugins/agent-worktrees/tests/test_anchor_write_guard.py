@@ -259,6 +259,33 @@ def test_shell_git_fetch_and_powershell_merge_base_assignment_allows(
                         anchors=anchor) is None
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_bash_git_line_continuation_from_anchor_denies(
+    tmp_path, anchor, newline,
+):
+    gp = anchor[0]["path"]
+    command = f"git \\{newline}commit --allow-empty -m example"
+    d = guard.decide(_shell(command, gp), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_powershell_git_line_continuation_from_anchor_denies(
+    tmp_path, anchor, newline,
+):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(gp),
+        "toolArgs": {
+            "command": f"git `{newline}commit --allow-empty -m example"
+        },
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 @pytest.mark.parametrize("separator", ["\n", "; ", " && "])
 def test_shell_git_readonly_batch_with_dashC_allows(
     tmp_path, anchor, separator,
@@ -522,6 +549,22 @@ def test_shell_git_dir_elsewhere_overrides_anchor_dashC(tmp_path, anchor):
         ),
         env={}, home=tmp_path, anchors=anchor,
     ) is None
+
+
+@pytest.mark.parametrize("use_dash_c", [False, True])
+def test_shell_git_dir_elsewhere_checkout_keeps_implicit_anchor_work_tree(
+    tmp_path, anchor, use_dash_c,
+):
+    other = _main_checkout(tmp_path, "other-repo")
+    gp = anchor[0]["path"]
+    prefix = f'git -C "{gp}"' if use_dash_c else "git"
+    command = (
+        f'{prefix} --git-dir "{other / ".git"}" checkout -- tracked.txt'
+    )
+    cwd = tmp_path if use_dash_c else gp
+    d = guard.decide(_shell(command, cwd), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
 
 
 @pytest.mark.parametrize("option", ["--git-dir", "--work-tree"])

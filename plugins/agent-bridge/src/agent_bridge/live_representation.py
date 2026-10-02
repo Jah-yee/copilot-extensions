@@ -447,6 +447,9 @@ class LiveEventStore:
         # membership; the deque bounds it FIFO). Guarded by ``_lock``.
         self._seen_ids: dict[str, set[str]] = {}
         self._seen_order: dict[str, deque[str]] = {}
+        # SDK event id -> the log event ids it was translated into, so a merge
+        # can skip an SDK event both registrations already logged.
+        self._sdk_events: dict[str, dict[str, list[int]]] = {}
         self._merged_history: dict[str, tuple[str, dict[int, int]]] = {}
         self._lock = Lock()
 
@@ -492,16 +495,40 @@ class LiveEventStore:
                 if event_id not in seen:
                     seen.add(event_id)
                     order.append(event_id)
+            old_sdk = self._sdk_events.setdefault(old_id, {})
+            successor_sdk = {
+                eid: (sdk, i)
+                for sdk, eids in self._sdk_events.get(new_id, {}).items()
+                for i, eid in enumerate(eids)
+            }
             while len(order) > _SEEN_ID_CAP:
-                seen.discard(order.popleft())
+                dropped = order.popleft()
+                seen.discard(dropped)
+                old_sdk.pop(dropped, None)
             self._seen_ids[new_id] = seen
             self._seen_order[new_id] = order
+            self._sdk_events[new_id] = old_sdk
         if merged is not None:
             prior = merged.continuity_id
             # Cursor 0 on the successor means "after everything it had", which is
             # the predecessor's tail at merge time -- not the predecessor's start.
             ids = {0: old.latest_id}
-            ids.update({evt.id: old.append(evt.event, evt.data).id for evt in merged.get_events(0)})
+            last = old.latest_id
+            for evt in merged.get_events(0):
+                sdk, i = successor_sdk.get(evt.id, (None, 0))
+                with self._lock:
+                    retained = list(old_sdk.get(sdk) or ()) if sdk else []
+                if retained:
+                    # Both registrations logged this SDK event before the rename:
+                    # keep the predecessor's copy. The cursor never moves back, so
+                    # a reader past it replays nothing it already saw.
+                    last = max(last, retained[min(i, len(retained) - 1)])
+                    ids[evt.id] = last
+                    continue
+                last = ids[evt.id] = old.append(evt.event, evt.data).id
+                if sdk:
+                    with self._lock:
+                        old_sdk.setdefault(sdk, []).append(last)
             merged.merged_into = (old, ids)
             if prior and old.continuity_id:
                 with self._lock:
@@ -527,6 +554,7 @@ class LiveEventStore:
             log = self._logs.pop(session_id, None)
             self._seen_ids.pop(session_id, None)
             self._seen_order.pop(session_id, None)
+            self._sdk_events.pop(session_id, None)
             if log is not None and not any(v is log for v in self._logs.values()):
                 gone = log.continuity_id
                 for key in [k for k, (c, _) in self._merged_history.items() if gone in (k, c)]:
@@ -550,8 +578,15 @@ class LiveEventStore:
             order = self._seen_order[session_id]
             order.append(event_id)
             if len(order) > _SEEN_ID_CAP:
-                seen.discard(order.popleft())
+                dropped = order.popleft()
+                seen.discard(dropped)
+                self._sdk_events.get(session_id, {}).pop(dropped, None)
             return True
+
+    def _record_sdk_event(self, session_id: str, sdk_id: str, log_event_id: int) -> None:
+        with self._lock:
+            if sdk_id in self._seen_ids.get(session_id, ()):
+                self._sdk_events.setdefault(session_id, {}).setdefault(sdk_id, []).append(log_event_id)
 
     def ingest(
         self,
@@ -592,7 +627,9 @@ class LiveEventStore:
             data = item.get("data")
             data = data if isinstance(data, dict) else {}
             for event_type, payload in translate_sdk_event(sdk_type, data):
-                log.append(event_type, payload)
+                appended_id = log.append(event_type, payload).id
+                if isinstance(event_id, str) and event_id:
+                    self._record_sdk_event(session_id, event_id, appended_id)
                 appended += 1
         return appended
 
@@ -649,6 +686,11 @@ class MergeFollowingLog:
         """Continuity of the log this reader's cursor is currently numbered on
         (it switches only when the reader's next wait follows a merge)."""
         return self._log.continuity_id
+
+    @property
+    def translated_cursor(self) -> int | None:
+        """The reader's cursor in the merged numbering, right after following a merge."""
+        return self._moved[1] if self._moved is not None else None
 
 
 def translate_reconnect_cursor(

@@ -68,8 +68,8 @@
         {
           "path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
           "sha256": "7f24648499c14b2402cf37db2b6fad469e07d8eada4584090cd4289086189414",
-          "semantic": false,
-          "non_semantic_reason": "Protocol constants are validated directly against production by the contract checker; this PR updates the working tree before an immutable commit provenance record exists."
+          "semantic": true,
+          "non_semantic_reason": null
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/models.py",

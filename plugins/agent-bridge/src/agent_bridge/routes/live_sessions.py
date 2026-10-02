@@ -619,7 +619,11 @@ async def stream_live_events(
             following = getattr(shim.event_log, "followed_continuity_id", announced)
             if following and following != announced:
                 announced = following
-                yield f"event: continuity\ndata: {json.dumps({'continuity_id': following})}\n\n"
+                note = {"continuity_id": following}
+                moved = getattr(shim.event_log, "translated_cursor", None)
+                if moved is not None:
+                    note["after"] = moved  # the reader's cursor, renumbered with it
+                yield f"event: continuity\ndata: {json.dumps(note)}\n\n"
             yield chunk
 
     return StreamingResponse(
@@ -635,7 +639,8 @@ async def stream_live_events(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            **({"X-Agent-Bridge-Continuity": log.continuity_id} if log.continuity_id else {}),
+            **({"X-Agent-Bridge-Continuity": log.continuity_id,
+                "X-Agent-Bridge-Cursor": str(start)} if log.continuity_id else {}),
         },
     )
 

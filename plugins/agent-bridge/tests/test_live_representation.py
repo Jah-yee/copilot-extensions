@@ -751,7 +751,65 @@ def test_an_open_stream_announces_the_merged_continuity_before_renumbered_ids() 
 
     (announce, event), merged_continuity = asyncio.run(scenario())
     assert announce.startswith("event: continuity") and merged_continuity in announce
+    assert '"after": 2' in announce  # the reader's cursor 1 renumbered with it
     assert event.startswith("id: 3") and "after" in event
+
+
+def test_two_quiet_reconnects_across_a_merge_replay_nothing() -> None:
+    """The bridge echoes the translated start with the new continuity, so a
+    second reconnect with no numbered event in between resumes from it."""
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.routes.live_sessions import stream_live_events
+
+    store = LiveEventStore()
+
+    async def scenario():
+        pred = store.get_or_create("placeholder")
+        pred.append("agent_message", {"text": "p1"})
+        pred.append("agent_message", {"text": "p2"})
+        succ = store.get_or_create("resumed")
+        succ.append("agent_message", {"text": "s1"})
+        store.alias("placeholder", "resumed")  # s1 becomes merged id 3
+        first = await stream_live_events(
+            "resumed", _route_request(store, "resumed"), after=1, continuity_id=succ.continuity_id)
+        cursor = int(first.headers["X-Agent-Bridge-Cursor"])
+        continuity = first.headers["X-Agent-Bridge-Continuity"]
+        # Disconnect before any numbered event, then reconnect with the echoed pair.
+        pred.append("agent_message", {"text": "after"})
+        second = await stream_live_events(
+            "resumed", _route_request(store, "resumed"), after=cursor, continuity_id=continuity)
+        body = second.body_iterator
+        chunk = str(await asyncio.wait_for(body.__anext__(), 5))
+        await body.aclose()
+        return cursor, continuity == pred.continuity_id, chunk
+
+    cursor, merged, chunk = asyncio.run(scenario())
+    assert cursor == 3 and merged
+    assert chunk.startswith("id: 4") and "after" in chunk
+
+
+def test_a_merge_keeps_one_copy_of_an_sdk_event_both_registrations_logged() -> None:
+    from agent_bridge.live_representation import LiveEventStore
+
+    store = LiveEventStore()
+    reply = {"type": "assistant.message", "id": "sdk-1", "data": {"content": "the reply"}}
+    store.ingest("placeholder", [reply])
+    store.ingest("resumed", [reply, {"type": "assistant.message", "id": "sdk-2",
+                                     "data": {"content": "next"}}])
+    store.alias("placeholder", "resumed")
+    texts = [e.data.get("text") for e in store.get("resumed").get_events(0)]
+    assert texts.count("the reply") == 1 and texts.count("next") == 1
+    # A successor reader that consumed its copy of the duplicate resumes right
+    # after the retained one: nothing is replayed.
+    from agent_bridge.live_representation import translate_reconnect_cursor
+
+    merged = store.get("resumed")
+    succ_continuity = next(iter(store.merged_history()))
+    assert translate_reconnect_cursor(store, merged, succ_continuity, 1) == 1
+    assert [e.data.get("text") for e in merged.get_events(1)] == ["next"]
+    assert store.ingest("resumed", [reply]) == 0  # still deduplicated afterwards
 
 
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:

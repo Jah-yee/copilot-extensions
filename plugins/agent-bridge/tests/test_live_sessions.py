@@ -469,6 +469,22 @@ def test_db_update_live_turn_state(tmp_db: Database) -> None:
     assert row["last_activity_at"] == now + 5
 
 
+def test_db_update_live_turn_state_follows_a_rollover_alias(tmp_db: Database) -> None:
+    """A rollover committed between the ack and the turn-state update still
+    lands the state on the successor, not the retired predecessor id."""
+    now = time.time()
+    tmp_db.register_live_session(
+        "cli-new", machine="m", cwd=None, worktree_id="wt-t", repo=None,
+        branch=None, pid=None, role=None, now=now,
+    )
+    tmp_db.execute_write(
+        "INSERT INTO live_session_aliases (alias_session_id, target_session_id, created_at) "
+        "VALUES (?, ?, ?)", ("cli-old", "cli-new", now),
+    )
+    tmp_db.update_live_turn_state("cli-old", turn_state="running", last_activity_at=now + 5)
+    assert tmp_db.get_live_session("cli-new")["turn_state"] == "running"
+
+
 def test_fresh_db_has_turn_state_columns(tmp_db: Database) -> None:
     cols = {r["name"] for r in tmp_db.execute_read("PRAGMA table_info(live_sessions)")}
     assert {"turn_state", "last_activity_at"} <= cols

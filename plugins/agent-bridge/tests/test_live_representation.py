@@ -570,6 +570,82 @@ def test_a_merge_keeps_successor_waiters_and_tokens_valid() -> None:
     assert [e.data.get("text") for e in pred.get_events(0)][decoded["event_id"] - 1] == "early"
 
 
+def test_retarget_leaves_a_malformed_continuity_for_validation() -> None:
+    from agent_bridge.result_tokens import _encode_token, retarget
+
+    merged = {"old-log": ("new-log", {1: 3})}
+    for bad in ([], {}, 7):
+        token = _encode_token({"kind": "position", "continuity": bad, "event_id": 1})
+        assert retarget(token, merged) == token  # no TypeError -> the route's 4xx path
+
+
+def test_a_waited_send_on_an_empty_successor_skips_the_predecessors_old_turn() -> None:
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore, await_turn_reply
+
+    store = LiveEventStore()
+
+    async def scenario():
+        pred = store.get_or_create("placeholder")
+        pred.append("agent_message", {"text": "old answer"})
+        pred.append("turn_complete", {"stop_reason": "end_turn"})
+        succ = store.get_or_create("resumed")  # empty log, cursor 0
+        waiting = asyncio.create_task(await_turn_reply(succ, after=succ.latest_id, timeout=5))
+        await asyncio.sleep(0.05)
+        store.alias("placeholder", "resumed")
+        pred.append("agent_message", {"text": "new reply"})
+        pred.append("turn_complete", {"stop_reason": "end_turn"})
+        return await asyncio.wait_for(waiting, 5)
+
+    reply = asyncio.run(scenario())
+    assert reply["replied"] and reply["reply"] == "new reply"
+
+
+def test_merge_mappings_outlive_an_alias_but_not_the_last_key() -> None:
+    from agent_bridge.live_representation import LiveEventStore
+
+    store = LiveEventStore()
+    store.get_or_create("placeholder").append("agent_message", {"text": "a"})
+    store.get_or_create("resumed").append("agent_message", {"text": "b"})
+    store.alias("placeholder", "resumed")
+    assert store.merged_history()
+    store.drop("placeholder")  # "resumed" still serves the merged log
+    assert store.merged_history()
+    store.drop("resumed")  # canonical cleanup: nothing serves it any more
+    assert store.merged_history() == {}
+
+
+def test_an_open_successor_stream_follows_a_merge_without_replaying() -> None:
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.routes.live_sessions import _RepresentedSession
+    from agent_bridge.routes.sessions import _sse_event_stream
+
+    store = LiveEventStore()
+
+    async def scenario():
+        pred = store.get_or_create("placeholder")
+        pred.append("agent_message", {"text": "p1"})
+        pred.append("agent_message", {"text": "p2"})
+        succ = store.get_or_create("resumed")
+        succ.append("agent_message", {"text": "s1"})  # already consumed: cursor 1
+        shim = _RepresentedSession("resumed", succ, store)
+        stream = _sse_event_stream(shim, 1, server=None, is_disconnected=None,
+                                   heartbeat_interval=0.2)
+        store.alias("placeholder", "resumed")  # s1 becomes id 3 after p1, p2
+        pred.append("agent_message", {"text": "after"})
+        chunks = [str(await asyncio.wait_for(stream.__anext__(), 5))]
+        await stream.aclose()
+        return chunks
+
+    chunks = asyncio.run(scenario())
+    joined = "".join(chunks)
+    assert "after" in joined
+    assert "p1" not in joined and "p2" not in joined and "s1" not in joined
+
+
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
     import pytest
 

@@ -87,14 +87,16 @@ class _RepresentedSession:
 
     def __init__(self, session_id: str, event_log: EventLog,
                  store: LiveEventStore | None = None) -> None:
+        from ..live_representation import MergeFollowingLog
+
         self.session_id = session_id
         self._log = event_log
-        self._store = store
+        # One view per stream: it carries the stream's cursor across a merge.
+        self._view = MergeFollowingLog(store, session_id, event_log) if store is not None else None
 
     @property
     def event_log(self) -> EventLog:
-        current = self._store.get(self.session_id) if self._store is not None else None
-        return current if current is not None else self._log
+        return self._view if self._view is not None else self._log  # type: ignore[return-value]
 
 
 def _db(request: Request) -> Database:

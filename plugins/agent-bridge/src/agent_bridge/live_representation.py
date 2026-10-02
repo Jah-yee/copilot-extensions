@@ -498,7 +498,10 @@ class LiveEventStore:
             self._seen_order[new_id] = order
         if merged is not None:
             prior = merged.continuity_id
-            ids = {evt.id: old.append(evt.event, evt.data).id for evt in merged.get_events(0)}
+            # Cursor 0 on the successor means "after everything it had", which is
+            # the predecessor's tail at merge time -- not the predecessor's start.
+            ids = {0: old.latest_id}
+            ids.update({evt.id: old.append(evt.event, evt.data).id for evt in merged.get_events(0)})
             merged.merged_into = (old, ids)
             if prior and old.continuity_id:
                 with self._lock:
@@ -518,11 +521,16 @@ class LiveEventStore:
             return [k for k, v in self._logs.items() if log is not None and v is log]
 
     def drop(self, session_id: str) -> None:
-        """Forget a session's represented log (on deregister) to free memory."""
+        """Forget a session's represented log (on deregister) to free memory;
+        once no alias still serves that log, its merge mappings go too."""
         with self._lock:
-            self._logs.pop(session_id, None)
+            log = self._logs.pop(session_id, None)
             self._seen_ids.pop(session_id, None)
             self._seen_order.pop(session_id, None)
+            if log is not None and not any(v is log for v in self._logs.values()):
+                gone = log.continuity_id
+                for key in [k for k, (c, _) in self._merged_history.items() if gone in (k, c)]:
+                    del self._merged_history[key]
 
     def _mark_seen(self, session_id: str, event_id: str) -> bool:
         """Record ``event_id`` for ``session_id``; return True if it is new.
@@ -595,6 +603,48 @@ class LiveEventStore:
 TurnReply = dict[str, Any]
 
 
+def translate_merged_cursor(prev: EventLog, current: EventLog, cursor: int) -> int | None:
+    """If ``prev`` was merged into ``current``, return ``cursor`` in the merged
+    numbering (an unmapped id maps to the nearest earlier mapped one); else None."""
+    follow = getattr(prev, "merged_into", None)
+    if follow is None or follow[0] is not current:
+        return None
+    ids = follow[1]
+    return ids.get(cursor, max([v for k, v in ids.items() if k <= cursor], default=cursor))
+
+
+class MergeFollowingLog:
+    """A read view of a represented session's log for a long-lived reader (an
+    SSE stream) that keeps its own cursor: when a session-id change merges the
+    log into another, the reader's cursor is translated to the merged numbering
+    instead of re-reading the other log's history from that raw id."""
+
+    def __init__(self, store: LiveEventStore, session_id: str, log: EventLog) -> None:
+        self._store, self._session_id, self._log = store, session_id, log
+        self._moved: tuple[int, int] | None = None  # (old cursor, translated)
+
+    def _follow(self, cursor: int) -> tuple[EventLog, int]:
+        current = self._store.get(self._session_id) or self._log
+        if current is not self._log:
+            moved = translate_merged_cursor(self._log, current, cursor)
+            self._moved = (cursor, moved) if moved is not None else None
+            self._log = current
+        if self._moved is not None and cursor == self._moved[0]:
+            cursor = self._moved[1]  # until the reader advances past the merge
+        return current, cursor
+
+    async def wait_for_events_snapshot(self, cursor: int, *, timeout: float):
+        log, cursor = self._follow(cursor)
+        return await log.wait_for_events_snapshot(cursor, timeout=timeout)
+
+    async def wait_for_events(self, cursor: int, *, timeout: float):
+        log, cursor = self._follow(cursor)
+        return await log.wait_for_events(cursor, timeout=timeout)
+
+    def __getattr__(self, name: str):
+        return getattr(self._store.get(self._session_id) or self._log, name)
+
+
 async def await_turn_reply(
     log: EventLog, *, after: int, timeout: float
 ) -> TurnReply:
@@ -629,8 +679,9 @@ async def await_turn_reply(
         if log.merged_into is not None:
             # A session-id change merged this log into another: follow it, with
             # the cursor translated to the merged numbering.
-            log, ids = log.merged_into
-            cursor = ids.get(cursor, max([v for k, v in ids.items() if k <= cursor], default=cursor))
+            merged_log = log.merged_into[0]
+            cursor = translate_merged_cursor(log, merged_log, cursor)
+            log = merged_log
             continue
         if not events:
             break  # timed out with no new events

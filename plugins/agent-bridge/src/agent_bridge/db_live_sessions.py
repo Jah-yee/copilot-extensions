@@ -220,10 +220,10 @@ class _LiveSessionsMixin:
         no-op for a session_id that isn't registered. Also refreshes
         ``updated_at`` so activity keeps the registration fresh.
         """
-        self.execute_write(
+        self.execute_write(  # alias-aware like ack_live_messages (rollover between them)
             "UPDATE live_sessions SET turn_state=?, last_activity_at=?, "
-            "updated_at=? WHERE session_id=?",
-            (turn_state, last_activity_at, last_activity_at, session_id),
+            f"updated_at=? WHERE session_id={_CANON}",
+            (turn_state, last_activity_at, last_activity_at, session_id, session_id),
         )
 
     def update_live_progress(

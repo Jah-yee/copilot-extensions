@@ -247,6 +247,10 @@ async def register_live_session(
     row = db.get_live_session(body.session_id)
     if row is None:  # pragma: no cover -- write-then-read on the same connection
         raise HTTPException(status_code=500, detail="registration not persisted")
+    store = getattr(request.app.state, "live_event_store", None)
+    if store is not None:
+        for alias_id in db.live_session_aliases_to(row["session_id"]):
+            store.alias(alias_id, row["session_id"])
     return _to_info(row)
 
 
@@ -514,6 +518,8 @@ async def ingest_live_events(
     registration = db.get_live_session(session_id)
     if registration is None:
         raise HTTPException(status_code=404, detail="live session not found")
+    # A retired id forwards here: ingest, derive and report under the current id.
+    session_id = registration["session_id"]
     store = _store(request)
     raw = [e.model_dump() for e in body.events]
     ingested = store.ingest(
@@ -571,6 +577,7 @@ async def stream_live_events(
     registration = db.get_live_session(session_id)
     if registration is None:
         raise HTTPException(status_code=404, detail="live session not found")
+    session_id = registration["session_id"]
     store = _store(request)
     log = store.get_or_create(
         session_id, worktree_id=registration.get("worktree_id")
@@ -746,6 +753,9 @@ async def set_live_mode(
             detail=f"live session {session_id} can't take a mode change now ({reason})",
         )
     def settled() -> SetModeResult | None:
+        # Follow a session-id change while waiting: the control moves with it.
+        nonlocal target_session_id
+        target_session_id = db.resolve_live_session_id(target_session_id)
         outcome = (db.live_control_state(target_session_id, control_id) or {}).get("outcome")
         if outcome == "applied":
             return SetModeResult(session_id=target_session_id, mode=body.mode, applied=True, state="applied")
@@ -761,6 +771,7 @@ async def set_live_mode(
         if (result := settled()) is not None:
             return result
         await asyncio.sleep(MODE_POLL_SECONDS)
+    target_session_id = db.resolve_live_session_id(target_session_id)
     if db.withdraw_live_control(target_session_id, control_id, time.time()):
         return SetModeResult(
             session_id=target_session_id, mode=body.mode, applied=False, state="withdrawn",

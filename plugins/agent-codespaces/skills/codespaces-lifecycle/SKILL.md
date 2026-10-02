@@ -234,7 +234,7 @@ seeded as a one-line pointer (tmux-typed input must be a single line). It
 succeeds once the session is registered with the host bridge. If the launch
 created a session but Copilot did not reach a confirmed input prompt in time,
 the command keeps the live session and delivers the seed over the existing
-agent-bridge message lane; the JSON reports `seed_delivery: "bridge"` (or
+host bridge's message lane; the JSON reports `seed_delivery: "bridge"` (or
 `"failed"` if that follow-up message could not be sent). Only a created session
 that never registers is treated as unrepresented: the failure reports the screen
 (`pane_tail`) and stops what it started. `--register-timeout` covers the host

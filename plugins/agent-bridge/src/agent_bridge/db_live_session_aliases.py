@@ -8,40 +8,46 @@ from typing import Any
 def inherit_cli_mode_claim_for_session_id_change(
     db: Any, worktree_id: str, session_id: str, *, now: float
 ) -> str | None:
-    """Move a claimed CLI-mode scope from a placeholder id to ``session_id``."""
+    """Move a CLI-mode session's handle and claim to ``session_id`` when the
+    same process re-registers under a new conversation id (a resume).
+
+    The predecessor is found from durable live registrations, not the launch
+    reservation (which a launcher may already have released, or which may have
+    expired): same worktree and machine, ``cli_mode``, and the *same, known*
+    PID. A missing PID on either side never counts as a match.
+    """
     conn = db._get_conn()
     with db._write_lock:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            reservation = conn.execute(
-                "SELECT * FROM cli_mode_reservations "
-                "WHERE worktree_id=? AND claimed_by_session_id IS NOT NULL "
-                "AND claimed_by_session_id != ? AND expires_at > ?",
-                (worktree_id, session_id, now),
-            ).fetchone()
-            if reservation is None:
-                conn.rollback()
-                return None
-            predecessor_id = reservation["claimed_by_session_id"]
-            predecessor = conn.execute(
-                "SELECT * FROM live_sessions WHERE session_id=? "
-                "AND worktree_id=? AND cli_mode=1",
-                (predecessor_id, worktree_id),
-            ).fetchone()
             successor = conn.execute(
                 "SELECT * FROM live_sessions WHERE session_id=? "
                 "AND worktree_id=?",
                 (session_id, worktree_id),
             ).fetchone()
-            if predecessor is None or successor is None:
+            if successor is None or successor["pid"] is None:
                 conn.rollback()
                 return None
-            pred_pid = predecessor["pid"]
-            succ_pid = successor["pid"]
-            if pred_pid is not None and succ_pid is not None and pred_pid != succ_pid:
+            predecessor = conn.execute(
+                "SELECT * FROM live_sessions WHERE worktree_id=? "
+                "AND session_id != ? AND cli_mode=1 AND pid IS NOT NULL "
+                "AND pid=? AND machine IS ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (worktree_id, session_id, successor["pid"], successor["machine"]),
+            ).fetchone()
+            if predecessor is None:
                 conn.rollback()
                 return None
-            venue = reservation["venue"] or predecessor["venue"] or successor["venue"]
+            predecessor_id = predecessor["session_id"]
+            reservation = conn.execute(
+                "SELECT venue FROM cli_mode_reservations "
+                "WHERE worktree_id=? AND claimed_by_session_id=?",
+                (worktree_id, predecessor_id),
+            ).fetchone()
+            venue = (
+                (reservation["venue"] if reservation is not None else None)
+                or predecessor["venue"] or successor["venue"]
+            )
             driven_by = successor["driven_by"] or predecessor["driven_by"]
             conn.execute(
                 "UPDATE cli_mode_reservations SET claimed_by_session_id=? "
@@ -68,8 +74,7 @@ def inherit_cli_mode_claim_for_session_id_change(
                 (session_id, predecessor_id),
             )
             conn.execute(
-                "UPDATE live_messages SET session_id=? "
-                "WHERE session_id=? AND delivered_at IS NULL",
+                "UPDATE live_messages SET session_id=? WHERE session_id=?",
                 (session_id, predecessor_id),
             )
             conn.execute(

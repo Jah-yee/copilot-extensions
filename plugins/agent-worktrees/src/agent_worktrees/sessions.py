@@ -2137,7 +2137,7 @@ def mux_seed_pane(
     last_region: str | None = None
     start = time.monotonic()
     idle_window = max(0.0, ready_timeout)
-    hard_window = max(idle_window, hard_timeout)
+    hard_window = max(0.0, hard_timeout)
     idle_deadline = start + idle_window
     hard_deadline = start + hard_window
     while time.monotonic() < min(idle_deadline, hard_deadline):

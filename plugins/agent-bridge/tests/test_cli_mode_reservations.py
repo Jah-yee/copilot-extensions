@@ -497,3 +497,52 @@ def test_live_sessions_deregister_verb_deletes_the_exact_session(monkeypatch, ca
     args.func(args)
     assert requests == [("DELETE", "/api/v1/live-sessions/sid-1")]
     assert '"ok": true' in capsys.readouterr().out
+
+
+# -- session-id rollover finds its predecessor without the reservation --------
+
+
+def _claimed_placeholder(db: Database, now: float, *, ttl: float = 300.0, pid=4242) -> None:
+    db.create_cli_mode_reservation("wt-R", now=now, ttl_seconds=ttl)
+    assert _register(db, "placeholder", "wt-R", now + 1, pid=pid) == "live"
+
+
+def test_rollover_after_the_launcher_released_the_reservation(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert tmp_db.release_cli_mode_reservation("wt-R") == 1
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    assert tmp_db.get_live_session("resumed")["cli_mode"] == 1
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+    assert tmp_db.get_cli_mode_reservation("wt-R") is None
+
+
+def test_rollover_after_the_reservation_expired(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now, ttl=10)
+    assert _register(tmp_db, "resumed", "wt-R", now + 60, pid=4242) == "live"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+
+
+@pytest.mark.parametrize("pred_pid, succ_pid", [(None, 4242), (4242, None), (4242, 99)])
+def test_rollover_needs_the_same_known_pid(tmp_db: Database, pred_pid, succ_pid) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now, pid=pred_pid)
+    assert _register(tmp_db, "other", "wt-R", now + 2, pid=succ_pid) == "live"
+    assert tmp_db.get_live_session("other")["cli_mode"] == 0
+    assert tmp_db.get_live_session_exact("placeholder") is not None
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
+
+
+def test_rollover_moves_delivered_messages_so_retries_stay_idempotent(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    mid, reason = tmp_db.enqueue_live_message_if_fresh(
+        "placeholder", sender="op", body="seed", now=now + 2, idempotency_key="k1")
+    assert reason is None and mid is not None
+    assert tmp_db.ack_live_messages("placeholder", [mid], now + 3) == 1
+    assert _register(tmp_db, "resumed", "wt-R", now + 4, pid=4242) == "live"
+    again, reason = tmp_db.enqueue_live_message_if_fresh(
+        tmp_db.resolve_live_session_id("placeholder"), sender="op", body="seed",
+        now=now + 5, idempotency_key="k1")
+    assert (again, reason) == (mid, None)

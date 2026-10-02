@@ -1894,3 +1894,29 @@ class TestMuxSessionIndex:
     def test_index_miss_still_falls_back(self):
         index = mux_session_index(["host-linux-1-a"])
         assert worktree_id_from_mux_session("wt-other", index=index) == "other"
+
+
+def test_boxed_input_is_ready_despite_busy_words_in_banner_or_transcript():
+    from agent_worktrees import pane_readiness
+
+    banner = _BOXED_INPUT.replace(" ~/repo ", " ~/loading-service ")
+    assert pane_readiness.ready_signature(banner) == "boxed-input"
+    transcript = " ● Finished loading the project configuration.\n" + _BOXED_INPUT
+    assert pane_readiness.ready_signature(transcript) == "boxed-input"
+    # A real status line above the box still holds readiness back.
+    assert pane_readiness.ready_signature(" ◐ Loading environment\n" + _BOXED_INPUT) is None
+
+
+def test_seed_readiness_never_outlasts_the_hard_cap():
+    busy = [f" /work/repo   Session\n ◉ Resuming session... {i}\n" for i in range(500)]
+    driver = _SeedDriver(ready_caps=busy, echo_caps=[])
+    with patch("subprocess.run", side_effect=driver.run), \
+         patch("time.sleep"), \
+         patch("time.monotonic", side_effect=_Clock()), \
+         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"):
+        result = mux_seed_pane(
+            "%9", "seed", ready_timeout=1000.0, hard_timeout=100.0,
+            poll_interval=0.0, settle=0.0,
+        )
+    assert result["reason"] == "not-ready-timeout"
+    assert 500 - len(driver.ready_caps) <= 10  # 100 s of 10 s clock ticks

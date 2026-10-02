@@ -573,6 +573,15 @@ class _LiveSessionsMixin:
             current = target
         return current
 
+    def live_session_aliases_to(self, session_id: str) -> list[str]:
+        """Retired ids that now forward to ``session_id``."""
+        rows = self.execute_read(
+            "SELECT alias_session_id FROM live_session_aliases "
+            "WHERE target_session_id=?",
+            (session_id,),
+        )
+        return [r["alias_session_id"] for r in rows]
+
     def get_live_session(self, session_id: str) -> dict[str, Any] | None:
         resolved = self.resolve_live_session_id(session_id)
         return self.get_live_session_exact(resolved)

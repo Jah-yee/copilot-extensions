@@ -471,6 +471,23 @@ class LiveEventStore:
                 log.set_telemetry_identity(worktree_id=worktree_id)
             return log
 
+    def alias(self, old_id: str, new_id: str) -> None:
+        """Serve ``old_id`` and ``new_id`` from one log after a session-id
+        change: the predecessor's log (and its waiters and readers) becomes the
+        successor's, so a reply or stream spanning the rename sees every event."""
+        with self._lock:
+            old = self._logs.get(old_id)
+            new = self._logs.get(new_id)
+            if old is None or old is new:
+                return
+            if new is None:
+                self._logs[new_id] = old
+                if old_id in self._seen_ids:
+                    self._seen_ids[new_id] = self._seen_ids[old_id]
+                    self._seen_order[new_id] = self._seen_order[old_id]
+            else:
+                self._logs[old_id] = new
+
     def drop(self, session_id: str) -> None:
         """Forget a session's represented log (on deregister) to free memory."""
         with self._lock:

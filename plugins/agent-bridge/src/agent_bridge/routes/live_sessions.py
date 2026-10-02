@@ -633,11 +633,13 @@ async def stream_live_events(
         async for chunk in stream:
             following = getattr(shim.event_log, "followed_continuity_id", announced)
             if following and following != announced:
-                announced = following
                 note = {"continuity_id": following}
                 moved = getattr(shim.event_log, "translated_cursor", None)
                 if moved is not None:
                     note["after"] = moved  # the reader's cursor, renumbered with it
+                elif announced is None:
+                    note["after"] = start  # an empty log's first event: the cursor the header couldn't carry
+                announced = following
                 yield f"event: continuity\ndata: {json.dumps(note)}\n\n"
             yield chunk
 

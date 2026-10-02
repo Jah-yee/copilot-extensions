@@ -57,20 +57,27 @@ def may_switch_session_id(copilot_args: list[str]) -> bool:
     return any(a.split("=", 1)[0] in RESUME_SELECTORS for a in copilot_args)
 
 
+#: Seed outcomes that prove no keystroke reached the pane (safe to deliver over
+#: the bridge instead). Any other unsubmitted outcome -- echoed but not entered,
+#: or a send-keys that failed part-way -- may have left a draft in Copilot's input.
+SEED_NEVER_TYPED_REASONS = frozenset({"not-ready-timeout", "pane-target-unresolved"})
+
+
 def seed_outcome(embodied: dict, *, created: bool, seed: str | None) -> tuple[str | None, bool]:
     """How a launcher follows up a venue's typed seed: ``(status, bridge_send)``.
 
-    ``"typed"`` when it was submitted. When it was never typed into the pane
-    (``seeded`` false), ``bridge_send`` asks the caller to deliver it over the
-    bridge. When it was typed but not submitted (e.g. ``enter-failed``), the
-    draft may still sit in Copilot's input, so a bridge copy could run the task
-    twice: it reports ``"failed"`` and sends nothing.
+    ``"typed"`` when it was submitted. ``bridge_send`` only when nothing can have
+    been typed: the venue never tried (no ``seeded``/reason, an older venue) or
+    reports a reason in :data:`SEED_NEVER_TYPED_REASONS`. Otherwise a draft may
+    sit in Copilot's input and a bridge copy could run the task twice, so it
+    reports ``"failed"`` and sends nothing.
     """
     if not (created and seed):
         return None, False
     if embodied.get("seed_submitted"):
         return "typed", False
-    if embodied.get("seeded"):
+    reason = embodied.get("seed_reason")
+    if embodied.get("seeded") or (reason and reason not in SEED_NEVER_TYPED_REASONS):
         return "failed", False
     return None, True
 

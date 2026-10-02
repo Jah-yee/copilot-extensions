@@ -801,6 +801,33 @@ def test_an_initially_empty_log_announces_its_continuity_before_the_first_event(
     assert continuity and announce.startswith("event: continuity") and continuity in announce
     assert event.startswith("id: 1") and "first" in event
 
+
+def test_a_reconnect_to_an_empty_restarted_log_announces_its_start_cursor() -> None:
+    """After a daemon restart the log is empty: no header can carry the start,
+    so the first in-band announcement does -- the viewer's old cursor (40) must
+    become 0, or it would skip the new log's events 2-40 on its next reconnect."""
+    import asyncio
+    import json as _json
+
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.routes.live_sessions import stream_live_events
+
+    store = LiveEventStore()
+
+    async def scenario():
+        log = store.get_or_create("resumed")
+        response = await stream_live_events(
+            "resumed", _route_request(store, "resumed"), after=40, continuity_id="pre-restart-log")
+        log.append("agent_message", {"text": "first"})
+        body = response.body_iterator
+        announce = str(await asyncio.wait_for(body.__anext__(), 5))
+        await body.aclose()
+        return announce
+
+    announce = asyncio.run(scenario())
+    note = _json.loads(announce.split("data: ", 1)[1].strip())
+    assert note["after"] == 0
+
 def test_two_quiet_reconnects_across_a_merge_replay_nothing() -> None:
     """The bridge echoes the translated start with the new continuity, so a
     second reconnect with no numbered event in between resumes from it."""

@@ -192,7 +192,7 @@ def test_seed_never_submitted_but_registered_is_delivered_over_bridge(seams, mon
     sent = []
     monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
     unready = json.dumps({"ok": True, "created": True, "seed_submitted": False,
-                          "seed_reason": "prompt not ready"})
+                          "seed_reason": "not-ready-timeout"})
     rc = detach.cmd_detach(_args(), ssh_session=_ssh(seams, stdout=unready))
     assert rc == 0
     out = json.loads(capsys.readouterr().out)

@@ -65,14 +65,16 @@ def _resolve_prompt(args: argparse.Namespace, *, required: bool) -> str | None:
 
 
 def _hold_protocol_floor(client: Any, floor: int) -> None:
-    """Keep ``--min-daemon-protocol`` true across every request retry.
+    """Keep ``--min-daemon-protocol`` true for every request attempt.
 
-    The preflight checks only the daemon it first reached. After a connection
-    failure the client would retry -- at a replacement endpoint, or at the same
-    URL where an older daemon may have restarted, or a pinned URL -- so this
-    takes over that retry: the client makes one attempt per call, and before
-    each retry (bounded by the client's own outage grace) the daemon that will
-    receive it is re-probed; one below the floor gets a 426, never the request.
+    The preflight checks only the daemon it first reached; an older daemon can
+    restart at the same URL (or a connection failure can move the client to a
+    replacement) before a later request. So each attempt -- the first and every
+    retry, which this takes over from the client (bounded by its own outage
+    grace) -- first probes the daemon that will receive it, and one below the
+    floor gets a 426, never the request. An unanswered probe is retried, never
+    skipped. The probe-to-request window left is milliseconds; closing it fully
+    needs the daemon itself to refuse, which an older daemon can't do.
     """
     import time
 
@@ -84,31 +86,32 @@ def _hold_protocol_floor(client: Any, floor: int) -> None:
 
     def _floored(method: str, path: str, *a: Any, **k: Any) -> Any:
         deadline = time.monotonic() + grace
+        retrying = False
         while True:
+            if retrying:
+                time.sleep(0.5)
+                base = resolve() if resolve else None
+                if base:
+                    client._base = base.rstrip("/")
+            try:
+                version = int((request("GET", "/health") or {}).get("protocol_version") or 0)
+            except (BridgeConnectionError, TypeError, ValueError):
+                if time.monotonic() >= deadline:
+                    raise BridgeConnectionError(
+                        f"the bridge daemon at {client._base} didn't answer a protocol check in time; "
+                        "the request was not sent") from None
+                retrying = True
+                continue
+            if version < floor:
+                raise BridgeClientError(426, f"the bridge daemon now at {client._base} predates protocol "
+                                             f"{floor}; not sending the request there")
             try:
                 return request(method, path, *a, **k)
             except BridgeConnectionError as exc:
                 # A reset mid-POST may have been delivered: never resend it.
                 if time.monotonic() >= deadline or ("reset" in str(exc) and method not in ("GET", "HEAD")):
                     raise
-            # Retry only after the daemon that will receive it passed the floor;
-            # an unanswered probe is probed again (within the budget), never skipped.
-            while True:
-                time.sleep(0.5)
-                base = resolve() if resolve else None
-                if base:
-                    client._base = base.rstrip("/")
-                try:
-                    version = int((request("GET", "/health") or {}).get("protocol_version") or 0)
-                    break
-                except (BridgeConnectionError, TypeError, ValueError):
-                    if time.monotonic() >= deadline:
-                        raise BridgeConnectionError(
-                            f"the bridge daemon at {client._base} didn't answer a protocol check in time; "
-                            "the request was not retried") from None
-            if version < floor:
-                raise BridgeClientError(426, f"the bridge daemon now at {client._base} predates protocol "
-                                             f"{floor}; not retrying the request there")
+                retrying = True
 
     client._request = _floored
 

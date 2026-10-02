@@ -724,6 +724,11 @@ class TestDetachedRunner:
         assert seed_outcome({}, created=True, seed="s") == (None, True)
         assert seed_outcome({}, created=False, seed="s") == (None, False)
         assert seed_outcome({}, created=True, seed=None) == (None, False)
+        # Only a reason proving nothing was typed may fall back to the bridge.
+        for safe in ("not-ready-timeout", "pane-target-unresolved"):
+            assert seed_outcome({"seeded": False, "seed_reason": safe}, created=True, seed="s") == (None, True)
+        for unsure in ("send-failed", "seed-not-echoed", "enter-failed"):
+            assert seed_outcome({"seeded": False, "seed_reason": unsure}, created=True, seed="s") == ("failed", False)
 
     def test_unsubmitted_seed_without_registration_stops_created_session(self, monkeypatch) -> None:
         from venue_copilot import detached

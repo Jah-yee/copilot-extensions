@@ -260,3 +260,28 @@ def test_send_still_rejects_an_unrelated_replacement(monkeypatch, capsys):
         _expected_session_send(monkeypatch, resolved, "placeholder")
     assert exc.value.code == 1
     assert "not expected session" in capsys.readouterr().err
+
+
+def test_a_protocol_floor_is_checked_before_every_attempt_not_only_retries(monkeypatch):
+    """The preflight passed, then an older daemon restarted at the same URL with
+    no connection failure in between: nothing may reach it."""
+    from agent_bridge.client import BridgeClientError
+
+    base = "http://127.0.0.1:57585"
+    client = BridgeClient(base, "tok", connect_grace=2.0)
+    calls: list[str] = []
+    healths = iter([20])  # the preflight sees 20; every later probe sees 19
+
+    def by_port(req, timeout=None):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/health"):
+            version = next(healths, 19)
+            return _FakeResp({"status": "ok", "protocol_version": version, "min_protocol_version": 1})
+        if req.full_url.endswith("/api/v1/live-sessions/resolve?handle=agent-x"):
+            return _FakeResp({"session_id": "sess1", "status": "idle"})
+        return _FakeResp({"message_id": "m1", "replied": False})
+
+    with pytest.raises(BridgeClientError) as exc:
+        _floor_send(monkeypatch, client, by_port)
+    assert exc.value.status == 426
+    assert not any(u.endswith("/messages") or "resolve" in u for u in calls)

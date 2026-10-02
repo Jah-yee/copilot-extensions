@@ -65,28 +65,45 @@ def _resolve_prompt(args: argparse.Namespace, *, required: bool) -> str | None:
 
 
 def _hold_protocol_floor(client: Any, floor: int) -> None:
-    """Keep ``--min-daemon-protocol`` true across the client's failover.
+    """Keep ``--min-daemon-protocol`` true across every request retry.
 
-    The preflight checks only the daemon it first reached; a connection
-    refusal makes the client follow the routing table to a replacement and
-    retry there. Probe each replacement first and refuse (426) one below the
-    floor, so an older daemon can never accept a message the floor exists for.
+    The preflight checks only the daemon it first reached. After a connection
+    failure the client would retry -- at a replacement endpoint, or at the same
+    URL where an older daemon may have restarted, or a pinned URL -- so this
+    takes over that retry: the client makes one attempt per call, and before
+    each retry (bounded by the client's own outage grace) the daemon that will
+    receive it is re-probed; one below the floor gets a 426, never the request.
     """
-    from .client import BridgeClient, BridgeClientError
+    import time
 
-    resolve = getattr(client, "_reresolve", None)
-    if resolve is None:
-        return
+    from .client import BridgeClientError, BridgeConnectionError
 
-    def _checked() -> str | None:
-        base = resolve()
-        if base and base.rstrip("/") != client._base and not BridgeClient(
-                base, client._token, timeout=10, connect_grace=0.0).daemon_supports(floor):
-            raise BridgeClientError(426, f"the replacement bridge daemon at {base} predates "
-                                         f"protocol {floor}; not retrying the send there")
-        return base
+    request, resolve = client._request, getattr(client, "_reresolve", None)
+    grace = getattr(client, "_connect_grace", 0.0)
+    client._reresolve, client._connect_grace = None, 0.0
 
-    client._reresolve = _checked
+    def _floored(method: str, path: str, *a: Any, **k: Any) -> Any:
+        deadline = time.monotonic() + grace
+        while True:
+            try:
+                return request(method, path, *a, **k)
+            except BridgeConnectionError as exc:
+                # A reset mid-POST may have been delivered: never resend it.
+                if time.monotonic() >= deadline or ("reset" in str(exc) and method not in ("GET", "HEAD")):
+                    raise
+            time.sleep(0.5)
+            base = resolve() if resolve else None
+            if base:
+                client._base = base.rstrip("/")
+            try:
+                version = int((request("GET", "/health") or {}).get("protocol_version") or 0)
+            except (BridgeConnectionError, TypeError, ValueError):
+                continue
+            if version < floor:
+                raise BridgeClientError(426, f"the bridge daemon now at {client._base} predates protocol "
+                                             f"{floor}; not retrying the request there")
+
+    client._request = _floored
 
 
 def _companion_seed_prompt(prompt: str | None) -> str | None:

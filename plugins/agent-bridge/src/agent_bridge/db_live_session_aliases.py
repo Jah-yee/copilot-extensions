@@ -59,7 +59,8 @@ def inherit_cli_mode_claim_for_session_id_change(
 
     The predecessor is found from durable live registrations, not the launch
     reservation (which a launcher may already have released, or which may have
-    expired): same worktree and machine, ``cli_mode``, and the *same, known*
+    expired): same worktree and *known* machine (two unknown machines never
+    match), ``cli_mode``, and the *same, known*
     PID. A missing PID on either side never counts as a match. A PID alone
     does not prove the same process (it can be reused), so when both rows
     carry ``process_started_at`` those must agree; otherwise the predecessor
@@ -75,7 +76,7 @@ def inherit_cli_mode_claim_for_session_id_change(
                 "AND worktree_id=?",
                 (session_id, worktree_id),
             ).fetchone()
-            if successor is None or successor["pid"] is None:
+            if successor is None or successor["pid"] is None or not successor["machine"]:
                 conn.rollback()
                 return None
             started = successor["process_started_at"]
@@ -86,7 +87,7 @@ def inherit_cli_mode_claim_for_session_id_change(
                 # Never fold back the session this id was already renamed into.
                 "AND session_id NOT IN (SELECT target_session_id FROM live_session_aliases "
                 "WHERE alias_session_id=?) "
-                "AND pid=? AND machine IS ? AND CASE "
+                "AND pid=? AND machine = ? AND CASE "
                 "WHEN ? IS NOT NULL AND process_started_at IS NOT NULL "
                 "THEN ABS(process_started_at - ?) < ? "
                 "ELSE status='wedged' OR (status='live' AND updated_at >= ?) END "

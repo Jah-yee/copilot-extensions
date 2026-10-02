@@ -38,9 +38,10 @@ def _register(
     pid: int | None = 1,
     driven_by: str | None = None,
     started: float | None = None,
+    machine: str | None = "m",
 ) -> str:
     return db.register_live_session(
-        sid, machine="m", cwd="/w", worktree_id=wt, repo=None,
+        sid, machine=machine, cwd="/w", worktree_id=wt, repo=None,
         branch=None, pid=pid, role="picker", now=now, driven_by=driven_by,
         process_started_at=started,
     )
@@ -589,6 +590,17 @@ def test_rollover_needs_the_same_known_pid(tmp_db: Database, pred_pid, succ_pid)
     assert _register(tmp_db, "other", "wt-R", now + 2, pid=succ_pid) == "live"
     assert tmp_db.get_live_session("other")["cli_mode"] == 0
     assert tmp_db.get_live_session_exact("placeholder") is not None
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
+
+
+def test_two_unknown_machines_never_inherit(tmp_db: Database) -> None:
+    """Hosts that both failed their machine lookup can share a scope, PID and
+    start time; with no known machine on either side they stay independent."""
+    now = time.time()
+    tmp_db.create_cli_mode_reservation("wt-R", now=now, ttl_seconds=300)
+    assert _register(tmp_db, "placeholder", "wt-R", now + 1, pid=4242, started=now, machine=None) == "live"
+    assert _register(tmp_db, "other-host", "wt-R", now + 2, pid=4242, started=now, machine=None) == "live"
+    assert tmp_db.get_live_session("other-host")["cli_mode"] == 0
     assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
 
 

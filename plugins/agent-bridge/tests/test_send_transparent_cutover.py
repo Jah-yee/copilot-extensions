@@ -31,6 +31,8 @@ import argparse
 import json
 import urllib.error
 
+import pytest
+
 from agent_bridge import __main__ as m
 from agent_bridge.client import BridgeClient
 
@@ -126,6 +128,43 @@ def test_send_with_a_protocol_floor_sends_nothing_to_an_older_daemon(monkeypatch
     assert "predates protocol 20" in capsys.readouterr().err
 
 
+def _floor_send(monkeypatch, client, by_port):
+    monkeypatch.setattr("agent_bridge.client.urllib.request.urlopen", by_port)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    monkeypatch.setattr(m, "_get_client", lambda: client)
+    monkeypatch.setattr(m, "_live_sender_label", lambda _args: "caller-A")
+    monkeypatch.setattr(m, "_live_reply_to", lambda _args: None)
+    monkeypatch.setattr(m, "_live_message_kind", lambda _args: "prompt")
+    monkeypatch.setattr(m, "_live_message_delivery", lambda _args: "queue")
+    args = argparse.Namespace(
+        target="agent-x", prompt="hello", prompt_file=None, new=False, json=False,
+        no_wait=True, reply_timeout=120.0, idempotency_key=None, expected_session_id=None,
+        min_daemon_protocol=20,
+    )
+    m._cmd_send(args)
+
+
+def _floor_daemon(versions: dict, posted: list, refuse_first_post: bool = True):
+    """Fake urlopen: /health answers ``versions[base]`` (the latest entry once
+    the first POST was refused); the first POST is refused, later ones land."""
+    state = {"refused": not refuse_first_post}
+
+    def by_port(req, timeout=None):
+        base = req.full_url.split("/api/")[0].split("/health")[0]
+        if req.full_url.endswith("/health"):
+            version = versions[base][-1 if state["refused"] else 0]
+            return _FakeResp({"status": "ok", "protocol_version": version, "min_protocol_version": 1})
+        if req.full_url.endswith("/api/v1/live-sessions/resolve?handle=agent-x"):
+            return _FakeResp({"session_id": "sess1", "status": "idle"})
+        posted.append(req.full_url)
+        if not state["refused"]:
+            state["refused"] = True
+            raise urllib.error.URLError(ConnectionRefusedError("refused"))
+        return _FakeResp({"message_id": "m1", "replied": False})
+
+    return by_port
+
+
 def test_a_protocol_floor_also_holds_for_the_replacement_daemon(monkeypatch):
     """The preflight passed on a protocol-20 daemon, but its port then refused the
     delivery; the routing table names a protocol-19 replacement. The send must
@@ -137,35 +176,35 @@ def test_a_protocol_floor_also_holds_for_the_replacement_daemon(monkeypatch):
     old_base, new_base = "http://127.0.0.1:57585", "http://127.0.0.1:47000"
     client = BridgeClient(old_base, "tok", connect_grace=2.0, reresolve=lambda: new_base)
     posted: list[str] = []
-
-    def by_port(req, timeout=None):
-        if req.full_url.endswith("/health"):
-            version = 20 if req.full_url.startswith(old_base) else 19
-            return _FakeResp({"status": "ok", "protocol_version": version,
-                              "min_protocol_version": 1})
-        if req.full_url.endswith("/api/v1/live-sessions/resolve?handle=agent-x"):
-            return _FakeResp({"session_id": "sess1", "status": "idle"})
-        posted.append(req.full_url)
-        if req.full_url.startswith(old_base):
-            raise urllib.error.URLError(ConnectionRefusedError("refused"))
-        return _FakeResp({"message_id": "m1", "replied": False})
-
-    monkeypatch.setattr("agent_bridge.client.urllib.request.urlopen", by_port)
-    monkeypatch.setattr(m, "_get_client", lambda: client)
-    monkeypatch.setattr(m, "_live_sender_label", lambda _args: "caller-A")
-    monkeypatch.setattr(m, "_live_reply_to", lambda _args: None)
-    monkeypatch.setattr(m, "_live_message_kind", lambda _args: "prompt")
-    monkeypatch.setattr(m, "_live_message_delivery", lambda _args: "queue")
-    args = argparse.Namespace(
-        target="agent-x", prompt="hello", prompt_file=None, new=False, json=False,
-        no_wait=True, reply_timeout=120.0, idempotency_key=None, expected_session_id=None,
-        min_daemon_protocol=20,
-    )
-
+    by_port = _floor_daemon({old_base: [20], new_base: [19]}, posted)
     with pytest.raises(BridgeClientError) as exc:
-        m._cmd_send(args)
+        _floor_send(monkeypatch, client, by_port)
     assert exc.value.status == 426
     assert posted == [f"{old_base}/api/v1/live-sessions/sess1/messages"]  # never the replacement
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+def test_a_protocol_floor_holds_when_an_older_daemon_restarts_at_the_same_url(monkeypatch, pinned):
+    """Same URL (pinned, or the routing table still names it), but the daemon
+    behind it restarted as protocol 19: the refused POST is not retried."""
+    from agent_bridge.client import BridgeClientError
+
+    base = "http://127.0.0.1:57585"
+    client = BridgeClient(base, "tok", connect_grace=2.0, reresolve=None if pinned else (lambda: base))
+    posted: list[str] = []
+    with pytest.raises(BridgeClientError) as exc:
+        _floor_send(monkeypatch, client, _floor_daemon({base: [20, 19]}, posted))
+    assert exc.value.status == 426
+    assert posted == [f"{base}/api/v1/live-sessions/sess1/messages"]
+
+
+def test_a_protocol_floor_still_retries_a_restart_that_keeps_the_protocol(monkeypatch, capsys):
+    base = "http://127.0.0.1:57585"
+    client = BridgeClient(base, "tok", connect_grace=2.0)
+    posted: list[str] = []
+    _floor_send(monkeypatch, client, _floor_daemon({base: [20, 20]}, posted))
+    assert posted == [f"{base}/api/v1/live-sessions/sess1/messages"] * 2
+    assert "Delivered to live session sess1" in capsys.readouterr().out
 
 
 def _expected_session_send(monkeypatch, resolved: dict, expected: str):

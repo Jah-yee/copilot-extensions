@@ -619,9 +619,12 @@ async def stream_live_events(
     start = translate_reconnect_cursor(store, log, continuity_id, after or 0)
     shim = _RepresentedSession(session_id=session_id, event_log=log, store=store)
     server = getattr(request.app.state, "uvicorn_server", None)
+    # One snapshot for the header and the announcer: an empty log gains its
+    # continuity with its first event, which must then be announced in-band.
+    initial_continuity = log.continuity_id
 
     async def _announcing_continuity(stream):
-        announced = log.continuity_id
+        announced = initial_continuity
         async for chunk in stream:
             following = getattr(shim.event_log, "followed_continuity_id", announced)
             if following and following != announced:
@@ -646,8 +649,8 @@ async def stream_live_events(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            **({"X-Agent-Bridge-Continuity": log.continuity_id,
-                "X-Agent-Bridge-Cursor": str(start)} if log.continuity_id else {}),
+            **({"X-Agent-Bridge-Continuity": initial_continuity,
+                "X-Agent-Bridge-Cursor": str(start)} if initial_continuity else {}),
         },
     )
 

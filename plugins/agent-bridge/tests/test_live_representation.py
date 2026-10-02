@@ -755,6 +755,30 @@ def test_an_open_stream_announces_the_merged_continuity_before_renumbered_ids() 
     assert event.startswith("id: 3") and "after" in event
 
 
+def test_an_initially_empty_log_announces_its_continuity_before_the_first_event() -> None:
+    """The first event lands after the response (no continuity header) was
+    built but before its body is iterated: the stream still names its log."""
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.routes.live_sessions import stream_live_events
+
+    store = LiveEventStore()
+
+    async def scenario():
+        log = store.get_or_create("resumed")
+        response = await stream_live_events("resumed", _route_request(store, "resumed"))
+        assert "X-Agent-Bridge-Continuity" not in response.headers
+        log.append("agent_message", {"text": "first"})
+        body = response.body_iterator
+        chunks = [str(await asyncio.wait_for(body.__anext__(), 5)) for _ in range(2)]
+        await body.aclose()
+        return chunks, log.continuity_id
+
+    (announce, event), continuity = asyncio.run(scenario())
+    assert continuity and announce.startswith("event: continuity") and continuity in announce
+    assert event.startswith("id: 1") and "first" in event
+
 def test_two_quiet_reconnects_across_a_merge_replay_nothing() -> None:
     """The bridge echoes the translated start with the new continuity, so a
     second reconnect with no numbered event in between resumes from it."""

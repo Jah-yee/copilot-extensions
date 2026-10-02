@@ -120,11 +120,6 @@ _IS_WIN = os.name == "nt"
 # mutation targeting the anchor (``-C <anchor>`` or, with no ``-C``, the shell
 # cwd). Fd-dup redirects (``2>&1``) are NOT writes and are excluded.
 
-# Statement separators that end one simple command and start the next. A rough
-# split (quote-unaware) -- over-splitting only makes the heuristic *less*
-# trigger-happy, which is the safe direction for a false-positive fix.
-_SHELL_SEP = re.compile(r"\|\||&&|[;|&\n\r]")
-
 # A write cmdlet / POSIX verb at the START of a segment (after optional
 # whitespace and one optional opening quote). Command-position is the key: a
 # write verb buried mid-segment (e.g. inside a ``--body`` string) is NOT a
@@ -187,6 +182,67 @@ def _effective_seg(seg: str) -> str:
         prev = seg
         seg = _SEG_STRIP.sub("", seg, count=1)
     return seg
+
+
+def _shell_segments(cmd: str, tool: str) -> list[str]:
+    lower_tool = tool.lower()
+    posix_escapes = lower_tool in {"bash", "sh"}
+    powershell_escapes = lower_tool in {"powershell", "pwsh"}
+    cmd_escapes = lower_tool == "cmd"
+    segments: list[str] = []
+    current: list[str] = []
+    quote = None
+    index = 0
+    while index < len(cmd):
+        char = cmd[index]
+        if quote:
+            current.append(char)
+            if (
+                posix_escapes
+                and quote == '"'
+                and char == "\\"
+                and index + 1 < len(cmd)
+            ):
+                current.append(cmd[index + 1])
+                index += 1
+            elif (
+                powershell_escapes
+                and quote == '"'
+                and char == "`"
+                and index + 1 < len(cmd)
+            ):
+                current.append(cmd[index + 1])
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+            current.append(char)
+        elif (
+            (posix_escapes and char == "\\")
+            or (powershell_escapes and char == "`")
+            or (cmd_escapes and char == "^")
+        ) and index + 1 < len(cmd):
+            current.extend((char, cmd[index + 1]))
+            index += 1
+        elif char in {";", "|", "&", "\n", "\r"}:
+            segment = "".join(current)
+            if segment.strip():
+                segments.append(segment)
+            current = []
+            if (
+                index + 1 < len(cmd)
+                and cmd[index + 1] == char
+                and char in {"|", "&"}
+            ):
+                index += 1
+        else:
+            current.append(char)
+        index += 1
+    segment = "".join(current)
+    if segment.strip():
+        segments.append(segment)
+    return segments
 
 
 def _unquote_shell_token(token: str) -> str:
@@ -756,7 +812,7 @@ def _shell_hit(
     # a repo-scoped git write (no ``-C``) is attributed to the right repo.
     eff_cwd = cwd
 
-    for seg in _SHELL_SEP.split(cmd):
+    for seg in _shell_segments(cmd, tool):
         seg_hay = os.path.normcase(seg.replace("/", os.sep)) if _IS_WIN else seg
         eff = _effective_seg(seg)
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))

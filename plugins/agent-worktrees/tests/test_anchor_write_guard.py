@@ -303,6 +303,38 @@ def test_shell_git_command_local_alias_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        "user.name=Example; User",
+        "user.name=Example && User",
+    ],
+)
+def test_shell_git_quoted_config_separator_from_anchor_denies(
+    tmp_path, anchor, config,
+):
+    gp = anchor[0]["path"]
+    command = (
+        f'git -C "{gp}" -c "{config}" '
+        "commit --allow-empty -m example"
+    )
+    d = guard.decide(_shell(command, tmp_path), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_alias_with_quoted_separator_from_anchor_denies(
+    tmp_path, anchor,
+):
+    gp = anchor[0]["path"]
+    command = (
+        f'git -C "{gp}" -c "alias.save=!echo before; git commit" save'
+    )
+    d = guard.decide(_shell(command, tmp_path), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_shell_git_config_env_alias_from_anchor_denies(tmp_path, anchor):
     gp = anchor[0]["path"]
     command = (

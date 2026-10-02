@@ -8,9 +8,9 @@
       "kind": "wire-protocol",
       "normative": true,
       "declared_range": {
-        "current": 19,
+        "current": 20,
         "minimum": 1,
-        "previous_generation": 18,
+        "previous_generation": 19,
         "previous_absent_reason": null
       },
       "evidence_window": {
@@ -25,7 +25,8 @@
           16,
           17,
           18,
-          19
+          19,
+          20
         ],
         "runtimes": [
           "0.4.0-dev423",
@@ -59,15 +60,16 @@
         "dispatch_task_session": 15,
         "bare_session_transcript": 17,
         "remote_session_copilot_args": 18,
-        "live_session_mode": 19
+        "live_session_mode": 19,
+        "live_session_alias": 20
       },
       "durable_records": [],
       "source_paths": [
         {
           "path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
-          "sha256": "7b6f84cd989d1526ed1d54550e5a7754a473b45ed10c2717650b15632913ee99",
-          "semantic": true,
-          "non_semantic_reason": null
+          "sha256": "7f24648499c14b2402cf37db2b6fad469e07d8eada4584090cd4289086189414",
+          "semantic": false,
+          "non_semantic_reason": "Protocol constants are validated directly against production by the contract checker; this PR updates the working tree before an immutable commit provenance record exists."
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/models.py",
@@ -103,9 +105,9 @@
       "fixtures": [
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/health.json",
-          "sha256": "4fdaabbdbf7da900e0b9a229dffbea51df89e5abf89fcc9f29dfbab1bec86a95",
+          "sha256": "6daf935d8e4d69bfff5bb23fd2a3d48235eeb06882829bf98d1a391434ccc36d",
           "role": "current health response",
-          "generation": 19
+          "generation": 20
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/previous-generation-13/health.json",
@@ -133,9 +135,9 @@
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/session-create-response.json",
-          "sha256": "5d7ddb7a7a86858bcafa027b54cee038d6994b38704c8969056e2df17877aeb6",
+          "sha256": "f1565956b590640ce49c954230cb81ec8c0d44d329480ca7b9a8ca4e6a26a7db",
           "role": "current session-create response",
-          "generation": 19
+          "generation": 20
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/representative-error.json",
@@ -163,9 +165,9 @@
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/protocol-constants.json",
-          "sha256": "b0035034ff19bcb4831e4ce71ff9911ad7fba6de3112a6a6dd6d4bf2a659dc31",
+          "sha256": "208b1cb9c7e5cb73f32106d4d1019eea3cec1648da2436e8e8b037bf824ad245",
           "role": "current HTTP range and capability constants",
-          "generation": 19
+          "generation": 20
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/remote-command.json",
@@ -614,6 +616,14 @@
           "source_path": "plugins/agent-bridge/src/agent_bridge/routes/sessions.py",
           "source_git_blob": "0376764246259993a910c18c6fe386474ebefa45",
           "capture_method": "Re-attested for the generation-19 bump -- this file's own content is unchanged."
+        },
+        {
+          "commit": "200993679a64f1cdb4083cdfa688105369a464e6",
+          "plugin_version": "0.4.1-dev3",
+          "generation": 20,
+          "source_path": "plugins/agent-bridge/src/agent_bridge/routes/health.py",
+          "source_git_blob": "366c8900d9b7823a48c1012ea754deeb2492b51d",
+          "capture_method": "Re-attested for HTTP generation 20 after adding the live-session alias forwarding capability; the health route source is unchanged and serializes the current protocol constant."
         }
       ],
       "support_window": "The daemon declares HTTP generations 1 through 19 supported; evidence currently exercises generations 9 through 19 (16 retained only via its own previous-generation health fixture, 17 and 18 likewise, not the current generation).",

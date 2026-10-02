@@ -1907,6 +1907,14 @@ def test_boxed_input_is_ready_despite_busy_words_in_banner_or_transcript():
     assert pane_readiness.ready_signature(" ◐ Loading environment\n" + _BOXED_INPUT) is None
 
 
+def test_a_stale_box_above_a_shell_prompt_is_not_ready():
+    from agent_worktrees import pane_readiness
+
+    assert pane_readiness.ready_signature(_BOXED_INPUT + "Copilot exited\n/tmp\n❯\n") is None
+    assert pane_readiness.ready_signature(_BOXED_INPUT + "user@host:/tmp$ \n") is None
+    assert pane_readiness.ready_signature(_BOXED_INPUT) == "boxed-input"
+
+
 def test_seed_readiness_never_outlasts_the_hard_cap():
     busy = [f" /work/repo   Session\n ◉ Resuming session... {i}\n" for i in range(500)]
     driver = _SeedDriver(ready_caps=busy, echo_caps=[])

@@ -34,15 +34,34 @@ def is_busy(region: str) -> bool:
     return any(_BUSY_STATUS.match(line) for line in region.splitlines())
 
 
+_SHELL_TAIL = re.compile(r"[❯$#%]\s*$|(?:^|\s)>\s*$|\bexited\b", re.IGNORECASE)
+#: Lines Copilot draws under its input box (the key-hint footer).
+_MAX_FOOTER_LINES = 2
+
+
+def _live_box(capture: str) -> bool:
+    """A complete input box (top rail, then bottom rail) with nothing under it
+    but Copilot's footer. A box left in the scrollback above a shell prompt
+    (Copilot exited) or later output is not live input."""
+    lines = [line.rstrip() for line in capture.splitlines() if line.strip()]
+    top = max((i for i, line in enumerate(lines) if "╻▄" in line), default=None)
+    if top is None:
+        return False
+    bottom = next((i for i in range(top + 1, len(lines)) if "╹▀" in lines[i]), None)
+    if bottom is None:
+        return False
+    tail = lines[bottom + 1:]
+    return len(tail) <= _MAX_FOOTER_LINES and not any(_SHELL_TAIL.search(line) for line in tail)
+
+
 def ready_signature(capture: str) -> str | None:
     """Stable cue for a live Copilot input prompt, or ``None`` when not ready."""
     region = input_region(capture)
     low = region.lower()
     if "enter to select" in low or is_busy(region):
         return None
-    # Copilot CLI >= 1.0.89 boxed input. Both box rails must be in the live
-    # bottom region so an old transcript drawing cannot satisfy readiness.
-    if "╻▄" in region and "╹▀" in region:
+    # Copilot CLI >= 1.0.89 boxed input, drawn at the live bottom of the pane.
+    if _live_box(capture):
         return "boxed-input"
     # Older Copilot builds expose a footer while the input is live. Require
     # the footer in the bottom region; a bare shell prompt that happens to use

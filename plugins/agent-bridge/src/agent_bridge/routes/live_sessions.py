@@ -82,10 +82,18 @@ class _RepresentedSession:
     The SSE helper only reads ``.session_id`` and ``.event_log`` (subscriber
     tracking is skipped when ``mgr=None``), so a represented live session needs
     no bridge ``Session`` -- keeping it off the ACP-owned ``SessionManager``.
+    With a ``store``, ``event_log`` is re-resolved on every read, so a stream
+    follows its session's log when a session-id change merges it into another.
     """
 
     session_id: str
-    event_log: EventLog
+    log: EventLog
+    store: LiveEventStore | None = None
+
+    @property
+    def event_log(self) -> EventLog:
+        current = self.store.get(self.session_id) if self.store is not None else None
+        return current if current is not None else self.log
 
 
 def _db(request: Request) -> Database:
@@ -416,6 +424,7 @@ def get_live_result_snapshot(
             position=position,
             max_items=max_items,
             max_text_chars=max_text_chars,
+            retired_ids=frozenset(db.live_session_aliases_to(row["session_id"])),
         )
     except ResultTokenError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -443,6 +452,7 @@ def get_live_result_detail(
             event_log=log,
             session_id=row["session_id"],
             token=ref,
+            retired_ids=frozenset(db.live_session_aliases_to(row["session_id"])),
         )
     except ResultHistoryChangedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -495,10 +505,14 @@ async def deregister_live_session(
     live tail's memory is reclaimed when the session goes away.
     """
     db = _db(request)
+    # A late DELETE through a retired id deletes nothing (the DB keeps only the
+    # current id's row) and must not drop the live successor's shared log.
+    registered = db.get_live_session_exact(session_id) is not None
     db.deregister_live_session(session_id)
     store = getattr(request.app.state, "live_event_store", None)
-    if store is not None:
-        store.drop(session_id)
+    if store is not None and registered:
+        for sid in store.ids_of(session_id) or [session_id]:
+            store.drop(sid)
     return {"ok": True, "session_id": session_id}
 
 
@@ -582,7 +596,7 @@ async def stream_live_events(
     log = store.get_or_create(
         session_id, worktree_id=registration.get("worktree_id")
     )
-    shim = _RepresentedSession(session_id=session_id, event_log=log)
+    shim = _RepresentedSession(session_id=session_id, log=log, store=store)
     server = getattr(request.app.state, "uvicorn_server", None)
     return StreamingResponse(
         _sse_event_stream(
@@ -754,9 +768,10 @@ async def set_live_mode(
         )
     def settled() -> SetModeResult | None:
         # Follow a session-id change while waiting: the control moves with it.
+        # (the DB reads and writes resolve the alias in-statement).
         nonlocal target_session_id
-        target_session_id = db.resolve_live_session_id(target_session_id)
         outcome = (db.live_control_state(target_session_id, control_id) or {}).get("outcome")
+        target_session_id = db.resolve_live_session_id(target_session_id)
         if outcome == "applied":
             return SetModeResult(session_id=target_session_id, mode=body.mode, applied=True, state="applied")
         if outcome is not None:
@@ -771,8 +786,9 @@ async def set_live_mode(
         if (result := settled()) is not None:
             return result
         await asyncio.sleep(MODE_POLL_SECONDS)
+    withdrawn = db.withdraw_live_control(target_session_id, control_id, time.time())
     target_session_id = db.resolve_live_session_id(target_session_id)
-    if db.withdraw_live_control(target_session_id, control_id, time.time()):
+    if withdrawn:
         return SetModeResult(
             session_id=target_session_id, mode=body.mode, applied=False, state="withdrawn",
             detail=(

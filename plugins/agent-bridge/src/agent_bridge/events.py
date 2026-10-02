@@ -259,11 +259,16 @@ class EventLog:
                         self._telemetry.log_epoch,
                         timestamp=ts,
                     )
-        for loop, waiter in self._waiters:
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(waiter.set)
+        self.wake_waiters()
         telemetry.emit(rebuild_marker)
         return count
+
+    def wake_waiters(self) -> None:
+        """Wake every pending reader so it re-reads (e.g. after a rebuild, or
+        after this log was merged into another one)."""
+        for loop, waiter in list(self._waiters):
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(waiter.set)
 
     @property
     def latest_id(self) -> int:

@@ -106,7 +106,10 @@ def _decode_token(
     source: str,
     session_id: str,
     kinds: frozenset[str],
+    retired_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    """``retired_ids``: earlier ids of the same session (a resume renamed it);
+    their tokens stay valid, still subject to the history-continuity checks."""
     if not token or len(token) > _MAX_DETAIL_TOKEN_CHARS or not token.startswith(
         _TOKEN_PREFIX
     ):
@@ -128,7 +131,10 @@ def _decode_token(
         raise ResultTokenError("invalid result token") from exc
     if not isinstance(value, dict) or value.get("v") != 1:
         raise ResultTokenError("unsupported result token version")
-    if value.get("source") != source or value.get("session_id") != session_id:
+    if value.get("source") != source or (
+        value.get("session_id") != session_id
+        and value.get("session_id") not in retired_ids
+    ):
         raise ResultTokenError("result token targets a different session")
     if value.get("kind") not in kinds:
         raise ResultTokenError("result token has the wrong kind")
@@ -452,6 +458,7 @@ def _incremental_events(
     position: str | None,
     max_items: int,
     budget: _TextBudget,
+    retired_ids: frozenset[str] = frozenset(),
 ) -> ResultIncrement:
     after_id: int | None = None
     decoded: dict[str, Any] | None = None
@@ -461,6 +468,7 @@ def _incremental_events(
             source=source,
             session_id=session_id,
             kinds=frozenset({"position"}),
+            retired_ids=retired_ids,
         )
         try:
             after_id = int(decoded["event_id"])
@@ -855,6 +863,7 @@ def build_represented_result_snapshot(
     position: str | None,
     max_items: int = DEFAULT_MAX_ITEMS,
     max_text_chars: int = DEFAULT_MAX_TEXT_CHARS,
+    retired_ids: frozenset[str] = frozenset(),
 ) -> DelegatedResultSnapshot:
     """Build a reduced-fidelity snapshot for a represented live session."""
     max_items, max_text_chars = normalize_bounds(max_items, max_text_chars)
@@ -884,6 +893,7 @@ def build_represented_result_snapshot(
         position=position,
         max_items=max_items,
         budget=incremental_budget,
+        retired_ids=retired_ids,
     )
 
     attention = ResultField(availability="partial", value=None)
@@ -1028,6 +1038,7 @@ def expand_represented_result_ref(
     event_log: EventLog,
     session_id: str,
     token: str,
+    retired_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Resolve one process-lifetime represented event or span reference."""
     decoded = _decode_token(
@@ -1035,6 +1046,7 @@ def expand_represented_result_ref(
         source="represented",
         session_id=session_id,
         kinds=frozenset({"event", "span"}),
+        retired_ids=retired_ids,
     )
     continuity = event_log.continuity_id
     if not continuity or decoded.get("continuity") != continuity:

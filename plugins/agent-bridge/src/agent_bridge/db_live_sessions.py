@@ -12,7 +12,10 @@ from .db_core import (
     live_session_is_fresh,
     local_pid_alive,
 )
-from .db_live_session_aliases import inherit_cli_mode_claim_for_session_id_change
+from .db_live_session_aliases import (
+    CANONICAL_SESSION_SQL as _CANON,
+    inherit_cli_mode_claim_for_session_id_change,
+)
 
 LIVE_MESSAGE_DELIVERIES = {"queue", "steer", "interrupt"}
 
@@ -86,7 +89,7 @@ class _LiveSessionsMixin:
             "machine=excluded.machine, cwd=excluded.cwd, "
             "worktree_id=excluded.worktree_id, repo=excluded.repo, "
             "branch=excluded.branch, pid=excluded.pid, role=excluded.role, "
-            "driven_by=excluded.driven_by, "
+            "driven_by=COALESCE(excluded.driven_by, live_sessions.driven_by), "
             "venue=COALESCE(excluded.venue, live_sessions.venue), "
             "status='live', updated_at=excluded.updated_at "
             "WHERE live_sessions.status != 'taken-over'",
@@ -438,6 +441,11 @@ class _LiveSessionsMixin:
             self.execute_write(
                 f"DELETE FROM live_sessions WHERE session_id IN ({_in(dead_ids)})",
                 tuple(dead_ids),
+            )
+            self.execute_write(
+                f"DELETE FROM live_session_aliases WHERE target_session_id IN ({_in(dead_ids)}) "
+                f"OR alias_session_id IN ({_in(dead_ids)})",
+                (*dead_ids, *dead_ids),
             )
         return demoted
 
@@ -799,10 +807,10 @@ class _LiveSessionsMixin:
             "INSERT OR IGNORE INTO live_messages "
             "(session_id, sender, body, reply_to, kind, delivery, "
             "idempotency_key, created_at) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ? "
+            f"SELECT {_CANON}, ?, ?, ?, ?, ?, ?, ? "
             "WHERE EXISTS ("
             "  SELECT 1 FROM live_sessions ls "
-            "  WHERE ls.session_id = ? AND ls.status = 'live' "
+            f"  WHERE ls.session_id = {_CANON} AND ls.status = 'live' "
             "    AND ls.updated_at >= ? "
             "    AND ("
             "      ls.worktree_id IS NULL OR ls.session_id = ("
@@ -812,13 +820,13 @@ class _LiveSessionsMixin:
             "        ORDER BY registered_at DESC, updated_at DESC LIMIT 1"
             "      )"
             "    )"
-            "    AND (? IS NULL OR ? = ls.session_id)"
+            f"    AND (? IS NULL OR {_CANON} = ls.session_id)"
             ")",
             (
-                session_id, sender, body, reply_to, kind, delivery,
+                session_id, session_id, sender, body, reply_to, kind, delivery,
                 idempotency_key, now,
-                session_id, cutoff, cutoff,
-                expected_session_id, expected_session_id,
+                session_id, session_id, cutoff, cutoff,
+                expected_session_id, expected_session_id, expected_session_id,
             ),
         )
         if cur.rowcount == 1:
@@ -832,7 +840,8 @@ class _LiveSessionsMixin:
             if existing:
                 original = existing[0]
                 same_request = (
-                    original["session_id"] == session_id
+                    original["session_id"]
+                    in (session_id, self.resolve_live_session_id(session_id))
                     and original["sender"] == sender
                     and original["body"] == body
                     and original["reply_to"] == reply_to
@@ -840,7 +849,8 @@ class _LiveSessionsMixin:
                     and original["delivery"] == delivery
                     and (
                         expected_session_id is None
-                        or expected_session_id == session_id
+                        or self.resolve_live_session_id(expected_session_id)
+                        == self.resolve_live_session_id(session_id)
                     )
                 )
                 if same_request:
@@ -877,9 +887,9 @@ class _LiveSessionsMixin:
         """
         rows = self.execute_read(
             "SELECT * FROM live_messages "
-            "WHERE session_id=? AND delivered_at IS NULL AND kind NOT LIKE 'control:%' "
+            f"WHERE session_id={_CANON} AND delivered_at IS NULL AND kind NOT LIKE 'control:%' "
             "ORDER BY id ASC",
-            (session_id,),
+            (session_id, session_id),
         )
         return [dict(r) for r in rows]
 
@@ -899,6 +909,9 @@ class _LiveSessionsMixin:
             conn = self._get_conn()
             conn.execute("BEGIN IMMEDIATE")
             try:
+                session_id = conn.execute(
+                    f"SELECT {_CANON}", (session_id, session_id)
+                ).fetchone()[0]
                 conn.execute(
                     "UPDATE live_messages SET delivered_at=?, outcome='expired' "
                     "WHERE session_id=? AND kind LIKE 'control:%' "
@@ -932,9 +945,9 @@ class _LiveSessionsMixin:
         """
         cur = self.execute_write(
             "UPDATE live_messages SET delivered_at=?, outcome='withdrawn' "
-            "WHERE session_id=? AND id=? AND kind LIKE 'control:%' "
+            f"WHERE session_id={_CANON} AND id=? AND kind LIKE 'control:%' "
             "AND delivered_at IS NULL AND claimed_at IS NULL",
-            (now, session_id, control_id),
+            (now, session_id, session_id, control_id),
         )
         return cur.rowcount == 1
 
@@ -942,8 +955,8 @@ class _LiveSessionsMixin:
         """A control's ``claimed_at`` and ``outcome`` (``None`` if unknown)."""
         rows = self.execute_read(
             "SELECT claimed_at, outcome FROM live_messages "
-            "WHERE session_id=? AND id=? AND kind LIKE 'control:%'",
-            (session_id, control_id),
+            f"WHERE session_id={_CANON} AND id=? AND kind LIKE 'control:%'",
+            (session_id, session_id, control_id),
         )
         return dict(rows[0]) if rows else None
 
@@ -972,15 +985,15 @@ class _LiveSessionsMixin:
         if controls:
             cur = self.execute_write(
                 f"UPDATE live_messages SET delivered_at=?, outcome=? "
-                f"WHERE session_id=? AND delivered_at IS NULL AND kind LIKE 'control:%' "
+                f"WHERE session_id={_CANON} AND delivered_at IS NULL AND kind LIKE 'control:%' "
                 f"AND claimed_at IS NOT NULL AND id IN ({placeholders})",
-                (now, outcome or "applied", session_id, *ids),
+                (now, outcome or "applied", session_id, session_id, *ids),
             )
         else:
             cur = self.execute_write(
                 f"UPDATE live_messages SET delivered_at=? "
-                f"WHERE session_id=? AND delivered_at IS NULL AND kind NOT LIKE 'control:%' "
+                f"WHERE session_id={_CANON} AND delivered_at IS NULL AND kind NOT LIKE 'control:%' "
                 f"AND id IN ({placeholders})",
-                (now, session_id, *ids),
+                (now, session_id, session_id, *ids),
             )
         return cur.rowcount

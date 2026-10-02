@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+#: SQL resolving a (possibly retired) live-session id to its current id inside
+#: the same statement as a read or write, so a concurrent rename can't slip in
+#: between lookup and write. Aliases are kept one hop deep: each rename
+#: re-points existing aliases at the newest id. Binds the id twice.
+CANONICAL_SESSION_SQL = (
+    "COALESCE((SELECT target_session_id FROM live_session_aliases "
+    "WHERE alias_session_id = ?), ?)"
+)
+
 from typing import Any
 
 
@@ -31,6 +40,7 @@ def inherit_cli_mode_claim_for_session_id_change(
             predecessor = conn.execute(
                 "SELECT * FROM live_sessions WHERE worktree_id=? "
                 "AND session_id != ? AND cli_mode=1 AND pid IS NOT NULL "
+                "AND status != 'taken-over' "
                 "AND pid=? AND machine IS ? "
                 "ORDER BY updated_at DESC LIMIT 1",
                 (worktree_id, session_id, successor["pid"], successor["machine"]),

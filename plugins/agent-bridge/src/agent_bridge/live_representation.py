@@ -473,20 +473,38 @@ class LiveEventStore:
 
     def alias(self, old_id: str, new_id: str) -> None:
         """Serve ``old_id`` and ``new_id`` from one log after a session-id
-        change: the predecessor's log (and its waiters and readers) becomes the
-        successor's, so a reply or stream spanning the rename sees every event."""
+        change: the predecessor's log (its history, waited sends and readers)
+        becomes the successor's, so a reply or stream spanning the rename sees
+        every event. If the successor already had a log of its own, its events
+        are appended to the predecessor's and its readers are woken to move
+        over (a represented stream re-resolves its log on every read)."""
         with self._lock:
             old = self._logs.get(old_id)
             new = self._logs.get(new_id)
             if old is None or old is new:
                 return
-            if new is None:
-                self._logs[new_id] = old
-                if old_id in self._seen_ids:
-                    self._seen_ids[new_id] = self._seen_ids[old_id]
-                    self._seen_order[new_id] = self._seen_order[old_id]
-            else:
-                self._logs[old_id] = new
+            self._logs[new_id] = old
+            merged = new
+            seen = self._seen_ids.setdefault(old_id, set())
+            order = self._seen_order.setdefault(old_id, deque())
+            for event_id in self._seen_order.get(new_id, ()):
+                if event_id not in seen:
+                    seen.add(event_id)
+                    order.append(event_id)
+            while len(order) > _SEEN_ID_CAP:
+                seen.discard(order.popleft())
+            self._seen_ids[new_id] = seen
+            self._seen_order[new_id] = order
+        if merged is not None:
+            for evt in merged.get_events(0):
+                old.append(evt.event, evt.data)
+            merged.wake_waiters()
+
+    def ids_of(self, session_id: str) -> list[str]:
+        """Every key sharing ``session_id``'s log (itself and its retired ids)."""
+        with self._lock:
+            log = self._logs.get(session_id)
+            return [k for k, v in self._logs.items() if log is not None and v is log]
 
     def drop(self, session_id: str) -> None:
         """Forget a session's represented log (on deregister) to free memory."""

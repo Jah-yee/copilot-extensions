@@ -5,7 +5,7 @@
   obligations, disposition, and source-control completion.
 - **Scope:** leaf (concrete component; child of agent-fabric)
 - **Status:** Active
-- **Last revised:** 2026-09-24
+- **Last revised:** 2026-10-02
 - **Reality docs:** the agent-worktrees plugin `docs/`
 - **Supersedes / superseded by:** none
 
@@ -180,6 +180,34 @@ The worktree owns the ledger of resources it creates or adopts: related
 worktrees, pull requests, environments, sessions, connections, and other
 scarce resources. Exclusive access is fenced, ownership is answerable in both
 directions, and finalization is gated on settlement or an explicit transfer.
+
+### Write guards protect the cooperative path, not every adversarial escape
+
+A family of `preToolUse` hooks (`anchor_write_guard`, `cross_repo_guard`,
+`statelessness_guard`) nudges an agent before it writes somewhere it
+shouldn't — the shared anchor checkout, a different agent-guarded repo, or
+personal state inside a stateless harness. Their harm model is **unreported
+drift, misrouted ownership, or accidental disclosure**, not adversarial
+evasion: `anchor_write_guard` prevents a dirty anchor that silently never
+lands anywhere durable; `statelessness_guard` keeps personal state (which
+the harness's own binding guidance treats as sensitive) out of a shareable
+stateless harness repo, where a missed case could strand or even publish it
+rather than merely leave it non-durable; `cross_repo_guard` keeps an edit
+routed through the guarded repo's own owning agent so the change actually
+follows *that* repo's own rules — its instructions, skills, and contribution
+posture — rather than landing under the launching harness's rules instead.
+An edit made under the wrong repo's rules can also surface downstream as PR
+review friction and churn, if and when the target repo's own reviewer
+(human or automated) happens to catch the mismatch — review is not a
+guaranteed backstop, so that guard exists to reduce uncaught misrouting and
+save that wasted round-trip up front, not to enforce compliance against a
+bad actor. None of the three is a security boundary defending against a
+deliberately evasive adversary.
+They assume a cooperative agent
+that receives and acts on the reminder once it reaches the guard's covered
+path; exhaustively closing every exotic invocation that could evade
+pattern-matching is not the goal, and a gap of that kind is a coverage note,
+not by itself a blocking defect.
 
 ### Pull-request capability
 
@@ -619,6 +647,14 @@ preferred alternative to going through the daemon. A *second, independently
 maintained* implementation of a write — one that could drift from what the
 daemon enforces — is the thing this rules out, not a logged, same-code
 emergency path.
+
+### guard-gaps-are-tracked-not-treated-as-breaches
+
+An unmatched invocation syntax in a write guard (an unusual flag, an
+unconventional command shape) is a coverage gap to widen opportunistically,
+not an urgent security bypass. The design goal is reminding an agent on the
+paths it actually takes in practice, not exhaustively enumerating every way
+a command could be phrased to evade detection.
 
 ### durable-files-are-persistence-not-a-side-door
 

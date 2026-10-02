@@ -258,6 +258,15 @@ def test_shell_git_commit_with_attached_quoted_dashC_denies(tmp_path, anchor):
     assert d and d["permissionDecision"] == "deny"
 
 
+def test_shell_git_repeated_dashC_uses_only_final_directory(tmp_path, anchor):
+    other = _main_checkout(tmp_path, "other-repo")
+    gp = anchor[0]["path"]
+    assert guard.decide(
+        _shell(f'git -C "{gp}" -C "{other}" commit -m example', tmp_path),
+        env={}, home=tmp_path, anchors=anchor,
+    ) is None
+
+
 @pytest.mark.parametrize(
     "option",
     [

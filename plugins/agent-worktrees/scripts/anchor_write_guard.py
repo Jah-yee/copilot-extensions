@@ -214,6 +214,7 @@ def _git_invocation(
         return None, [], [], False
 
     git_cwd = cwd
+    git_cwd_overridden = False
     targets: list[tuple[str, str]] = []
     has_repo_override = False
     index = 1
@@ -231,7 +232,7 @@ def _git_invocation(
                 value = tokens[index + 1]
                 if "$" not in value and "%" not in value:
                     git_cwd = _resolve(value, git_cwd)
-                    targets.append(("work-tree", git_cwd))
+                    git_cwd_overridden = True
             index += 2
             continue
         if token.startswith("-C") and token != "-C":
@@ -239,7 +240,7 @@ def _git_invocation(
             value = _unquote_shell_token(token[2:])
             if value and "$" not in value and "%" not in value:
                 git_cwd = _resolve(value, git_cwd)
-                targets.append(("work-tree", git_cwd))
+                git_cwd_overridden = True
             index += 1
             continue
         if token == "-c":
@@ -280,8 +281,12 @@ def _git_invocation(
         if token.startswith("-"):
             index += 1
             continue
+        if git_cwd_overridden:
+            targets.append(("work-tree", git_cwd))
         return lower, tokens[index + 1:], targets, has_repo_override
     if index < len(tokens):
+        if git_cwd_overridden:
+            targets.append(("work-tree", git_cwd))
         return (
             tokens[index].lower(),
             tokens[index + 1:],

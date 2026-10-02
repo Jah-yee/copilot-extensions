@@ -197,6 +197,8 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
     segments: list[str] = []
     current: list[str] = []
     quote = None
+    dollar_depth = 0
+    backtick_substitution = False
     index = 0
     while index < len(cmd):
         char = cmd[index]
@@ -239,6 +241,22 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
                 index += 1
             elif char == quote:
                 quote = None
+        elif (
+            lower_tool in {"bash", "sh", "powershell", "pwsh"}
+            and cmd.startswith("$(", index)
+        ):
+            dollar_depth += 1
+            current.extend(("$", "("))
+            index += 1
+        elif dollar_depth and char == "(":
+            dollar_depth += 1
+            current.append(char)
+        elif dollar_depth and char == ")":
+            dollar_depth -= 1
+            current.append(char)
+        elif posix_escapes and char == "`":
+            backtick_substitution = not backtick_substitution
+            current.append(char)
         elif char in {"'", '"'}:
             quote = char
             current.append(char)
@@ -249,7 +267,11 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
         ) and index + 1 < len(cmd):
             current.extend((char, cmd[index + 1]))
             index += 1
-        elif char in {";", "|", "&", "\n", "\r"}:
+        elif (
+            not dollar_depth
+            and not backtick_substitution
+            and char in {";", "|", "&", "\n", "\r"}
+        ):
             segment = "".join(current)
             if segment.strip():
                 segments.append(segment)

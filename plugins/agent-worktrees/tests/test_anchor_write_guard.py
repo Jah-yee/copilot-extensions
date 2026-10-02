@@ -379,6 +379,22 @@ def test_bash_git_command_substitution_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo $(git commit --allow-empty -m example; echo ok)",
+        "echo `git commit --allow-empty -m example; echo ok`",
+    ],
+)
+def test_bash_unquoted_substitution_separator_from_anchor_denies(
+    tmp_path, anchor, command,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell(command, gp), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_bash_single_quoted_git_substitution_text_allows(tmp_path, anchor):
     gp = anchor[0]["path"]
     assert guard.decide(

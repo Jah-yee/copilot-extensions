@@ -210,7 +210,16 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
     while index < len(seg):
         char = seg[index]
         if quote:
-            if char == quote:
+            if (
+                powershell_escapes
+                and quote == "'"
+                and char == "'"
+                and index + 1 < len(seg)
+                and seg[index + 1] == "'"
+            ):
+                current.append("'")
+                index += 1
+            elif char == quote:
                 quote = None
             elif (
                 posix_escapes

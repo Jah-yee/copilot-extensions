@@ -39,6 +39,15 @@ def shell_segments(cmd: str, tool: str) -> list[str]:
         if quote:
             current.append(char)
             if (
+                powershell_escapes
+                and quote == "'"
+                and char == "'"
+                and index + 1 < len(cmd)
+                and cmd[index + 1] == "'"
+            ):
+                current.append(cmd[index + 1])
+                index += 1
+            elif (
                 posix_escapes
                 and quote == '"'
                 and char == "\\"
@@ -77,6 +86,9 @@ def shell_segments(cmd: str, tool: str) -> list[str]:
             current.extend((char, "("))
             index += 1
         elif substitution_depth and char == "(":
+            substitution_depth += 1
+            current.append(char)
+        elif powershell_escapes and char == "(":
             substitution_depth += 1
             current.append(char)
         elif substitution_depth and char == ")":
@@ -132,6 +144,15 @@ def shell_command_substitutions(seg: str, tool: str) -> list[str]:
         if char == escape and quote != "'" and index + 1 < len(seg):
             index += 2
             continue
+        if (
+            lower_tool in {"powershell", "pwsh"}
+            and quote == "'"
+            and char == "'"
+            and index + 1 < len(seg)
+            and seg[index + 1] == "'"
+        ):
+            index += 2
+            continue
         if char == "'" and quote != '"':
             quote = None if quote == "'" else "'"
             index += 1
@@ -140,25 +161,27 @@ def shell_command_substitutions(seg: str, tool: str) -> list[str]:
             quote = None if quote == '"' else '"'
             index += 1
             continue
-        substitution_start = (
-            quote != "'"
-            and (
-                seg.startswith("$(", index)
-                or (
-                    lower_tool in {"powershell", "pwsh"}
-                    and seg.startswith("@(", index)
+        substitution_prefix = None
+        if quote != "'":
+            if seg.startswith("$(", index):
+                substitution_prefix = "$("
+            elif (
+                lower_tool in {"powershell", "pwsh"}
+                and seg.startswith("@(", index)
+            ):
+                substitution_prefix = "@("
+            elif lower_tool in {"powershell", "pwsh"} and char == "(":
+                substitution_prefix = "("
+            elif (
+                lower_tool in {"bash", "sh"}
+                and (
+                    seg.startswith("<(", index)
+                    or seg.startswith(">(", index)
                 )
-                or (
-                    lower_tool in {"bash", "sh"}
-                    and (
-                        seg.startswith("<(", index)
-                        or seg.startswith(">(", index)
-                    )
-                )
-            )
-        )
-        if substitution_start:
-            start = index + 2
+            ):
+                substitution_prefix = seg[index:index + 2]
+        if substitution_prefix:
+            start = index + len(substitution_prefix)
             cursor = start
             depth = 1
             inner_quote = None
@@ -198,7 +221,7 @@ def shell_command_substitutions(seg: str, tool: str) -> list[str]:
                             break
                 cursor += 1
             else:
-                index += 2
+                index += len(substitution_prefix)
             continue
         if quote != "'" and lower_tool in {"bash", "sh"} and char == "`":
             start = index + 1

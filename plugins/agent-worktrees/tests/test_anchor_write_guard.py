@@ -453,6 +453,44 @@ def test_powershell_git_array_subexpression_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("git commit --allow-empty -m example", "deny"),
+        ("git merge-base main HEAD", "allow"),
+    ],
+)
+def test_powershell_git_grouping_expression_from_anchor(
+    tmp_path, anchor, expression, expected,
+):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(gp),
+        "toolArgs": {"command": f"$result = ({expression})"},
+    }
+    decision = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    if expected == "deny":
+        assert decision and decision["permissionDecision"] == "deny"
+    else:
+        assert decision is None
+
+
+def test_powershell_doubled_apostrophe_path_denies(tmp_path, anchor):
+    literal = _main_checkout(tmp_path, "anchor'name")
+    escaped = str(literal).replace("'", "''")
+    anchors = [*anchor, {"name": "literal", "path": str(literal)}]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(tmp_path),
+        "toolArgs": {
+            "command": f"git -C '{escaped}' commit -m example"
+        },
+    }
+    decision = guard.decide(payload, env={}, home=tmp_path, anchors=anchors)
+    assert decision and decision["permissionDecision"] == "deny"
+
+
 def test_cmd_apostrophe_does_not_quote_separator(tmp_path, anchor):
     gp = anchor[0]["path"]
     payload = {

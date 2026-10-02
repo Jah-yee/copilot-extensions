@@ -194,7 +194,8 @@ def _unquote_shell_token(token: str) -> str:
     return token
 
 
-def _git_tokens(seg: str) -> list[str]:
+def _git_tokens(seg: str, tool: str) -> list[str]:
+    posix_escapes = tool.lower() in {"bash", "sh"}
     tokens: list[str] = []
     current: list[str] = []
     quote = None
@@ -205,7 +206,8 @@ def _git_tokens(seg: str) -> list[str]:
             if char == quote:
                 quote = None
             elif (
-                char == "\\"
+                posix_escapes
+                and char == "\\"
                 and quote == '"'
                 and index + 1 < len(seg)
                 and seg[index + 1] in {'"', "\\"}
@@ -221,7 +223,8 @@ def _git_tokens(seg: str) -> list[str]:
                 tokens.append("".join(current))
                 current = []
         elif (
-            char == "\\"
+            posix_escapes
+            and char == "\\"
             and index + 1 < len(seg)
             and (seg[index + 1].isspace() or seg[index + 1] in {"'", '"', "\\"})
         ):
@@ -244,7 +247,7 @@ def _git_config_alias_name(value: str) -> str | None:
 
 
 def _git_invocation(
-    seg: str, cwd: str,
+    seg: str, cwd: str, tool: str,
 ) -> tuple[str | None, list[str], list[tuple[str, str]], bool]:
     """Return the Git subcommand and resolved explicit repository targets.
 
@@ -254,7 +257,7 @@ def _git_invocation(
     value cannot be resolved, preserving the guard's existing fail-open behavior
     for variables.
     """
-    tokens = _git_tokens(seg)
+    tokens = _git_tokens(seg, tool)
     if not tokens:
         return None, [], [], False
     first = tokens[0].lstrip("\"'")
@@ -677,7 +680,9 @@ def _git_target_anchor(
     return None
 
 
-def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
+def _shell_hit(
+    cmd: str, cwd: str, anchors: list[dict], tool: str,
+) -> dict | None:
     """Return an anchor hit for a shell command that WRITES into an anchor, or
     None. Fires only on a real write target (redirect target / command-position
     write verb argument / git mutation via ``-C <anchor>`` or the effective cwd),
@@ -697,7 +702,7 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))
         is_git = bool(_GIT_START.match(eff))
         subcmd, git_args, git_targets, has_repo_override = (
-            _git_invocation(eff, eff_cwd)
+            _git_invocation(eff, eff_cwd, tool)
             if is_git else (None, [], [], False)
         )
         git_write = subcmd in _GIT_WRITE_SUBCOMMANDS
@@ -771,7 +776,7 @@ def evaluate(tool: str, args: dict, cwd: str, anchors: list[dict]) -> dict | Non
         cmd = _pick(args, CMD_ARG_KEYS)
         if not cmd:
             return None
-        return _shell_hit(cmd, cwd, anchors)
+        return _shell_hit(cmd, cwd, anchors, tool)
 
     return None
 

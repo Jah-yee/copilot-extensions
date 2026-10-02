@@ -302,6 +302,17 @@ def test_shell_git_commit_with_attached_quoted_dashC_denies(tmp_path, anchor):
     assert d and d["permissionDecision"] == "deny"
 
 
+def test_powershell_git_dashC_trailing_separator_denies(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(tmp_path),
+        "toolArgs": {"command": f'git -C "{gp}\\" commit -m example'},
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_shell_git_commit_with_escaped_space_dashC_denies(tmp_path, anchor):
     spaced = _main_checkout(tmp_path, "anchor with spaces")
     escaped = str(spaced).replace(" ", "\\ ")

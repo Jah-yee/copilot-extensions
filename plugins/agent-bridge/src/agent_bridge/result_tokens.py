@@ -158,8 +158,12 @@ def retarget(token: str | None, merged: dict[str, tuple[str, dict[int, int]]]) -
         return token
     continuity, ids = target
     value = {**value, "continuity": continuity}
+    position = value.get("kind") == "position"
     for key in ("event_id", "start_event_id", "end_event_id"):
         if isinstance(value.get(key), int):
-            value[key] = ids.get(value[key], max([v for k, v in ids.items() if k <= value[key]], default=0))
+            prior = max([v for k, v in ids.items() if k <= value[key]], default=0)
+            # A position is a read cursor (never moves back); an event/span
+            # reference names exact events, even a duplicate's retained copy.
+            value[key] = prior if position else ids.get(value[key], prior)
     value.pop("v", None)
     return _encode_token(value)

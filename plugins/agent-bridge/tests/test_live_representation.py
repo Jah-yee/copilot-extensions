@@ -812,6 +812,33 @@ def test_a_merge_keeps_one_copy_of_an_sdk_event_both_registrations_logged() -> N
     assert store.ingest("resumed", [reply]) == 0  # still deduplicated afterwards
 
 
+def test_a_duplicate_before_the_predecessors_tail_keeps_exact_refs_and_safe_cursors() -> None:
+    """Predecessor A(1), B(2); successor A(1). A detail reference to the
+    successor's A must still name A, while a cursor past it never rewinds."""
+    from agent_bridge.live_representation import LiveEventStore, translate_reconnect_cursor
+    from agent_bridge.result_tokens import _decode_token, _event_ref, _position_token, retarget
+
+    store = LiveEventStore()
+    a = {"type": "assistant.message", "id": "sdk-a", "data": {"content": "A"}}
+    b = {"type": "assistant.message", "id": "sdk-b", "data": {"content": "B"}}
+    store.ingest("placeholder", [a, b])
+    store.ingest("resumed", [a])
+    succ_continuity = store.get("resumed").continuity_id
+    ref = _event_ref("represented", "resumed", succ_continuity, 1)
+    pos = _position_token("represented", "resumed", succ_continuity, 1)
+    store.alias("placeholder", "resumed")
+    merged = store.get("resumed")
+    history = store.merged_history()
+
+    event = _decode_token(retarget(ref, history), source="represented", session_id="resumed",
+                          kinds=frozenset({"event"}))
+    assert merged.get_events(event["event_id"] - 1)[0].data["text"] == "A"
+    cursor = _decode_token(retarget(pos, history), source="represented", session_id="resumed",
+                           kinds=frozenset({"position"}))
+    assert cursor["event_id"] == 2
+    assert translate_reconnect_cursor(store, merged, succ_continuity, 1) == 2
+
+
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
     import pytest
 

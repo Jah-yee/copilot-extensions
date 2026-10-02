@@ -1923,6 +1923,16 @@ def test_a_stale_interrupt_footer_above_a_shell_is_not_ready():
     assert pane_readiness.ready_signature("❯ \npress esc to interrupt\n") == "interrupt-footer"
 
 
+def test_ordinary_output_under_a_stale_prompt_is_not_ready():
+    """Only Copilot's own footer rows may sit under the box, and the legacy cue
+    must be the live bottom line -- not merely free of shell-like tails."""
+    from agent_worktrees import pane_readiness
+
+    assert pane_readiness.ready_signature(_BOXED_INPUT + "Connection closed\n") is None
+    assert pane_readiness.ready_signature("press esc to interrupt\nConnection closed\n") is None
+    assert pane_readiness.ready_signature(_BOXED_INPUT) == "boxed-input"
+
+
 def test_an_attached_powershell_or_cmd_prompt_is_not_ready():
     from agent_worktrees import pane_readiness
 

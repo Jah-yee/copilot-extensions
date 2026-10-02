@@ -513,22 +513,21 @@ class LiveEventStore:
             # Cursor 0 on the successor means "after everything it had", which is
             # the predecessor's tail at merge time -- not the predecessor's start.
             ids = {0: old.latest_id}
-            last = old.latest_id
             for evt in merged.get_events(0):
                 sdk, i = successor_sdk.get(evt.id, (None, 0))
                 with self._lock:
                     retained = list(old_sdk.get(sdk) or ()) if sdk else []
                 if retained:
                     # Both registrations logged this SDK event before the rename:
-                    # keep the predecessor's copy. The cursor never moves back, so
-                    # a reader past it replays nothing it already saw.
-                    last = max(last, retained[min(i, len(retained) - 1)])
-                    ids[evt.id] = last
+                    # keep the predecessor's copy. ``ids`` stays exact (a detail
+                    # reference names the very event); cursors read it through
+                    # ``merged_cursor``, which never moves back.
+                    ids[evt.id] = retained[min(i, len(retained) - 1)]
                     continue
-                last = ids[evt.id] = old.append(evt.event, evt.data).id
+                appended = ids[evt.id] = old.append(evt.event, evt.data).id
                 if sdk:
                     with self._lock:
-                        old_sdk.setdefault(sdk, []).append(last)
+                        old_sdk.setdefault(sdk, []).append(appended)
             merged.merged_into = (old, ids)
             if prior and old.continuity_id:
                 with self._lock:
@@ -640,14 +639,20 @@ class LiveEventStore:
 TurnReply = dict[str, Any]
 
 
+def merged_cursor(ids: dict[int, int], cursor: int) -> int:
+    """A read cursor in the merged numbering: the furthest merged id at or
+    before it, so a reader never moves back into history it already read
+    (``ids`` is exact; a skipped duplicate maps to its earlier retained copy)."""
+    return max([v for k, v in ids.items() if k <= cursor], default=cursor)
+
+
 def translate_merged_cursor(prev: EventLog, current: EventLog, cursor: int) -> int | None:
     """If ``prev`` was merged into ``current``, return ``cursor`` in the merged
-    numbering (an unmapped id maps to the nearest earlier mapped one); else None."""
+    numbering (see :func:`merged_cursor`); else None."""
     follow = getattr(prev, "merged_into", None)
     if follow is None or follow[0] is not current:
         return None
-    ids = follow[1]
-    return ids.get(cursor, max([v for k, v in ids.items() if k <= cursor], default=cursor))
+    return merged_cursor(follow[1], cursor)
 
 
 class MergeFollowingLog:
@@ -703,7 +708,7 @@ def translate_reconnect_cursor(
         if not continuity_id or continuity_id == log.continuity_id or continuity_id not in merged:
             break
         continuity_id, ids = merged[continuity_id]
-        after = ids.get(after, max([v for k, v in ids.items() if k <= after], default=0))
+        after = merged_cursor(ids, after)
     return after
 
 

@@ -53,6 +53,7 @@ from ..live_representation import (
     translate_reconnect_cursor,
 )
 from ..result_tokens import retarget
+from ..db_live_session_aliases import PROCESS_START_TOLERANCE_SECONDS
 from ..result_snapshot import (
     DEFAULT_MAX_ITEMS,
     DEFAULT_MAX_TEXT_CHARS,
@@ -216,11 +217,17 @@ async def register_live_session(
     db = _db(request)
     now = time.time()
     prior = db.get_live_session(body.session_id)
+    # The pid alone can be reused; a known, different process start time is a
+    # different process even when the pid matches (same tolerance as rollover).
+    prior_started, started = (prior or {}).get("process_started_at"), body.process_started_at
     pid_changed = bool(
         prior
         and prior.get("pid") is not None
         and body.pid is not None
         and prior.get("pid") != body.pid
+    ) or bool(
+        prior_started is not None and started is not None
+        and abs(prior_started - started) >= PROCESS_START_TOLERANCE_SECONDS
     )
     if pid_changed:
         raise HTTPException(

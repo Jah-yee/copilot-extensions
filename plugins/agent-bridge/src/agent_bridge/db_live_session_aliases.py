@@ -18,7 +18,7 @@ from .db_core import LIVE_SESSION_STALE_SECONDS
 
 #: How far two reports of one process's start time may drift (each is derived
 #: from wall clock minus uptime); a reused pid starts well after the original.
-_START_TOLERANCE_SECONDS = 2.0
+PROCESS_START_TOLERANCE_SECONDS = 2.0
 
 
 def _newer_turn(predecessor: Any, successor: Any) -> tuple[Any, Any]:
@@ -89,7 +89,7 @@ def inherit_cli_mode_claim_for_session_id_change(
                 "ELSE status='wedged' OR (status='live' AND updated_at >= ?) END "
                 "ORDER BY updated_at DESC LIMIT 1",
                 (worktree_id, session_id, successor["pid"], successor["machine"],
-                 started, started, _START_TOLERANCE_SECONDS,
+                 started, started, PROCESS_START_TOLERANCE_SECONDS,
                  now - LIVE_SESSION_STALE_SECONDS),
             ).fetchone()
             if predecessor is None:

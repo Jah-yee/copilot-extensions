@@ -41,12 +41,18 @@ _SHELL_TAIL = re.compile(
 )
 #: Lines Copilot draws under its input box (the key-hint footer).
 _MAX_FOOTER_LINES = 2
+#: A Copilot key-hint footer row (e.g. "← open sidebar · / commands · ? help"):
+#: anything else under the box (``Connection closed``, later output) means the
+#: box is stale scrollback, not live input.
+_FOOTER_ROW = re.compile(
+    r"\s·\s|\b(?:esc|ctrl|shift|tab|enter|help|commands|sidebar)\b", re.IGNORECASE,
+)
 
 
 def _live_box(capture: str) -> bool:
     """A complete input box (top rail, then bottom rail) with nothing under it
-    but Copilot's footer. A box left in the scrollback above a shell prompt
-    (Copilot exited) or later output is not live input."""
+    but Copilot's footer rows. A box left in the scrollback above a shell
+    prompt (Copilot exited) or any other later output is not live input."""
     lines = [line.rstrip() for line in capture.splitlines() if line.strip()]
     top = max((i for i, line in enumerate(lines) if "╻▄" in line), default=None)
     if top is None:
@@ -55,18 +61,16 @@ def _live_box(capture: str) -> bool:
     if bottom is None:
         return False
     tail = lines[bottom + 1:]
-    return len(tail) <= _MAX_FOOTER_LINES and not any(_SHELL_TAIL.search(line) for line in tail)
+    return len(tail) <= _MAX_FOOTER_LINES and all(
+        _FOOTER_ROW.search(line) and not _SHELL_TAIL.search(line) for line in tail
+    )
 
 
 def _live_footer(region: str) -> bool:
-    """The "esc ... interrupt" footer at the live bottom: nothing shell-like
-    (a prompt, an exit line) below it, as a footer left above a shell is not."""
-    lines = region.splitlines()
-    last = max((i for i, line in enumerate(lines)
-                if "esc" in line.lower() and "interrupt" in line.lower()), default=None)
-    if last is None:
-        return False
-    return not any(_SHELL_TAIL.search(line) for line in lines[last + 1:])
+    """The "esc ... interrupt" footer as the live bottom line: anything below it
+    (a prompt, an exit line, ``Connection closed``) means it is stale."""
+    lines = [line for line in region.splitlines() if line.strip()]
+    return bool(lines) and "esc" in lines[-1].lower() and "interrupt" in lines[-1].lower()
 
 
 def ready_signature(capture: str) -> str | None:

@@ -11,7 +11,7 @@ visions:
   own AGENTS.md index and one-time sync-drift fix
 - **Branch(es):** independent per-phase worktrees
 - **Created:** 2026-09-20
-- **Status:** Active
+- **Status:** Done
 - **Vision:** `visions/harness-guidance` -- vision-closing, not extending.
   Behavior `task-detail-on-demand` and Feature `navigable-on-demand-grounding`
   already state the target; reality currently violates both.
@@ -405,12 +405,7 @@ conflict-dispatch label there.
 - [x] Confirm the launch-script-ownership question specifically now produces
       a correct "this belongs to copilot-extensions, resolve via `related
       resolve`" answer rather than a false positive.
-- [ ] Phase 5's own acceptance (that its scheduled worker produces a clean
-      auto-merged PR at least once, and that a deliberately-forced conflict
-      correctly routes to its reconciler rather than silently overwriting or
-      blocking) is **that downstream companion effort's own validation
-      item**, not this repo's -- this repo cannot verify a private repo's
-      runtime behavior, and this Plan does not gate on it.
+- [x] Deferred to `the downstream consumer repo's own private companion effort (not citable here per this repo's identifier-neutrality rule -- see Participants above)`: Phase 5's own acceptance (that its scheduled worker produces a clean auto-merged PR at least once, and that a deliberately-forced conflict correctly routes to its reconciler rather than silently overwriting or blocking) is **that downstream companion effort's own validation item**, not this repo's -- this repo cannot verify a private repo's runtime behavior, and this Plan does not gate on it.
 
 ### Phase 7 -- Worktree-scoped dynamic guidance for projected instructions
 Closes a gap found while a downstream consumer repo drove Phase 5 to a live
@@ -508,20 +503,31 @@ and the new sibling pattern doc,
       **Landed**:
       `test_render_local_cache_writes_sibling_without_touching_checked_in_or_lock`
       in `tests/test_instruction_projections.py`.
-- [ ] Negative-proof test: a write-incapable target directory (simulated
+- [x] Negative-proof test: a write-incapable target directory (simulated
       read-only) leaves the checked-in floor as the only available content,
       with no error raised to the caller and no partial/corrupt
-      `.local.instructions.md` file left behind. **Not yet covered** --
-      `test_render_local_cache_reports_root_error_without_raising` proves a
-      missing repo root reports a blocking finding without raising, but a
-      write-*denied* (as opposed to nonexistent) destination remains open.
+      `.local.instructions.md` file left behind. **Landed**:
+      `test_render_local_cache_write_incapable_destination_leaves_checked_in_floor`
+      in `tests/test_instruction_projections.py` -- injects a write
+      failure by monkeypatching `os.replace` to fail only for the local
+      cache destination's final rename (chmod read-only is not a reliable
+      write-blocker on Windows; occupying the destination with a directory
+      is rejected earlier by the existing-file regular-file check, before
+      any write is attempted; and patching `_atomic_write` itself outright
+      would skip the real writer's own temp-file creation and `finally`
+      cleanup, making the "no stray temp file" assertion tautological).
+      Patching below `_atomic_write` instead lets the real writer run up
+      to the failure point, genuinely exercising its cleanup path, and
+      proves the checked-in floor is left byte-identical, the call
+      reports a blocking finding rather than raising, and no stray temp
+      file or corrupt sibling is left behind.
 
 ## Validation Plan
 
 - [x] Phase 1's guard test fails on a synthetic plugin with a declared-but-
       unindexed category, and passes once indexed (a real negative-proof
       test, not just a passing positive one).
-- [ ] Phase 2's recompute verification rejects a PR whose diff does not
+- [x] Phase 2's recompute verification rejects a PR whose diff does not
       byte-match the recomputed lock entries, and separately rejects one
       whose lock entries match but whose actual generated file content does
       not (the lock-hash-vs-real-file split case), and a PR with a managed
@@ -540,7 +546,7 @@ and the new sibling pattern doc,
       operations, no network dependency), not currently pursued given that
       framing. This is a closed decision, not an open gap awaiting a
       resolver.
-- [ ] Phase 2's bypass safety boundary is proven with negative tests for
+- [x] Phase 2's bypass safety boundary is proven with negative tests for
       *each* conjunct, not just recompute mismatch: a no-change run opens no
       PR; a disabled plugin's projection is never touched even if its
       installed payload changed; a source outside the trusted-source
@@ -548,13 +554,34 @@ and the new sibling pattern doc,
       a PR missing the stamp label, touching a path outside the managed
       globs, or containing a non-regular-file diff shape is rejected by the
       bypass; and a routed conflict is proven to update the existing PR
-      without ever self-merging. **Partially covered** (conflict-routing and
-      trusted-source-allowlist conjuncts are proven in
-      `test_projection_reflect.py`); the stamp-label/diff-shape/disabled-
-      plugin conjuncts are properties of the actual scheduler/bypass-profile
-      implementation, which is inherently per-adopting-repo work (per the
-      `setting-up-instruction-sync-worker` skill's own scope) and not yet
-      built anywhere to test against.
+      without ever self-merging. **Landed the disabled-plugin conjunct,
+      scope-closed the remaining two 2026-10-02:** the conflict-routing and
+      trusted-source-allowlist conjuncts were already proven in
+      `test_projection_reflect.py`. The **disabled-plugin conjunct is now
+      also proven**, directly in this repo --
+      `test_disabled_plugin_projection_is_never_touched_even_if_payload_changed`
+      in `tests/test_projection_sync_worker.py` -- since `run_sync_pass`
+      takes an explicit `sources` list (the same shape
+      `discover_enabled_sources`/`assemble_enabled_plugins` already filter
+      disabled entries out of before a caller ever supplies it), this
+      conjunct needed no adopting-repo scaffolding at all; an earlier draft
+      of this scope-close had incorrectly grouped it with the two
+      genuinely un-implemented conjuncts below, caught by PR #4905's own
+      Copilot review. Only the **stamp-label/diff-shape** conjuncts remain
+      scoped-closed: they exist only as policy documented in the
+      `setting-up-instruction-sync-worker` skill's own scaffolded templates
+      (`bypass-profile.md`/`scheduler-config.md`), which an adopting repo
+      renders into its *own* GitHub Actions workflow and branch-protection
+      config. Proving them would mean building new test infrastructure
+      this repo doesn't otherwise need: a synthetic adopting-repo fixture
+      plus some way to execute or interpret that scaffolded CI logic (an
+      actionlint-style check or a hand-rolled condition interpreter) -- not
+      a mechanical finish of existing code, and disproportionate to what
+      those templates actually are (reviewed, human-readable scaffolding
+      guidance, not executable code this repo owns). Per the operator's
+      explicit decision (this effort's second scoped-closed item, alongside
+      the Phase 2 recompute-verification one above), this narrower gap is
+      accepted as a deliberate, not pursued further.
 - [x] The setup skill refuses to scaffold the scheduler/bypass without the
       repo's explicit, committed opt-in signal present (a negative-proof
       test: no opt-in file present -> setup declines), **and** a live
@@ -573,30 +600,202 @@ and the new sibling pattern doc,
       at all and confirms it still succeeds. **Landed**:
       `test_render_local_cache_never_touches_git_and_is_idempotent` (runs
       against a `tmp_path` repo with no `.git` directory at all).
-- [ ] Phase 7's guard and negative-proof tests (see Plan) pass; the per-file
+- [x] Phase 7's guard and negative-proof tests (see Plan) pass; the per-file
       preamble and the repo-wide catch-all are each independently provable
       to drive an agent to the fresher content in a clean-room-style test
       matching the methodology `session-scoped-dynamic-guidance.md`'s own
-      evidence section used. **Partially covered:** every Plan item's own
-      guard/negative-proof unit and integration tests pass (preamble
-      placement/naming, local-cache self-reference exclusion, the
-      `skipLocalCache` opt-out and its schema validation, the aggregate-
-      budget fit, and the `agent-worktrees` create/resume/`sessionStart`
-      wiring, each with dedicated tests -- see the Journal for every
-      slice). The specific **clean-room, agent-driven proof** this item
-      asks for (an isolated sub-agent, given only a system-prompt snapshot
-      carrying both a checked-in projection and a divergent
-      `.local.instructions.md` sibling, demonstrably prefers the sibling's
-      content) has **not** been built -- it is a distinct, heavier
-      validation exercise (the navigability audit's own 3-sub-agent,
-      skill/tool-forbidden methodology), not yet attempted. This is the
-      one remaining item before Phase 7 can be marked Done.
+      evidence section used. Every Plan item's own guard/negative-proof
+      unit and integration tests pass (preamble placement/naming,
+      local-cache self-reference exclusion, the `skipLocalCache` opt-out
+      and its schema validation, the aggregate-budget fit, and the
+      `agent-worktrees` create/resume/`sessionStart` wiring, each with
+      dedicated tests -- see the Journal for every slice). **Landed**: the
+      clean-room, agent-driven proof this item asked for -- the
+      navigability audit's own 3-sub-agent, skill/tool-forbidden
+      methodology, run against two frozen-snapshot scenarios built with the
+      real `render_projection()`/`ProjectionSpec` machinery (byte-identical
+      marker/preamble/frontmatter to the shipped mechanism, not hand-faked):
+      **Scenario A** (per-file preamble) -- a checked-in
+      `retry-policy.instructions.md` carrying the real preamble and a stale
+      value (3), beside a divergent `retry-policy.local.instructions.md`
+      with no preamble and a fresh value (11), simulating sync-lag between
+      last-synced and currently-installed payload. **Scenario B**
+      (repo-wide catch-all) -- the real, verbatim shipped
+      `local-cache-catchall.instructions.md` beside a *never-synced-in*
+      source's lone `activation-code.local.instructions.md` (no checked-in
+      sibling at all). 3 independent `explore` sub-agents per scenario (6
+      total), each given only the frozen snapshot directory, explicitly
+      forbidden from invoking any skill or tool beyond read-only file
+      inspection scoped to that directory, and forbidden from using prior
+      knowledge of this repo's own conventions -- asked to find the
+      "current" fact and name the source file. **Result: 6/6 PASS.** Every
+      Scenario A run reported the fresh value (11) from
+      `retry-policy.local.instructions.md`, citing the checked-in file's own
+      preamble as the reason for preferring it over the stale 3. Every
+      Scenario B run reported the correct code (`QUASAR-77`) from
+      `activation-code.local.instructions.md`, citing the catch-all's own
+      directive to scan `**/*.local.instructions.md` as how it found a file
+      with no checked-in sibling at all. Combined with the write-incapable
+      negative-proof test landed in the Plan above, every Phase 7 Plan and
+      Validation Plan item is now resolved -- **Phase 7 is Done.**
 
 ## Proposal
 
 _Pending._
 
 ## Journal
+
+### 2026-10-02 (cont.) -- PR #4905 review caught an over-broad scope-close; narrowed and fixed
+PR #4905's archive diff drew a real Copilot review finding: the scope-close
+rationale for Phase 2's bypass safety boundary had incorrectly grouped the
+**disabled-plugin** conjunct with the genuinely un-implemented stamp-label/
+diff-shape ones. It isn't scaffolding-only -- `run_sync_pass` takes an
+explicit `sources` list, and `scan_plugin_sources.assemble_enabled_plugins`
+already filters disabled entries out before a caller ever supplies it
+(`if not enabled[key]: continue`) -- so the conjunct is fully provable in
+this repo with no adopting-repo fixture. Added
+`test_disabled_plugin_projection_is_never_touched_even_if_payload_changed`
+in `tests/test_projection_sync_worker.py`: syncs a plugin, changes its
+template on disk (simulating a payload update after the plugin is
+disabled), re-runs `run_sync_pass` with that source omitted from `sources`
+entirely, and proves the checked-in destination is byte-identical to its
+last sync -- never regenerated with the changed-but-now-unreferenced
+payload. `tools/run-plugin-tests.py customizing-copilot`: passes. Narrowed
+the Validation Plan item's scope-close rationale to only the two conjuncts
+that are genuinely scaffolding-only (stamp-label, diff-shape); the
+disabled-plugin conjunct is now **landed**, not scope-closed. Also added a
+`dev` changefile for `customizing-copilot` (this is a real test addition,
+not a docs-only change) and corrected the PR description, which had
+inaccurately claimed no plugin payloads changed.
+
+### 2026-10-02 -- Effort complete: Phase 7 PR merged, Phase 2's last gap scoped-closed, effort Done
+Phase 7 (PR #4898) went through four Copilot review rounds before merging to
+`dev`:
+1. Reverted a manual `plugin.json`/`marketplace.json` version bump -- the
+   pending changefile is the correct PR-time declaration; promotion owns the
+   mechanical bump (CONTRIBUTING.md's changefile flow, not a hand-edit).
+2. Fixed the write-incapable negative-proof test: the first draft occupied
+   the local-cache destination with a directory, which is rejected *earlier*
+   (the existing-file regular-file check) than the `os.replace` path it
+   claimed to exercise.
+3. Fixed it again: patching `_atomic_write` itself outright skipped the real
+   writer's own temp-file creation and cleanup, making the "no stray temp
+   file" assertion tautological. Landed version patches `os.replace` instead,
+   letting the real writer run up to the injected failure, and tracks that
+   the patched branch actually ran rather than asserting a loose `blocking >=
+   1`.
+4. Corrected the changefile type (`patch` -> `dev`, matching an iterative
+   fixup within the already-in-flight dev-suffixed version) and added the
+   PR description's required Documentation impact statement.
+
+Merged as `5382c41de`. Phase 7 Plan and Validation Plan are both fully
+resolved -- **Phase 7 is Done.**
+
+With Phase 7 closed, re-checked the whole effort per the completion-gate
+convention (never declare "nothing left" on a single phase's say-so) and
+found exactly one other genuinely open item: Phase 2's bypass-safety-boundary
+Validation Plan item, "partially covered" because the stamp-label/diff-shape/
+disabled-plugin conjuncts it asks for are not implemented anywhere in this
+repo -- they exist only as policy documented in `setting-up-instruction-sync-
+worker`'s own scaffolded templates (`bypass-profile.md`/`scheduler-config.md`),
+rendered into an *adopting repo's own* GitHub Actions workflow. Proving them
+would mean building new test infrastructure (a synthetic adopting-repo
+fixture plus some way to execute or interpret scaffolded CI logic) that this
+repo doesn't otherwise need, disproportionate to what those templates
+actually are. Presented this to the operator as an explicit crossroads
+(build the harness / scope-close like its Phase 2 sibling / file a tracked
+issue / something else) rather than assuming; the operator chose
+**scope-close**. Recorded as this effort's second scoped-closed item,
+alongside the existing 2026-09-21 recompute-verification one -- both now
+checked `[x]` with their decision rationale, since "resolved" for an
+effort's Validation Plan item includes a deliberate, documented decision not
+to pursue further, not only literal completion.
+
+Also resolved the one remaining Plan-section checkbox gap: Phase 6's note
+about Phase 5's own downstream-repo acceptance test was already correctly
+framed as non-gating ("this Plan does not gate on it") but left unchecked;
+reformatted it as `[x] Deferred to <the downstream companion effort>` (not
+citable by name here, per this repo's identifier-neutrality rule) to make
+the resolution machine-checkable per the `planning-efforts` skill's archive
+contract.
+
+**Every Plan and Validation Plan item in this effort is now resolved.**
+Set Status to **Done** and performed the full archive this same session
+(the `planning-efforts` skill's own procedure, rather than leaving it in
+the "Done; pending archive" interim state two other efforts in this repo
+are currently sitting in) -- moved the folder, wrote this closing entry,
+and updated the `efforts/README.md` index.
+
+### 2026-10-01 (cont.) -- Phase 7's last two open items closed; Phase 7 is Done
+Picked up by handoff from the PR #4809 session, whose own leg ended with
+"Phase 7's Plan is now fully landed... the one remaining item before Phase 7
+can be marked Done" (the clean-room Validation Plan proof). Closed that item,
+then found and closed one more the handoff hadn't flagged: a still-open Plan
+item (the write-incapable negative-proof test) sitting right below the
+clean-room one in the same file.
+
+- **The clean-room, agent-driven proof** (Validation Plan): built two
+  frozen-snapshot scenarios with the *real* `render_projection()`/
+  `ProjectionSpec` machinery (byte-identical marker/preamble/frontmatter to
+  the shipped mechanism -- nothing hand-faked), then ran the navigability
+  audit's own methodology against them (3 independent `explore` sub-agents
+  per scenario, each given only the frozen snapshot directory, forbidden
+  from invoking any skill or tool beyond read-only file inspection scoped
+  to that directory, and forbidden from using prior knowledge of this
+  repo's own conventions):
+  - **Scenario A (per-file preamble):** a checked-in
+    `retry-policy.instructions.md` carrying the real "prefer local"
+    preamble and a stale fact (max retry count: 3), beside a divergent
+    `retry-policy.local.instructions.md` with no preamble and a fresh fact
+    (11) -- simulating sync-lag between the last-synced payload and the
+    currently-installed one. Asked each sub-agent "what is the current
+    value, and which file did it come from."
+  - **Scenario B (repo-wide catch-all):** the real, verbatim shipped
+    `local-cache-catchall.instructions.md` beside a source that was
+    *never* synced in at all -- only a lone `activation-code.local.
+    instructions.md` exists, no checked-in sibling. Asked each sub-agent
+    the same shape of question (a fictional "gizmo activation code").
+  - **Result: 6/6 PASS.** Every Scenario A run reported the fresh value
+    (11) from the `.local.instructions.md` sibling, explicitly citing the
+    checked-in file's own preamble as the reason for preferring it over
+    the stale value. Every Scenario B run reported the correct code
+    (`QUASAR-77`) from the lone local-only file, explicitly citing the
+    catch-all's own scan directive as how it found a file with no
+    checked-in sibling at all. Both mechanisms are now proven to actually
+    drive a real (sub-)agent to the fresher content, not just to pass a
+    unit test of the rendering code. Generator script and raw transcripts
+    live in session scratch space (not committed -- this is a one-time
+    validation exercise, not a repeatable fixture the repo needs to carry
+    forward); this Journal entry is the durable record.
+- **The write-incapable negative-proof test** (Plan, last item, not
+  flagged by the inbound handoff): added
+  `test_render_local_cache_write_incapable_destination_leaves_checked_in_floor`
+  in `tests/test_instruction_projections.py`. Went through two review
+  rounds on PR #4898 before landing correctly:
+  - **Round 1 draft** occupied the local-cache destination path with a
+    directory, claiming it would fail the atomic write's final
+    `os.replace` -- Copilot's review caught that this is rejected
+    *earlier*, at the existing-file regular-file check, so the test never
+    reached the path it claimed to exercise.
+  - **Round 2 draft** fixed that by monkeypatching `_atomic_write` itself
+    to raise -- but review caught that this skips the real writer
+    entirely (its own temp-file creation and `finally` cleanup never
+    run), making the "no stray temp file" assertion tautological.
+  - **Landed**: patches `os.replace` to fail only for this one
+    destination's final rename, letting the real `_atomic_write` run up
+    to that point -- it genuinely creates its temp file, writes and
+    fsyncs it, then genuinely cleans that temp file up in its own
+    `finally` block when the injected failure hits. Proves: the
+    checked-in floor is left byte-identical, `render_local_cache` reports
+    a blocking finding rather than raising, and no stray temp file or
+    corrupt sibling is left behind. `tools/run-plugin-tests.py
+    customizing-copilot`: 308 passed, 8 skipped -- no regressions.
+- **Every Phase 7 Plan and Validation Plan item is now resolved -- Phase 7
+  is Done.** The effort overall stays **Active**: Phase 2's two remaining
+  Validation Plan items are pre-existing, already-scoped states (one an
+  explicit operator decision not to extend the resolver further, the other
+  partially covered pending adopting-repo-specific scheduler/bypass-profile
+  work), not something this session touched or re-opened.
 
 ### 2026-10-01 (cont.) -- Phase 7 slice 5: `agent-worktrees` wiring (last Plan item)
 - Picked up the last unstarted Plan item: wired `customizing-copilot`'s

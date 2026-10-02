@@ -198,6 +198,28 @@ def test_seed_never_submitted_but_registered_is_delivered_over_bridge(seams, mon
     assert seams.release_res == [("anchor-example-web@cs-1", "r1")]
 
 
+@pytest.mark.parametrize("daemon_has_aliases", [True, False])
+def test_a_resumed_seed_needs_a_daemon_that_follows_renames(
+    seams, monkeypatch, capsys, daemon_has_aliases,
+):
+    """A resume may re-register under a new id after the claim: the seed is only
+    reported delivered when the daemon carries it across that rename."""
+    from venue_copilot import refs as venue_refs
+
+    sent = []
+    monkeypatch.setattr(
+        venue_refs, "deliver_note",
+        lambda sid, note, **kw: sent.append(kw) or daemon_has_aliases,
+    )
+    unready = json.dumps({"ok": True, "created": True, "seed_submitted": False})
+    rc = detach.cmd_detach(_args(copilot_args=["--resume=abc"]), ssh_session=_ssh(seams, stdout=unready))
+    assert rc == 0
+    assert sent == [{"min_daemon_protocol": 20}]
+    out = json.loads(capsys.readouterr().out)
+    assert out["seed_delivery"] == ("bridge" if daemon_has_aliases else "failed")
+    assert out["seeded"] is daemon_has_aliases
+    assert out["session_id"] == "sid-42" and seams.releases == []  # the session is kept
+
 def test_unregistered_session_is_an_explicit_failure(seams, capsys):
     seams.claim_rows.clear()  # reservation never claimed
     rc = detach.cmd_detach(_args(), ssh_session=_ssh(seams, stdout=_CREATED))

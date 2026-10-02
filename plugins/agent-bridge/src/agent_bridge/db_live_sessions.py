@@ -44,6 +44,7 @@ class _LiveSessionsMixin:
         now: float,
         driven_by: str | None = None,
         venue: str | None = None,
+        process_started_at: float | None = None,
     ) -> str:
         """Insert or refresh a live interactive-session registration (upsert).
 
@@ -75,10 +76,9 @@ class _LiveSessionsMixin:
         """
         session_id = self.resolve_live_session_id(session_id)
         cur = self.execute_write(
-            "INSERT INTO live_sessions (session_id, machine, cwd, worktree_id, "
-            "repo, branch, pid, role, driven_by, venue, status, registered_at, "
-            "updated_at) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ? "
+            "INSERT INTO live_sessions (session_id, machine, cwd, worktree_id, repo, branch, "
+            "pid, role, driven_by, venue, process_started_at, status, registered_at, updated_at) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ? "
             "WHERE NOT EXISTS ("
             "  SELECT 1 FROM worktree_ownership wo "
             "  JOIN sessions s ON s.id = wo.session_id "
@@ -90,21 +90,18 @@ class _LiveSessionsMixin:
             "worktree_id=excluded.worktree_id, repo=excluded.repo, "
             "branch=excluded.branch, pid=excluded.pid, role=excluded.role, "
             "driven_by=COALESCE(excluded.driven_by, live_sessions.driven_by), "
-            "venue=COALESCE(excluded.venue, live_sessions.venue), "
+            "venue=COALESCE(excluded.venue, live_sessions.venue), process_started_at="
+            "COALESCE(excluded.process_started_at, live_sessions.process_started_at), "
             "status='live', updated_at=excluded.updated_at "
             "WHERE live_sessions.status != 'taken-over'",
             (session_id, machine, cwd, worktree_id, repo, branch, pid, role,
-             driven_by, venue, now, now, worktree_id, worktree_id),
+             driven_by, venue, process_started_at, now, now, worktree_id, worktree_id),
         )
         if cur.rowcount == 1:
-            # Best-effort, additive: a worktree with a pending, unclaimed
-            # CLI-mode reservation (agent-bridge-cli-mode-sessions Phase 2) is
-            # claimed by this registration and the row is marked accordingly.
-            # Never blocks or reverses the registration above -- claiming is
-            # honest bookkeeping, not an admission gate; an unclaimed or absent
-            # reservation is not an error. A venue descriptor recorded on the
-            # reservation by the reserving launcher is inherited here, so a
-            # remote session's venue comes from the trusted reservation.
+            # Best-effort bookkeeping, never an admission gate: claim a pending
+            # CLI-mode reservation (inheriting its trusted venue descriptor),
+            # then fold in a same-process predecessor -- also after a fresh
+            # claim, since a resume may rename the session mid-rejoin.
             if worktree_id is not None and self.claim_cli_mode_reservation(
                 worktree_id, session_id, now=now
             ):
@@ -115,10 +112,8 @@ class _LiveSessionsMixin:
                     "WHERE session_id=?",
                     (worktree_id, session_id, session_id),
                 )
-            elif worktree_id is not None:
-                inherit_cli_mode_claim_for_session_id_change(
-                    self, worktree_id, session_id, now=now
-                )
+            if worktree_id is not None:
+                inherit_cli_mode_claim_for_session_id_change(self, worktree_id, session_id, now=now)
             return "live"
         # Rejected -- derive why for the caller's error (the authoritative
         # decision was the 0-row write above).
@@ -243,22 +238,26 @@ class _LiveSessionsMixin:
         )
         return cur.rowcount > 0
 
-    def deregister_live_session(self, session_id: str) -> None:
-        """Remove a live interactive-session registration and its message queue."""
-        exact = self.get_live_session_exact(session_id)
-        if exact is None:
-            return
-        self.execute_write(
-            "DELETE FROM live_sessions WHERE session_id=?", (session_id,)
-        )
-        self.execute_write(
-            "DELETE FROM live_messages WHERE session_id=?", (session_id,)
-        )
-        self.execute_write(
-            "DELETE FROM live_session_aliases "
-            "WHERE alias_session_id=? OR target_session_id=?",
-            (session_id, session_id),
-        )
+    def deregister_live_session(self, session_id: str) -> bool:
+        """Remove a live registration, its queue and aliases in one transaction
+        (a concurrent rollover can't slip between the check and the cleanup).
+        True only when this exact row was deleted."""
+        conn = self._get_conn()
+        with self._write_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if conn.execute("DELETE FROM live_sessions WHERE session_id=?",
+                                (session_id,)).rowcount != 1:
+                    conn.rollback()
+                    return False
+                conn.execute("DELETE FROM live_messages WHERE session_id=?", (session_id,))
+                conn.execute("DELETE FROM live_session_aliases WHERE alias_session_id=? "
+                             "OR target_session_id=?", (session_id, session_id))
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
 
     def expire_live_sessions_for_worktree(
         self, worktree_id: str, *, now: float, expected_session_id: str | None = None
@@ -286,11 +285,11 @@ class _LiveSessionsMixin:
         never-confirmed-dead claimant) is left untouched rather than
         collaterally demoted (#2906 race hardening).
         """
-        if expected_session_id is not None:
+        if expected_session_id is not None:  # alias-aware: the holder may have been renamed
             cur = self.execute_write(
                 "UPDATE live_sessions SET status='taken-over', updated_at=? "
-                "WHERE worktree_id=? AND status='live' AND session_id=?",
-                (now, worktree_id, expected_session_id),
+                f"WHERE worktree_id=? AND status='live' AND session_id={_CANON}",
+                (now, worktree_id, expected_session_id, expected_session_id),
             )
         else:
             cur = self.execute_write(

@@ -91,6 +91,17 @@ def test_deliver_note_is_steered_and_bounded():
     assert seen.get("timeout") == 60
 
 
+def test_deliver_note_can_require_a_daemon_protocol():
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return type("R", (), {"returncode": 3})()  # the daemon is too old
+
+    assert venue_refs.deliver_note("sid-1", "note", run=run, min_daemon_protocol=20) is False
+    assert calls[0][-2:] == ["--min-daemon-protocol", "20"]
+
+
 def test_a_wedged_bridge_reports_failed_delivery():
     import subprocess
 

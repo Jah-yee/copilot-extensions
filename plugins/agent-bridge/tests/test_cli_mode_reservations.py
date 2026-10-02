@@ -37,10 +37,12 @@ def _register(
     *,
     pid: int | None = 1,
     driven_by: str | None = None,
+    started: float | None = None,
 ) -> str:
     return db.register_live_session(
         sid, machine="m", cwd="/w", worktree_id=wt, repo=None,
         branch=None, pid=pid, role="picker", now=now, driven_by=driven_by,
+        process_started_at=started,
     )
 
 
@@ -611,3 +613,69 @@ def test_a_rename_keeps_its_place_behind_a_newer_process(tmp_db: Database) -> No
     assert _register(tmp_db, "newer", "wt-R", now + 2, pid=99) == "live"
     assert _register(tmp_db, "resumed", "wt-R", now + 3, pid=4242) == "live"
     assert tmp_db.current_live_session_for_worktree("wt-R", now=now + 3) == "newer"
+
+
+def test_a_reused_pid_never_inherits_a_confirmed_dead_registration(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    tmp_db.execute_write("UPDATE live_sessions SET status='expired' WHERE session_id='placeholder'")
+    assert _register(tmp_db, "stranger", "wt-R", now + 30, pid=4242) == "live"
+    assert tmp_db.get_live_session_exact("placeholder") is not None
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
+
+
+def test_a_reused_pid_with_a_later_start_time_is_a_different_process(tmp_db: Database) -> None:
+    now = time.time()
+    tmp_db.create_cli_mode_reservation("wt-R", now=now)
+    assert _register(tmp_db, "placeholder", "wt-R", now + 1, pid=4242, started=now - 600) == "live"
+    assert _register(tmp_db, "stranger", "wt-R", now + 2, pid=4242, started=now + 1.5) == "live"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
+    # The same process (same start time) still rolls over, even once its lease lapsed.
+    tmp_db.execute_write("UPDATE live_sessions SET status='expired' WHERE session_id='placeholder'")
+    assert _register(tmp_db, "resumed", "wt-R", now + 300, pid=4242, started=now - 599.5) == "live"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+
+
+def test_a_rename_after_a_fresh_rejoin_claim_still_rolls_over(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert tmp_db.release_cli_mode_reservation("wt-R") == 1
+    tmp_db.create_cli_mode_reservation("wt-R", now=now + 2)  # a rejoin reserves again
+    assert _register(tmp_db, "resumed", "wt-R", now + 3, pid=4242) == "live"
+    assert tmp_db.get_cli_mode_reservation("wt-R")["claimed_by_session_id"] == "resumed"
+    assert tmp_db.get_live_session_exact("placeholder") is None
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+
+
+def test_restart_fenced_on_a_renamed_holder_still_invalidates_it(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    mid, _ = tmp_db.enqueue_live_message_if_fresh("placeholder", sender="op", body="x", now=now + 2)
+    assert mid is not None
+    assert _register(tmp_db, "resumed", "wt-R", now + 3, pid=4242) == "live"  # rollover mid-stop
+    assert tmp_db.expire_live_sessions_for_worktree(
+        "wt-R", now=now + 4, expected_session_id="placeholder") == 1
+    assert tmp_db.get_live_session_exact("resumed")["status"] == "taken-over"
+    assert tmp_db.list_pending_live_messages("resumed") == []
+
+
+def test_restart_fence_still_spares_an_unrelated_process(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    tmp_db.deregister_live_session("placeholder")
+    assert _register(tmp_db, "stranger", "wt-R", now + 3, pid=99) == "live"
+    assert tmp_db.expire_live_sessions_for_worktree(
+        "wt-R", now=now + 4, expected_session_id="placeholder") == 0
+    assert tmp_db.get_live_session_exact("stranger")["status"] == "live"
+
+
+def test_deregister_reports_whether_it_deleted_the_exact_registration(tmp_db: Database) -> None:
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    # The predecessor's late deregister lost the race to the rollover: it
+    # deletes nothing, and the alias to the live successor survives.
+    assert tmp_db.deregister_live_session("placeholder") is False
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+    assert tmp_db.deregister_live_session("resumed") is True
+    assert tmp_db.get_live_session("placeholder") is None

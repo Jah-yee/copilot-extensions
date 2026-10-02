@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS live_sessions (
     latest_progress TEXT,
     cli_mode INTEGER NOT NULL DEFAULT 0,
     venue TEXT,
+    process_started_at REAL,
     registered_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );

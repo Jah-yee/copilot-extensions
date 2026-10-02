@@ -7,12 +7,14 @@ import subprocess
 from typing import Any, Protocol
 
 from . import (
+    LIVE_SESSION_ALIAS_PROTOCOL,
     VenueCopilotError,
     await_claim,
     bridge_probe_script,
     build_copilot_remote_command,
     deregister_live_session,
     last_json,
+    may_switch_session_id,
     observe_commands,
     registration_credentials_script,
     release_cli_mode,
@@ -296,7 +298,13 @@ def launch_detached(
                 "typed seed was not submitted; delivering over bridge"
             )
             progress("seed-bridge", detail)
-            seed_delivery_status = "bridge" if deliver_note(session_id, seed) else "failed"
+            # A resume can re-register under a new id after the claim; only a
+            # daemon with live-session aliases carries this message across it.
+            seed_delivery_status = "bridge" if deliver_note(
+                session_id, seed,
+                **({"min_daemon_protocol": LIVE_SESSION_ALIAS_PROTOCOL}
+                   if may_switch_session_id(copilot_args) else {}),
+            ) else "failed"
         refs_extra: dict[str, Any] = {}
         if notes:
             # A typed new session got the note in its seed; a running one (or a

@@ -73,9 +73,9 @@
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/models.py",
-          "sha256": "713bf04a93fcf284b832459c2e295dd38ef5a9dfa5ded7a6b09367b3033c838e",
+          "sha256": "809eff80e98150bd2f994938602f3a3193990bb41f569f64a6c319c0d1d9a00f",
           "semantic": false,
-          "non_semantic_reason": "Live-message request/response models gained an optional delivery urgency field; the representative session-create wire shape is unchanged."
+          "non_semantic_reason": "Live-message request/response models gained an optional delivery urgency field, and the live-session registration request an optional process_started_at; the representative session-create wire shape is unchanged."
         },
         {
           "path": "plugins/agent-bridge/src/agent_bridge/routes/health.py",

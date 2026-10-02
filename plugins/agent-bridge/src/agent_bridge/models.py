@@ -538,6 +538,9 @@ class RegisterLiveSessionRequest(BaseModel):
     role: str | None = None
     driven_by: str | None = None
     venue: LiveSessionVenue | None = None
+    #: Epoch seconds the registering process started; constant across an
+    #: in-process resume, so with ``pid`` it identifies one process instance.
+    process_started_at: float | None = None
 
 
 class LiveSessionInfo(BaseModel):

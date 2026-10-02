@@ -68,6 +68,12 @@ class _SchemaMixin:
                 "CREATE INDEX IF NOT EXISTS idx_live_session_aliases_target "
                 "ON live_session_aliases(target_session_id)"
             )
+            # The registering process's start time: with the pid, it tells a
+            # same-process resume from an unrelated process that reused the pid.
+            if "process_started_at" not in {
+                r[1] for r in conn.execute("PRAGMA table_info(live_sessions)")
+            }:
+                conn.execute("ALTER TABLE live_sessions ADD COLUMN process_started_at REAL")
             conn.commit()
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:

@@ -50,6 +50,7 @@ from ..live_representation import (
     await_turn_reply,
     build_progress_snapshot,
     derive_turn_state,
+    translate_reconnect_cursor,
 )
 from ..result_tokens import retarget
 from ..result_snapshot import (
@@ -240,6 +241,7 @@ async def register_live_session(
         role=body.role,
         driven_by=body.driven_by,
         venue=body.venue.model_dump_json() if body.venue is not None else None,
+        process_started_at=body.process_started_at,
         now=now,
     )
     if status != "live":
@@ -510,12 +512,12 @@ async def deregister_live_session(
     live tail's memory is reclaimed when the session goes away.
     """
     db = _db(request)
-    # A late DELETE through a retired id deletes nothing (the DB keeps only the
-    # current id's row) and must not drop the live successor's shared log.
-    registered = db.get_live_session_exact(session_id) is not None
-    db.deregister_live_session(session_id)
+    # Only the call that deletes the exact registration drops the represented
+    # log: a late DELETE through a retired id (or one that lost a race with a
+    # rollover) deletes nothing and must not drop the live successor's log.
+    deleted = db.deregister_live_session(session_id)
     store = getattr(request.app.state, "live_event_store", None)
-    if store is not None and registered:
+    if store is not None and deleted:
         for sid in store.ids_of(session_id) or [session_id]:
             store.drop(sid)
     return {"ok": True, "session_id": session_id}
@@ -582,7 +584,8 @@ async def ingest_live_events(
 
 @router.get("/{session_id}/events")
 async def stream_live_events(
-    session_id: str, request: Request, after: int | None = None
+    session_id: str, request: Request, after: int | None = None,
+    continuity_id: str | None = None,
 ) -> StreamingResponse:
     """SSE stream of a represented live session's translated events.
 
@@ -591,6 +594,11 @@ async def stream_live_events(
     identically to a bridge-owned one -- read-only: there is no turn/stop/cursor
     surface here, and permission events arrive unanswerable. Starts from
     ``?after=<id>`` (default 0 = the whole in-memory tail).
+
+    ``X-Agent-Bridge-Continuity`` names the log the ids are numbered on, and an
+    in-band ``continuity`` event names the new one when the stream follows a
+    session-id change into a merged log. A reconnect that passes that name back
+    as ``?continuity_id=`` has its ``after`` translated to the merged numbering.
     """
     db = _db(request)
     registration = db.get_live_session(session_id)
@@ -601,21 +609,33 @@ async def stream_live_events(
     log = store.get_or_create(
         session_id, worktree_id=registration.get("worktree_id")
     )
+    start = translate_reconnect_cursor(store, log, continuity_id, after or 0)
     shim = _RepresentedSession(session_id=session_id, event_log=log, store=store)
     server = getattr(request.app.state, "uvicorn_server", None)
+
+    async def _announcing_continuity(stream):
+        announced = log.continuity_id
+        async for chunk in stream:
+            following = getattr(shim.event_log, "followed_continuity_id", announced)
+            if following and following != announced:
+                announced = following
+                yield f"event: continuity\ndata: {json.dumps({'continuity_id': following})}\n\n"
+            yield chunk
+
     return StreamingResponse(
-        _sse_event_stream(
+        _announcing_continuity(_sse_event_stream(
             shim,
-            after or 0,
+            start,
             server=server,
             is_disconnected=getattr(request, "is_disconnected", None),
             mgr=None,
-        ),
+        )),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            **({"X-Agent-Bridge-Continuity": log.continuity_id} if log.continuity_id else {}),
         },
     )
 

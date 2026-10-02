@@ -644,6 +644,26 @@ class MergeFollowingLog:
     def __getattr__(self, name: str):
         return getattr(self._store.get(self._session_id) or self._log, name)
 
+    @property
+    def followed_continuity_id(self) -> str | None:
+        """Continuity of the log this reader's cursor is currently numbered on
+        (it switches only when the reader's next wait follows a merge)."""
+        return self._log.continuity_id
+
+
+def translate_reconnect_cursor(
+    store: LiveEventStore, log: EventLog, continuity_id: str | None, after: int,
+) -> int:
+    """``after`` numbered on the log named ``continuity_id``, in ``log``'s numbering
+    when that log was since merged (possibly in steps) into ``log``; otherwise unchanged."""
+    merged = store.merged_history()
+    for _ in range(len(merged)):
+        if not continuity_id or continuity_id == log.continuity_id or continuity_id not in merged:
+            break
+        continuity_id, ids = merged[continuity_id]
+        after = ids.get(after, max([v for k, v in ids.items() if k <= after], default=0))
+    return after
+
 
 async def await_turn_reply(
     log: EventLog, *, after: int, timeout: float

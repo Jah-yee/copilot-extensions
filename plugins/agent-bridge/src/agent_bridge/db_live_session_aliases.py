@@ -14,6 +14,12 @@ CANONICAL_SESSION_SQL = (
 import json
 from typing import Any
 
+from .db_core import LIVE_SESSION_STALE_SECONDS
+
+#: How far two reports of one process's start time may drift (each is derived
+#: from wall clock minus uptime); a reused pid starts well after the original.
+_START_TOLERANCE_SECONDS = 2.0
+
 
 def _newer_turn(predecessor: Any, successor: Any) -> tuple[Any, Any]:
     """The (turn_state, last_activity_at) pair with the latest activity; the
@@ -54,7 +60,11 @@ def inherit_cli_mode_claim_for_session_id_change(
     The predecessor is found from durable live registrations, not the launch
     reservation (which a launcher may already have released, or which may have
     expired): same worktree and machine, ``cli_mode``, and the *same, known*
-    PID. A missing PID on either side never counts as a match.
+    PID. A missing PID on either side never counts as a match. A PID alone
+    does not prove the same process (it can be reused), so when both rows
+    carry ``process_started_at`` those must agree; otherwise the predecessor
+    must still be heartbeating (fresh ``live``) or confirmed alive (``wedged``)
+    -- never a lapsed or confirmed-dead registration.
     """
     conn = db._get_conn()
     with db._write_lock:
@@ -68,22 +78,31 @@ def inherit_cli_mode_claim_for_session_id_change(
             if successor is None or successor["pid"] is None:
                 conn.rollback()
                 return None
+            started = successor["process_started_at"]
             predecessor = conn.execute(
                 "SELECT * FROM live_sessions WHERE worktree_id=? "
                 "AND session_id != ? AND cli_mode=1 AND pid IS NOT NULL "
                 "AND status != 'taken-over' "
-                "AND pid=? AND machine IS ? "
+                "AND pid=? AND machine IS ? AND CASE "
+                "WHEN ? IS NOT NULL AND process_started_at IS NOT NULL "
+                "THEN ABS(process_started_at - ?) < ? "
+                "ELSE status='wedged' OR (status='live' AND updated_at >= ?) END "
                 "ORDER BY updated_at DESC LIMIT 1",
-                (worktree_id, session_id, successor["pid"], successor["machine"]),
+                (worktree_id, session_id, successor["pid"], successor["machine"],
+                 started, started, _START_TOLERANCE_SECONDS,
+                 now - LIVE_SESSION_STALE_SECONDS),
             ).fetchone()
             if predecessor is None:
                 conn.rollback()
                 return None
             predecessor_id = predecessor["session_id"]
+            # A reservation this registration just claimed (a rejoin) is the
+            # current venue; otherwise the one the predecessor holds.
             reservation = conn.execute(
                 "SELECT venue FROM cli_mode_reservations "
-                "WHERE worktree_id=? AND claimed_by_session_id=?",
-                (worktree_id, predecessor_id),
+                "WHERE worktree_id=? AND claimed_by_session_id IN (?, ?) "
+                "ORDER BY claimed_by_session_id=? DESC LIMIT 1",
+                (worktree_id, session_id, predecessor_id, session_id),
             ).fetchone()
             venue = (
                 (reservation["venue"] if reservation is not None else None)

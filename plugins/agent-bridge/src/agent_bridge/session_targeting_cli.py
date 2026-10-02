@@ -84,6 +84,11 @@ def _cmd_send(args: argparse.Namespace) -> None:
         sys.exit(2)
 
     client = core._get_client()
+    min_protocol = getattr(args, "min_daemon_protocol", None)
+    if min_protocol and not client.daemon_supports(min_protocol):
+        print(f"[FAIL] The running bridge daemon predates protocol {min_protocol}; "
+              "update agent-bridge, restart its daemon, then send again.", file=sys.stderr)
+        sys.exit(3)
     target = args.target
     prompt = _resolve_prompt(args, required=True)
 
@@ -715,6 +720,7 @@ def register_session_targeting_commands(sub: argparse._SubParsersAction) -> None
     send_p.add_argument("--queue", action="store_true", help="If the target's session is busy, durably queue this prompt server-side (in the bridge's pending_prompts table) for FIFO delivery when the current turn settles -- surviving a caller remount and a bridge/host restart -- instead of rejecting it. The opposite of --force: it preserves the in-flight turn.")
     send_p.add_argument("--idempotency-key", help="stable producer key; retries return the original live-message id instead of enqueuing a duplicate")
     send_p.add_argument("--expected-session-id", help="deliver only if the target still resolves to this exact live session id (checked again atomically when enqueuing)")
+    send_p.add_argument("--min-daemon-protocol", type=int, default=None, metavar="N", help="send nothing (exit 3) unless the running daemon advertises HTTP protocol N or newer")
     core._add_stream_args(send_p)
     send_p.set_defaults(func=_cmd_send)
 

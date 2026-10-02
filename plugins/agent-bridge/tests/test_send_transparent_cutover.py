@@ -109,3 +109,18 @@ def test_send_cli_survives_connection_refused_mid_delivery(monkeypatch, capsys):
         f"{new_base}/api/v1/live-sessions/sess1/messages",
     ]
     assert client._base == new_base
+
+
+def test_send_with_a_protocol_floor_sends_nothing_to_an_older_daemon(monkeypatch, capsys):
+    import pytest
+
+    client = BridgeClient("http://127.0.0.1:57585", "tok")
+    monkeypatch.setattr(client, "daemon_supports", lambda version: version <= 19)
+    monkeypatch.setattr(client, "resolve_live_session", lambda _t: pytest.fail("sent"))
+    monkeypatch.setattr(m, "_get_client", lambda: client)
+    args = argparse.Namespace(target="agent-x", prompt="hello", prompt_file=None, new=False,
+                              min_daemon_protocol=20)
+    with pytest.raises(SystemExit) as exc:
+        m._cmd_send(args)
+    assert exc.value.code == 3
+    assert "predates protocol 20" in capsys.readouterr().err

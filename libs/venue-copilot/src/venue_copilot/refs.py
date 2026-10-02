@@ -127,20 +127,24 @@ def send_refs(
     return refs_note(result[1].strip().splitlines()[-1], files)
 
 
-def deliver_note(session_id: str, note: str, *, run=subprocess.run) -> bool:
+def deliver_note(
+    session_id: str, note: str, *, run=subprocess.run, min_daemon_protocol: int | None = None,
+) -> bool:
     """Tell a running session about new reference files (over stdin; never raises).
 
     Steered into the running turn (not queued behind it, where a worker that is
     about to report DONE would never see it) and bounded, so a wedged bridge
-    cannot block the rejoin that delivers it.
+    cannot block the rejoin that delivers it. ``min_daemon_protocol`` makes the
+    send fail (deliver nothing) unless the host daemon speaks at least that
+    protocol; an agent-bridge CLI too old to know the flag fails too.
     """
     _bin = "agent-bridge"  # marketplace-isolation: allow legacy-compatibility
     bridge = shutil.which(_bin) or _bin
+    argv = [bridge, "send", session_id, "--prompt-file", "-", "--no-wait", "--steer"]
+    if min_daemon_protocol:
+        argv += ["--min-daemon-protocol", str(min_daemon_protocol)]
     try:
-        result = run(
-            [bridge, "send", session_id, "--prompt-file", "-", "--no-wait", "--steer"],
-            input=note, capture_output=True, text=True, timeout=60,
-        )
+        result = run(argv, input=note, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return getattr(result, "returncode", 1) == 0

@@ -139,11 +139,13 @@ def retarget(token: str | None, merged: dict[str, tuple[str, dict[int, int]]]) -
     (``merged``: old continuity -> (new continuity, old event id -> new id)),
     so its event ids and continuity name the merged history. Anything else --
     including a malformed token -- is returned unchanged for normal validation."""
-    if not token or not merged or not token.startswith(_TOKEN_PREFIX):
+    if (not token or not merged or len(token) > _MAX_DETAIL_TOKEN_CHARS
+            or not token.startswith(_TOKEN_PREFIX)):
         return token
     encoded = token[len(_TOKEN_PREFIX):]
     try:
-        value = json.loads(base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_"))
+        value = json.loads(base64.b64decode(
+            encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True))
     except (binascii.Error, ValueError, TypeError, UnicodeDecodeError):
         return token
     if not isinstance(value, dict) or value.get("v") != 1:

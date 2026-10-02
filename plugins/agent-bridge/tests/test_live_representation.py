@@ -579,6 +579,24 @@ def test_retarget_leaves_a_malformed_continuity_for_validation() -> None:
         assert retarget(token, merged) == token  # no TypeError -> the route's 4xx path
 
 
+def test_retarget_never_launders_an_oversized_or_non_base64_token() -> None:
+    import base64
+    import json
+
+    from agent_bridge.result_tokens import _MAX_DETAIL_TOKEN_CHARS, _TOKEN_PREFIX, retarget
+
+    merged = {"old-log": ("new-log", {1: 3})}
+    payload = {"v": 1, "kind": "position", "source": "represented", "session_id": "s",
+               "continuity": "old-log", "event_id": 1}
+    padded = json.dumps(payload) + " " * _MAX_DETAIL_TOKEN_CHARS
+    oversized = _TOKEN_PREFIX + base64.urlsafe_b64encode(padded.encode()).decode().rstrip("=")
+    assert len(oversized) > _MAX_DETAIL_TOKEN_CHARS
+    assert retarget(oversized, merged) == oversized
+    raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    junk = _TOKEN_PREFIX + raw[:8] + "!!!!" + raw[8:]  # lenient decoding would drop these
+    assert retarget(junk, merged) == junk
+
+
 def test_retarget_leaves_unsupported_token_versions_for_validation() -> None:
     import base64
     import json
@@ -666,6 +684,74 @@ def test_an_open_successor_stream_follows_a_merge_without_replaying() -> None:
     joined = "".join(chunks)
     assert "after" in joined
     assert "p1" not in joined and "p2" not in joined and "s1" not in joined
+
+
+def _route_request(store, session_id: str):
+    from types import SimpleNamespace
+
+    db = SimpleNamespace(get_live_session=lambda _sid: {"session_id": session_id, "worktree_id": None})
+    state = SimpleNamespace(db=db, live_event_store=store, uvicorn_server=None)
+    return SimpleNamespace(app=SimpleNamespace(state=state), is_disconnected=None)
+
+
+def test_a_reconnect_across_a_merge_resumes_after_the_consumed_events() -> None:
+    """Disconnect before the merge, reconnect after it: the viewer's cursor is
+    numbered on the discarded successor log and is translated, not replayed."""
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.routes.live_sessions import stream_live_events
+
+    store = LiveEventStore()
+
+    async def scenario():
+        pred = store.get_or_create("placeholder")
+        pred.append("agent_message", {"text": "p1"})
+        pred.append("agent_message", {"text": "p2"})
+        succ = store.get_or_create("resumed")
+        succ.append("agent_message", {"text": "s1"})
+        first = await stream_live_events("resumed", _route_request(store, "resumed"), after=1)
+        seen_continuity = first.headers["X-Agent-Bridge-Continuity"]
+        assert seen_continuity == succ.continuity_id
+        store.alias("placeholder", "resumed")  # s1 becomes merged id 3
+        pred.append("agent_message", {"text": "after"})
+        again = await stream_live_events(
+            "resumed", _route_request(store, "resumed"), after=1, continuity_id=seen_continuity)
+        assert again.headers["X-Agent-Bridge-Continuity"] == pred.continuity_id
+        body = again.body_iterator
+        chunk = str(await asyncio.wait_for(body.__anext__(), 5))
+        await body.aclose()
+        return chunk
+
+    chunk = asyncio.run(scenario())
+    assert "after" in chunk and chunk.startswith("id: 4")
+    assert "p1" not in chunk and "p2" not in chunk and "s1" not in chunk
+
+
+def test_an_open_stream_announces_the_merged_continuity_before_renumbered_ids() -> None:
+    import asyncio
+
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.routes.live_sessions import stream_live_events
+
+    store = LiveEventStore()
+
+    async def scenario():
+        pred = store.get_or_create("placeholder")
+        pred.append("agent_message", {"text": "p1"})
+        succ = store.get_or_create("resumed")
+        succ.append("agent_message", {"text": "s1"})
+        response = await stream_live_events("resumed", _route_request(store, "resumed"), after=1)
+        body = response.body_iterator
+        store.alias("placeholder", "resumed")
+        pred.append("agent_message", {"text": "after"})
+        chunks = [str(await asyncio.wait_for(body.__anext__(), 5)) for _ in range(2)]
+        await body.aclose()
+        return chunks, pred.continuity_id
+
+    (announce, event), merged_continuity = asyncio.run(scenario())
+    assert announce.startswith("event: continuity") and merged_continuity in announce
+    assert event.startswith("id: 3") and "after" in event
 
 
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:

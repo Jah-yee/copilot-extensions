@@ -44,6 +44,17 @@ SEED_INLINE_MAX = 400
 SEED_DIR = "$HOME/.agent-bridge/seeds"  # marketplace-isolation: allow agent-bridge-management
 
 SESSION_SELECTORS = ("--resume", "-r", "--continue", "--session-id")
+#: Copilot flags that resume an existing conversation, which can re-register the
+#: running session under a new id after it first registered.
+RESUME_SELECTORS = ("--resume", "-r", "--continue")
+#: The bridge protocol whose live-session aliases carry a message queued for a
+#: placeholder id across such a rename (agent-bridge LIVE_SESSION_ALIAS_PROTOCOL_VERSION).
+LIVE_SESSION_ALIAS_PROTOCOL = 20
+
+
+def may_switch_session_id(copilot_args: list[str]) -> bool:
+    """Whether these Copilot args resume a conversation (so its id can change)."""
+    return any(a.split("=", 1)[0] in RESUME_SELECTORS for a in copilot_args)
 
 # The daemon's own config dir, matching agent-bridge's ``effective_config_dir()``
 # default -- overridable the same way, via ``AGENT_BRIDGE_CONFIG_DIR``.

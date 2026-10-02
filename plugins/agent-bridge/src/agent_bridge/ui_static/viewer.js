@@ -177,10 +177,14 @@ export class SessionViewer {
   async _stream(w) {
     while (this.watch === w) {
       try {
+        const cont = this.model.continuity ? `&continuity_id=${encodeURIComponent(this.model.continuity)}` : "";
         const r = await this.request(
-          `/api/v1/live-sessions/${encodeURIComponent(w.id)}/events?after=${this.model.lastId}`,
+          `/api/v1/live-sessions/${encodeURIComponent(w.id)}/events?after=${this.model.lastId}${cont}`,
           { headers: { Accept: "text/event-stream" }, signal: w.ctrl.signal });
         if (!r.ok) throw new Error("events " + r.status);
+        // lastId is numbered on this log; a reconnect names it so the bridge can
+        // translate the cursor if a session-id change merges the log meanwhile.
+        this.model.continuity = r.headers.get("X-Agent-Bridge-Continuity") || this.model.continuity;
         w.state = "live";
         this._renderHead();
         const reader = r.body.getReader();
@@ -222,6 +226,10 @@ export class SessionViewer {
     const changed = new Set();
     for (const block of this.pending.splice(0)) {
       const ev = parseSseBlock(block);
+      if (ev.type === "continuity") {  // the stream followed a merge: ids are renumbered
+        if (ev.data && ev.data.continuity_id) this.model.continuity = ev.data.continuity_id;
+        continue;
+      }
       if (!ev.data || ev.type === "bridge_control" || ev.type === "heartbeat") {
         if (ev.id != null) this.model.lastId = Math.max(this.model.lastId, ev.id);
         continue;

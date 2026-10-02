@@ -574,7 +574,15 @@ def cmd_detach(
                 "typed seed was not submitted; delivering over bridge"
             )
             _progress("seed-bridge", detail)
-            seed_delivery_status = "bridge" if deliver_note(session_id, seed) else "failed"
+            # A resume can re-register under a new id after the claim; only a
+            # daemon with live-session aliases carries this message across it.
+            from venue_copilot import LIVE_SESSION_ALIAS_PROTOCOL, may_switch_session_id
+
+            seed_delivery_status = "bridge" if deliver_note(
+                session_id, seed,
+                **({"min_daemon_protocol": LIVE_SESSION_ALIAS_PROTOCOL}
+                   if may_switch_session_id(copilot_args) else {}),
+            ) else "failed"
         refs_delivered = None
         if refs_note_text:
             # A typed new session got the note in its seed; a running one (or a

@@ -32,6 +32,15 @@ def yielded_head_session(record: tracking.WorktreeRecord) -> str | None:
     return latest.session_id if entry is not None and entry.state == "yielded" else None
 
 
+def listing_head_session(record: tracking.WorktreeRecord, row: dict) -> str | None:
+    """The head a worktree listing shows: the resolved head, else a yielded one
+    (marked ``head_yielded`` on *row*: resumable until a successor registers)."""
+    head = getattr(record, "resolved_head_session", None)
+    if not head and (head := yielded_head_session(record)):
+        row["head_yielded"] = True
+    return head
+
+
 def _next_lifecycle_revision(
     record: tracking.WorktreeRecord,
     *session_ids: str,

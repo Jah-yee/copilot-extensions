@@ -280,7 +280,13 @@ def _git_invocation(
     if not tokens:
         return None, [], [], False
     first = tokens[0].lstrip("\"'")
-    if first.lower() not in {"git", "git.exe"}:
+    executable = first.lower()
+    if executable.startswith("git-"):
+        subcommand = executable[len("git-"):]
+        if subcommand.endswith(".exe"):
+            subcommand = subcommand[:-len(".exe")]
+        return subcommand or None, tokens[1:], [], False
+    if executable not in {"git", "git.exe"}:
         return None, [], [], False
 
     git_cwd = cwd

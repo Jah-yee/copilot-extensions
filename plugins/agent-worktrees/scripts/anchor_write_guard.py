@@ -245,6 +245,77 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
     return segments
 
 
+def _shell_command_substitutions(seg: str, tool: str) -> list[str]:
+    lower_tool = tool.lower()
+    if lower_tool not in {"bash", "sh", "powershell", "pwsh"}:
+        return []
+    escape = "\\" if lower_tool in {"bash", "sh"} else "`"
+    substitutions: list[str] = []
+    quote = None
+    index = 0
+    while index < len(seg):
+        char = seg[index]
+        if char == escape and quote != "'" and index + 1 < len(seg):
+            index += 2
+            continue
+        if char == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+            index += 1
+            continue
+        if char == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if quote != "'" and seg.startswith("$(", index):
+            start = index + 2
+            cursor = start
+            depth = 1
+            inner_quote = None
+            while cursor < len(seg):
+                current = seg[cursor]
+                if (
+                    current == escape
+                    and inner_quote != "'"
+                    and cursor + 1 < len(seg)
+                ):
+                    cursor += 2
+                    continue
+                if current == "'" and inner_quote != '"':
+                    inner_quote = None if inner_quote == "'" else "'"
+                elif current == '"' and inner_quote != "'":
+                    inner_quote = None if inner_quote == '"' else '"'
+                elif inner_quote != "'":
+                    if current == "(":
+                        depth += 1
+                    elif current == ")":
+                        depth -= 1
+                        if depth == 0:
+                            substitutions.append(seg[start:cursor])
+                            index = cursor + 1
+                            break
+                cursor += 1
+            else:
+                index += 2
+            continue
+        if quote != "'" and lower_tool in {"bash", "sh"} and char == "`":
+            start = index + 1
+            cursor = start
+            while cursor < len(seg):
+                if seg[cursor] == "\\" and cursor + 1 < len(seg):
+                    cursor += 2
+                    continue
+                if seg[cursor] == "`":
+                    substitutions.append(seg[start:cursor])
+                    index = cursor + 1
+                    break
+                cursor += 1
+            else:
+                index += 1
+            continue
+        index += 1
+    return substitutions
+
+
 def _unquote_shell_token(token: str) -> str:
     if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
         return token[1:-1]
@@ -815,6 +886,10 @@ def _shell_hit(
     for seg in _shell_segments(cmd, tool):
         seg_hay = os.path.normcase(seg.replace("/", os.sep)) if _IS_WIN else seg
         eff = _effective_seg(seg)
+        for substitution in _shell_command_substitutions(eff, tool):
+            hit = _shell_hit(substitution, eff_cwd, anchors, tool)
+            if hit is not None:
+                return hit
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))
         is_git = bool(_GIT_START.match(eff))
         subcmd, git_args, git_targets, has_repo_override = (

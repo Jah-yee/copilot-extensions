@@ -335,6 +335,46 @@ def test_shell_git_alias_with_quoted_separator_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "$(echo ok; git commit --allow-empty -m example)"',
+        'echo "$(echo "$(git commit --allow-empty -m example)")"',
+        "echo `git commit --allow-empty -m example`",
+    ],
+)
+def test_bash_git_command_substitution_from_anchor_denies(
+    tmp_path, anchor, command,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell(command, gp), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_bash_single_quoted_git_substitution_text_allows(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    assert guard.decide(
+        _shell("echo '$(git commit --allow-empty -m example)'", gp),
+        env={}, home=tmp_path, anchors=anchor,
+    ) is None
+
+
+def test_powershell_git_command_substitution_from_anchor_denies(
+    tmp_path, anchor,
+):
+    gp = anchor[0]["path"]
+    payload = {
+        "toolName": "powershell",
+        "cwd": str(gp),
+        "toolArgs": {
+            "command": 'Write-Output "$(git commit --allow-empty -m example)"'
+        },
+    }
+    d = guard.decide(payload, env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_shell_git_config_env_alias_from_anchor_denies(tmp_path, anchor):
     gp = anchor[0]["path"]
     command = (
@@ -737,7 +777,7 @@ def test_shell_anchor_in_quoted_body_payload_allows(tmp_path, anchor):
     gp = anchor[0]["path"]
     body = (f'A read-only `git fetch ... 2>&1` in `{gp}` was denied. '
             f'A genuine `Set-Content "{gp}\\x"` / `git commit` must still deny.')
-    cmd = f'gh issue create --repo o/r --title "bug" --body "{body}"'
+    cmd = f"gh issue create --repo o/r --title 'bug' --body '{body}'"
     assert guard.decide(_shell(cmd, tmp_path), env={}, home=tmp_path,
                         anchors=anchor) is None
 

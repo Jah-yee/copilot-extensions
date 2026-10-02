@@ -187,6 +187,19 @@ def test_shell_git_merge_base_from_anchor_cwd_allows(tmp_path, anchor):
                         env={}, home=tmp_path, anchors=anchor) is None
 
 
+def test_shell_git_exe_commit_from_anchor_cwd_denies(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell("git.exe commit -m example", gp), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_exe_merge_base_from_anchor_cwd_allows(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    assert guard.decide(_shell("git.exe merge-base main HEAD", gp),
+                        env={}, home=tmp_path, anchors=anchor) is None
+
+
 @pytest.mark.parametrize("separator", ["\n", "; ", " && "])
 def test_shell_git_readonly_batch_from_anchor_cwd_allows(
     tmp_path, anchor, separator,

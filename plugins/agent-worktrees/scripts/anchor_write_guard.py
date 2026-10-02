@@ -210,7 +210,7 @@ def _git_invocation(
     if not tokens:
         return None, [], [], False
     first = tokens[0].lstrip("\"'")
-    if first.lower() != "git":
+    if first.lower() not in {"git", "git.exe"}:
         return None, [], [], False
 
     git_cwd = cwd

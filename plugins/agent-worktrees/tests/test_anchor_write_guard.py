@@ -395,6 +395,22 @@ def test_bash_unquoted_substitution_separator_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <(git commit --allow-empty -m example; echo ok)",
+        "cat >(git commit --allow-empty -m example)",
+    ],
+)
+def test_bash_process_substitution_from_anchor_denies(
+    tmp_path, anchor, command,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell(command, gp), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_bash_single_quoted_git_substitution_text_allows(tmp_path, anchor):
     gp = anchor[0]["path"]
     assert guard.decide(
@@ -470,6 +486,20 @@ def test_shell_git_quoted_literal_expansion_character_path_denies(
     anchors = [*anchor, {"name": "literal", "path": str(literal)}]
     d = guard.decide(
         _shell(f"git -C '{literal}' commit -m example", tmp_path),
+        env={}, home=tmp_path, anchors=anchors,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("suffix", ["$literal", "`literal"])
+def test_bash_double_quoted_escaped_character_path_denies(
+    tmp_path, anchor, suffix,
+):
+    literal = _main_checkout(tmp_path, f"anchor{suffix}")
+    escaped = str(literal).replace(suffix[0], f"\\{suffix[0]}")
+    anchors = [*anchor, {"name": "literal", "path": str(literal)}]
+    d = guard.decide(
+        _shell(f'git -C "{escaped}" commit -m example', tmp_path),
         env={}, home=tmp_path, anchors=anchors,
     )
     assert d and d["permissionDecision"] == "deny"
@@ -811,6 +841,20 @@ def test_shell_fake_linked_worktree_pointing_at_anchor_git_dir_denies(
     )
     d = guard.decide(_shell(command, tmp_path), env={},
                      home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_symlinked_anchor_git_dir_denies(tmp_path, anchor):
+    anchor_git = Path(anchor[0]["path"]) / ".git"
+    alias = tmp_path / "anchor-git-link"
+    try:
+        alias.symlink_to(anchor_git, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+    d = guard.decide(
+        _shell(f'git --git-dir "{alias}" commit -m example', tmp_path),
+        env={}, home=tmp_path, anchors=anchor,
+    )
     assert d and d["permissionDecision"] == "deny"
 
 

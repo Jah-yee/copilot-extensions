@@ -197,7 +197,7 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
     segments: list[str] = []
     current: list[str] = []
     quote = None
-    dollar_depth = 0
+    substitution_depth = 0
     backtick_substitution = False
     index = 0
     while index < len(cmd):
@@ -242,17 +242,26 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
             elif char == quote:
                 quote = None
         elif (
-            lower_tool in {"bash", "sh", "powershell", "pwsh"}
-            and cmd.startswith("$(", index)
+            (
+                lower_tool in {"bash", "sh", "powershell", "pwsh"}
+                and cmd.startswith("$(", index)
+            )
+            or (
+                posix_escapes
+                and (
+                    cmd.startswith("<(", index)
+                    or cmd.startswith(">(", index)
+                )
+            )
         ):
-            dollar_depth += 1
-            current.extend(("$", "("))
+            substitution_depth += 1
+            current.extend((char, "("))
             index += 1
-        elif dollar_depth and char == "(":
-            dollar_depth += 1
+        elif substitution_depth and char == "(":
+            substitution_depth += 1
             current.append(char)
-        elif dollar_depth and char == ")":
-            dollar_depth -= 1
+        elif substitution_depth and char == ")":
+            substitution_depth -= 1
             current.append(char)
         elif posix_escapes and char == "`":
             backtick_substitution = not backtick_substitution
@@ -268,7 +277,7 @@ def _shell_segments(cmd: str, tool: str) -> list[str]:
             current.extend((char, cmd[index + 1]))
             index += 1
         elif (
-            not dollar_depth
+            not substitution_depth
             and not backtick_substitution
             and char in {";", "|", "&", "\n", "\r"}
         ):
@@ -312,7 +321,20 @@ def _shell_command_substitutions(seg: str, tool: str) -> list[str]:
             quote = None if quote == '"' else '"'
             index += 1
             continue
-        if quote != "'" and seg.startswith("$(", index):
+        substitution_start = (
+            quote != "'"
+            and (
+                seg.startswith("$(", index)
+                or (
+                    lower_tool in {"bash", "sh"}
+                    and (
+                        seg.startswith("<(", index)
+                        or seg.startswith(">(", index)
+                    )
+                )
+            )
+        )
+        if substitution_start:
             start = index + 2
             cursor = start
             depth = 1
@@ -386,7 +408,7 @@ def _git_tokens(seg: str, tool: str) -> list[str]:
                 and char == "\\"
                 and quote == '"'
                 and index + 1 < len(seg)
-                and seg[index + 1] in {'"', "\\"}
+                and seg[index + 1] in {'"', "\\", "$", "`"}
             ):
                 current.append(seg[index + 1])
                 index += 1
@@ -659,6 +681,14 @@ def _canon(p: str) -> str:
     return os.path.normcase(n)
 
 
+def _real_canon(p: str) -> str:
+    try:
+        n = os.path.realpath(os.path.abspath(p))
+    except (OSError, ValueError):
+        return ""
+    return os.path.normcase(os.path.normpath(n))
+
+
 def find_repo_root(start: str) -> Path | None:
     """Nearest ancestor of ``start`` containing a ``.git`` (file or dir)."""
     try:
@@ -902,10 +932,15 @@ def _git_target_anchor(
 ) -> dict | None:
     if kind != "git-dir":
         return _cwd_anchor_dict(path, canon_anchor)
-    target = _canon(path)
+    target = _real_canon(path)
     for root, anchor in canon_anchor.items():
-        git_dir = os.path.join(root, ".git")
-        if target == root or target == git_dir or target.startswith(git_dir + os.sep):
+        real_root = _real_canon(root)
+        git_dir = _real_canon(os.path.join(root, ".git"))
+        if (
+            target == real_root
+            or target == git_dir
+            or target.startswith(git_dir + os.sep)
+        ):
             return anchor
     return None
 

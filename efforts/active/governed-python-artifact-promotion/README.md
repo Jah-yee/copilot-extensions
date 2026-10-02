@@ -98,10 +98,21 @@ distribution unit.
 
 ### Phase 2 — Promotion-built, content-addressed first-party artifacts
 
-- [ ] Build first-party wheels and manifests during promotion, keyed by
-      plugin payload hash, platform, architecture, and Python ABI, covering
-      the plugin's own wheel and every vendored `libs/<lib>` wheel it
-      requires after materialization.
+- [x] **Done (2026-10-02).** Build first-party wheels and manifests during
+      promotion, keyed by plugin payload hash, platform, architecture, and
+      Python ABI, covering the plugin's own wheel and every vendored
+      `libs/<lib>` wheel it requires after materialization.
+      `tools/build_python_artifacts.py` builds a plugin's own wheel plus
+      every vendored lib wheel it needs (reusing `uv_editable_ref`'s
+      existing enumeration, recursively), and writes a manifest recording
+      the payload hash (git tree SHAs), the wheel filenames' own
+      python/abi/platform tags, each wheel's sha256, and the build-tool
+      `Generator:` actually used (read from each built wheel's own
+      `dist-info/WHEEL`, not assumed) — folded together into one
+      `artifact_id`. Not yet wired into the real promotion pipeline
+      (`promote_release.py`) or integrated with a per-run shared
+      build-toolchain lock (still built per-wheel via the normal isolated
+      PEP 517 build) — both are follow-up slices.
 - [ ] Resolve and pin a dependency closure for the third-party portion only,
       using a lag-tolerant selection policy informed by Phase 1, and record
       it in the manifest.
@@ -109,6 +120,7 @@ distribution unit.
       authentication, publication channel, credential model) — see Open
       Design Questions below; resolve these concretely during this phase,
       not deferred further.
+
 
 ### Phase 3 — Verified consumption with correct fallback
 
@@ -322,6 +334,41 @@ far); and a larger plugin than `agent-bridge` to test whether the cold-case
 win grows with build complexity.
 
 ## Journal
+
+### 2026-10-02 - Phase 2 slice 1: `tools/build_python_artifacts.py` (wheel + manifest build)
+
+- Implemented the first real Phase 2 slice: a tool that builds a plugin's
+  own wheel plus every vendored `libs/<lib>` wheel it needs (via `uv build
+  --wheel`), enumerating the vendored set by reusing
+  `uv_editable_ref.find_uv_editable_refs` recursively (the same primitive
+  `materialize_main.py` already uses, so artifact coverage and the
+  materialized tree can never disagree about which libs are in scope).
+- Manifest fields: `payload_hash` (git tree SHA of the plugin dir + every
+  vendored lib dir, order-independent), each wheel's `python_tag`/
+  `abi_tag`/`platform_tag` (parsed from the wheel filename itself -- the
+  canonical, self-describing source, never guessed from the running
+  interpreter), each wheel's sha256, and the build `Generator:` actually
+  read from each wheel's own `dist-info/WHEEL` (the build-hermeticity
+  resolution's own mechanism, applied for real rather than only described).
+  All of it folds into one `artifact_id`.
+- 23 unit tests (`tools/test_build_python_artifacts.py`), all green;
+  confirmed zero regressions against the rest of `tools/`'s suite (the only
+  failures in a full `pytest tools/` run are 45 pre-existing,
+  environment-specific `clean-room`/WSL-bash failures unrelated to this
+  change). Smoke-tested for real against `agent-bridge`: built all 10
+  wheels (the plugin + its 9 vendored libs), every one reporting
+  `setuptools (84.0.0)` as its actual generator, manifest written
+  correctly.
+- **Not yet done** (explicitly out of scope for this slice, named in the
+  Phase 2 checklist): wiring this into the real `promote_release.py`
+  pipeline; a per-promotion-run shared build-toolchain lock (this slice
+  builds each wheel via the normal isolated PEP 517 build rather than a
+  pre-resolved, pinned one -- `build_toolchain` here records whatever the
+  ambient build actually used, which is correct per-wheel but does not yet
+  guarantee one shared value across a whole promotion run); the
+  third-party dependency-closure resolution/lag-tolerant selection; and
+  the trust/publication contract (attestation, GitHub Release channel).
+  **Next:** pick up one of those as the next Phase 2 slice.
 
 ### 2026-10-02 - Phase 1 spike run: governed-feed resolution proven, lag measured, timing/storage baselined
 

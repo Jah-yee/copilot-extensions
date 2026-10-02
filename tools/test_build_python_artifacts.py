@@ -346,18 +346,46 @@ def test_compute_payload_hash_changes_when_either_dir_changes(fake_repo: Path):
 # --- build_wheel (mocked subprocess) ---------------------------------------
 
 
-def test_build_wheel_identifies_new_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _staging_dir_from_cmd(cmd: list[str]) -> Path:
+    return Path(cmd[cmd.index("-o") + 1])
+
+
+def test_build_wheel_moves_output_into_out_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     out_dir = tmp_path / "dist"
-    out_dir.mkdir()
-    (out_dir / "preexisting-1.0-py3-none-any.whl").write_bytes(b"")
 
     def fake_run(cmd, capture_output, text):  # noqa: ARG001
-        (out_dir / "new_pkg-2.0-py3-none-any.whl").write_bytes(b"")
+        (_staging_dir_from_cmd(cmd) / "new_pkg-2.0-py3-none-any.whl").write_bytes(b"x")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(bpa.subprocess, "run", fake_run)
     wheel = bpa.build_wheel(tmp_path / "src", out_dir)
-    assert wheel.name == "new_pkg-2.0-py3-none-any.whl"
+    assert wheel == out_dir / "new_pkg-2.0-py3-none-any.whl"
+    assert wheel.is_file()
+
+
+def test_build_wheel_overwrites_existing_same_name_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression: a second invocation that rebuilds the exact same wheel
+    # filename (identical version rebuilt again, or a retry after a later
+    # manifest step failed and left a same-named wheel behind) must still
+    # be detected as a successful build, not silently seen as "0 new
+    # wheels" because the before/after filename set didn't change.
+    out_dir = tmp_path / "dist"
+    out_dir.mkdir()
+    existing = out_dir / "demo-1.0-py3-none-any.whl"
+    existing.write_bytes(b"old-bytes")
+
+    def fake_run(cmd, capture_output, text):  # noqa: ARG001
+        (_staging_dir_from_cmd(cmd) / "demo-1.0-py3-none-any.whl").write_bytes(
+            b"new-bytes"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(bpa.subprocess, "run", fake_run)
+    wheel = bpa.build_wheel(tmp_path / "src", out_dir)
+    assert wheel == existing
+    assert wheel.read_bytes() == b"new-bytes"
 
 
 def test_build_wheel_nonzero_exit_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -370,17 +398,15 @@ def test_build_wheel_nonzero_exit_raises(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_build_wheel_ambiguous_output_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    out_dir = tmp_path / "dist"
-    out_dir.mkdir()
-
     def fake_run(cmd, capture_output, text):  # noqa: ARG001
-        (out_dir / "a-1.0-py3-none-any.whl").write_bytes(b"")
-        (out_dir / "b-1.0-py3-none-any.whl").write_bytes(b"")
+        staging = _staging_dir_from_cmd(cmd)
+        (staging / "a-1.0-py3-none-any.whl").write_bytes(b"")
+        (staging / "b-1.0-py3-none-any.whl").write_bytes(b"")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(bpa.subprocess, "run", fake_run)
     with pytest.raises(bpa.ArtifactBuildError):
-        bpa.build_wheel(tmp_path / "src", out_dir)
+        bpa.build_wheel(tmp_path / "src", tmp_path / "dist")
 
 
 # --- build_plugin_artifacts (end-to-end, mocked build_wheel) ---------------

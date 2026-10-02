@@ -386,6 +386,19 @@ win grows with build complexity.
   after the review fixes: built all 10 wheels (the plugin + its 9 vendored
   libs), every one reporting `setuptools (84.0.0)` as its actual generator,
   manifest written correctly.
+- A second review round found 2 more issues (1 real, 1 stale): `build_wheel`'s
+  new-wheel detection diffed `out_dir`'s own filenames before/after, which
+  would silently see "0 new wheels" on a second invocation rebuilding the
+  exact same filename (an identical version rebuilt again, or a retry
+  after a later manifest step left a same-named wheel behind) -- fixed by
+  building into a fresh temporary staging directory every time and moving
+  the single result into `out_dir` (overwriting deliberately), with a new
+  regression test and a direct double-invocation smoke test against
+  `agent-bridge` confirming it. The "add a Documentation impact statement"
+  finding was already addressed in the PR description by the time of this
+  round -- the review tooling diffs file content, not the PR body, so it
+  could not see that fix; left as a reviewer-visible non-issue rather than
+  a code change.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

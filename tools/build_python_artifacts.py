@@ -48,8 +48,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -279,32 +281,43 @@ def sha256_file(path: Path) -> str:
 
 
 def build_wheel(source_dir: Path, out_dir: Path, *, python: str | None = None) -> Path:
-    """Builds a wheel for ``source_dir`` into ``out_dir`` via `uv build
-    --wheel`, resolving its build-system `requires` the normal (isolated)
-    way -- which, on a correctly governed-feed-configured machine, already
-    resolves only from that feed; this script adds no index configuration
-    of its own. Returns the built wheel's path, identified by snapshotting
-    ``out_dir``'s `*.whl` contents before and after rather than parsing
-    `uv`'s own stdout (whose exact phrasing is not a stable contract this
-    script should depend on)."""
-    before = {p.name for p in out_dir.glob("*.whl")} if out_dir.is_dir() else set()
-    cmd = ["uv", "build", "--wheel", "-o", str(out_dir)]
-    if python:
-        cmd += ["--python", python]
-    cmd.append(str(source_dir))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise ArtifactBuildError(
-            f"uv build failed for {source_dir}:\n{result.stdout}\n{result.stderr}"
-        )
-    after = {p.name for p in out_dir.glob("*.whl")} if out_dir.is_dir() else set()
-    new_names = after - before
-    if len(new_names) != 1:
-        raise ArtifactBuildError(
-            f"uv build for {source_dir} produced {len(new_names)} new wheel(s) "
-            f"in {out_dir}, expected exactly 1: {sorted(new_names)}"
-        )
-    return out_dir / next(iter(new_names))
+    """Builds a wheel for ``source_dir`` via `uv build --wheel`, resolving
+    its build-system `requires` the normal (isolated) way -- which, on a
+    correctly governed-feed-configured machine, already resolves only from
+    that feed; this script adds no index configuration of its own.
+
+    Builds into a fresh, empty temporary staging directory (never directly
+    into ``out_dir``) and moves the single resulting wheel into ``out_dir``
+    afterward: detecting a new wheel by diffing ``out_dir``'s own `*.whl`
+    contents before/after would silently see no change -- and wrongly
+    report "0 new wheels" -- on a second invocation that rebuilds the exact
+    same filename (an identical version rebuilt again, or a retry after a
+    later manifest step failed and left the wheel behind from a prior
+    attempt). A fresh staging directory has no such pre-existing-name
+    ambiguity: whatever `uv build` places there is unambiguously this
+    invocation's own output."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="build-python-artifacts-") as staging:
+        staging_dir = Path(staging)
+        cmd = ["uv", "build", "--wheel", "-o", str(staging_dir)]
+        if python:
+            cmd += ["--python", python]
+        cmd.append(str(source_dir))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise ArtifactBuildError(
+                f"uv build failed for {source_dir}:\n{result.stdout}\n{result.stderr}"
+            )
+        built = list(staging_dir.glob("*.whl"))
+        if len(built) != 1:
+            raise ArtifactBuildError(
+                f"uv build for {source_dir} produced {len(built)} wheel(s) in "
+                f"a fresh staging directory, expected exactly 1: "
+                f"{sorted(p.name for p in built)}"
+            )
+        dest = out_dir / built[0].name
+        shutil.move(str(built[0]), str(dest))
+        return dest
 
 
 def build_plugin_artifacts(

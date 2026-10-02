@@ -83,12 +83,15 @@ def inherit_cli_mode_claim_for_session_id_change(
                 "SELECT * FROM live_sessions WHERE worktree_id=? "
                 "AND session_id != ? AND cli_mode=1 AND pid IS NOT NULL "
                 "AND status != 'taken-over' "
+                # Never fold back the session this id was already renamed into.
+                "AND session_id NOT IN (SELECT target_session_id FROM live_session_aliases "
+                "WHERE alias_session_id=?) "
                 "AND pid=? AND machine IS ? AND CASE "
                 "WHEN ? IS NOT NULL AND process_started_at IS NOT NULL "
                 "THEN ABS(process_started_at - ?) < ? "
                 "ELSE status='wedged' OR (status='live' AND updated_at >= ?) END "
                 "ORDER BY updated_at DESC LIMIT 1",
-                (worktree_id, session_id, successor["pid"], successor["machine"],
+                (worktree_id, session_id, session_id, successor["pid"], successor["machine"],
                  started, started, PROCESS_START_TOLERANCE_SECONDS,
                  now - LIVE_SESSION_STALE_SECONDS),
             ).fetchone()

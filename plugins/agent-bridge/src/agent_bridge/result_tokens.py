@@ -181,6 +181,9 @@ def _retarget_detail(value: dict[str, Any], ids: dict[int, int]) -> bool:
         value["event_id"] = exact[value["event_id"]]
     start, end = value.get("start_event_id"), value.get("end_event_id")
     if isinstance(start, int) and isinstance(end, int):
+        # Client-controlled bounds: never iterate wider than the mappings.
+        if not 0 < start <= end or end - start + 1 > len(exact):
+            return False
         members = [exact.get(k) for k in range(start, end + 1)]
         if not members or None in members or members != list(
             range(members[0], members[0] + len(members))

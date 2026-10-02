@@ -78,7 +78,7 @@ class _LiveSessionsMixin:
         cur = self.execute_write(
             "INSERT INTO live_sessions (session_id, machine, cwd, worktree_id, repo, branch, "
             "pid, role, driven_by, venue, process_started_at, status, registered_at, updated_at) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ? "
+            f"SELECT {_CANON}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ? "  # rename-atomic
             "WHERE NOT EXISTS ("
             "  SELECT 1 FROM worktree_ownership wo "
             "  JOIN sessions s ON s.id = wo.session_id "
@@ -94,9 +94,10 @@ class _LiveSessionsMixin:
             "COALESCE(excluded.process_started_at, live_sessions.process_started_at), "
             "status='live', updated_at=excluded.updated_at "
             "WHERE live_sessions.status != 'taken-over'",
-            (session_id, machine, cwd, worktree_id, repo, branch, pid, role,
+            (session_id, session_id, machine, cwd, worktree_id, repo, branch, pid, role,
              driven_by, venue, process_started_at, now, now, worktree_id, worktree_id),
         )
+        session_id = self.resolve_live_session_id(session_id)  # the id actually written
         if cur.rowcount == 1:
             # Best-effort bookkeeping, never an admission gate: claim a pending
             # CLI-mode reservation (inheriting its trusted venue descriptor),

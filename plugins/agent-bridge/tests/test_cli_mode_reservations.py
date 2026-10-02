@@ -607,6 +607,29 @@ def test_rollover_moves_delivered_messages_so_retries_stay_idempotent(tmp_db: Da
 
 
 
+def test_a_heartbeat_that_resolved_before_a_rename_never_reverses_it(
+    tmp_db: Database, monkeypatch
+) -> None:
+    """The placeholder's heartbeat looked itself up just before the rollover
+    committed; its upsert must still land on the renamed row, not resurrect
+    the retired id and fold the successor back into it."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    real, calls = tmp_db.resolve_live_session_id, []
+
+    def _stale_first(session_id: str) -> str:
+        calls.append(session_id)
+        return session_id if len(calls) == 1 else real(session_id)
+
+    monkeypatch.setattr(tmp_db, "resolve_live_session_id", _stale_first)
+    assert _register(tmp_db, "placeholder", "wt-R", now + 3, pid=4242) == "live"
+    monkeypatch.undo()
+    assert tmp_db.get_live_session_exact("placeholder") is None
+    assert tmp_db.get_live_session_exact("resumed")["updated_at"] == now + 3
+    assert tmp_db.resolve_live_session_id("placeholder") == "resumed"
+    assert tmp_db.resolve_live_session_id("resumed") == "resumed"
+
 def test_a_rename_keeps_its_place_behind_a_newer_process(tmp_db: Database) -> None:
     now = time.time()
     _claimed_placeholder(tmp_db, now)  # pid 4242, registered at now+1

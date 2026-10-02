@@ -881,6 +881,29 @@ def test_a_span_with_unique_events_before_a_duplicate_never_reverses() -> None:
     assert retarget(span, store.merged_history()) == span
 
 
+def test_an_oversized_or_reversed_mapped_span_is_rejected_before_iterating(monkeypatch) -> None:
+    from agent_bridge import result_tokens
+    from agent_bridge.live_representation import LiveEventStore
+    from agent_bridge.result_tokens import _span_ref, retarget
+
+    store = LiveEventStore()
+    a = {"type": "assistant.message", "id": "sdk-a", "data": {"content": "A"}}
+    b = {"type": "assistant.message", "id": "sdk-b", "data": {"content": "B"}}
+    store.ingest("placeholder", [a])
+    store.ingest("resumed", [b])
+    cont = store.get("resumed").continuity_id
+    store.alias("placeholder", "resumed")
+    history = store.merged_history()
+
+    def _no_range(*_a):
+        raise AssertionError("iterated a span wider than the mappings")
+
+    monkeypatch.setattr(result_tokens, "range", _no_range, raising=False)
+    for start, end in ((1, 200_000), (2, 1), (-5, 1)):
+        span = _span_ref("represented", "resumed", cont, start, end)
+        assert retarget(span, history) == span
+
+
 def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
     import pytest
 

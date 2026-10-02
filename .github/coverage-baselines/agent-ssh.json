@@ -19405,652 +19405,652 @@
       ]
     }
   },
-  "generated_at": "2026-10-02T21:09:54.279032+00:00",
-  "measured_commit": "d70ccedff25a337d08602a94f386c4ab2ed86e80",
+  "generated_at": "2026-10-02T21:39:32.164191+00:00",
+  "measured_commit": "40779ca76a3a300c7e2d096489ac88026d501376",
   "plugin": "agent-ssh",
   "schema_version": 2,
   "tests": {
     "tests/test_bootstrap_check_reconcile_always_on.py::test_hook_scripts_exist": {
-      "duration_s": 0.00539634599999772
+      "duration_s": 0.004107215000011877
     },
     "tests/test_bootstrap_check_reconcile_always_on.py::test_ps1_has_no_opt_in_gate": {
-      "duration_s": 0.0008910539999931189
+      "duration_s": 0.0006249340000010761
     },
     "tests/test_bootstrap_check_reconcile_always_on.py::test_sh_has_no_opt_in_gate": {
-      "duration_s": 0.0008312710000097923
+      "duration_s": 0.0005617019999988315
     },
     "tests/test_bootstrap_check_reconcile_always_on.py::test_sh_reconciles_even_with_stale_opt_in_key_present": {
-      "duration_s": 0.053482352000003175
+      "duration_s": 0.04650020799999055
     },
     "tests/test_bootstrap_check_reconcile_always_on.py::test_sh_reconciles_without_any_opt_in_config": {
-      "duration_s": 0.055930791999998064
+      "duration_s": 0.04794347600000037
     },
     "tests/test_copilot_detach.py::test_attached_and_detached_holds_share_keeper": {
-      "duration_s": 0.017109836000017253
+      "duration_s": 0.06249584999999769
     },
     "tests/test_copilot_detach.py::test_attached_default_uses_venue_copilot_over_ssh": {
-      "duration_s": 0.0017860250000012456
+      "duration_s": 0.0013763159999982122
     },
     "tests/test_copilot_detach.py::test_attached_reaps_ssh_child_when_hold_bookkeeping_fails": {
-      "duration_s": 0.0016734129999917968
+      "duration_s": 0.0012764889999985485
     },
     "tests/test_copilot_detach.py::test_attached_releases_its_keeper_hold_when_launch_fails[popen]": {
-      "duration_s": 0.0019145069999950692
+      "duration_s": 0.001509533000003671
     },
     "tests/test_copilot_detach.py::test_attached_releases_its_keeper_hold_when_launch_fails[reservation]": {
-      "duration_s": 0.0018740489999942156
+      "duration_s": 0.0013834660000000554
     },
     "tests/test_copilot_detach.py::test_attached_result_survives_a_failed_final_hold_release": {
-      "duration_s": 0.0020014989999879162
+      "duration_s": 0.0014587290000065423
     },
     "tests/test_copilot_detach.py::test_attached_skips_reverse_forward_when_live_keeper_holds_route": {
-      "duration_s": 0.0016631440000054454
+      "duration_s": 0.0011963599999944563
     },
     "tests/test_copilot_detach.py::test_copilot_config_cli_refuses_corrupt_existing_file": {
-      "duration_s": 0.007529001000008861
+      "duration_s": 0.005122298000003411
     },
     "tests/test_copilot_detach.py::test_copilot_config_cli_reports_filesystem_errors_as_failures[list]": {
-      "duration_s": 0.019703866999989827
+      "duration_s": 0.016140486999994152
     },
     "tests/test_copilot_detach.py::test_copilot_config_cli_reports_filesystem_errors_as_failures[set]": {
-      "duration_s": 0.00759771000001308
+      "duration_s": 0.0053560239999939085
     },
     "tests/test_copilot_detach.py::test_copilot_config_set_canonicalizes_host_alias_casing": {
-      "duration_s": 0.0025723920000046974
+      "duration_s": 0.0018653099999923484
     },
     "tests/test_copilot_detach.py::test_copilot_config_set_refuses_corrupt_existing_file": {
-      "duration_s": 0.0021024099999920054
+      "duration_s": 0.0014766730000062012
     },
     "tests/test_copilot_detach.py::test_copilot_config_set_writes_host_workspace": {
-      "duration_s": 0.00916068499999767
+      "duration_s": 0.006496329999997386
     },
     "tests/test_copilot_detach.py::test_detach_success_reserves_ssh_venue_and_reports_handle": {
-      "duration_s": 0.0035116560000147956
+      "duration_s": 0.0027133640000016612
     },
     "tests/test_copilot_detach.py::test_detached_session_mirrors_the_callers_model": {
-      "duration_s": 0.0012449379999992516
+      "duration_s": 0.0009443780000069069
     },
     "tests/test_copilot_detach.py::test_dry_run_names_ref_files_and_a_missing_one_fails": {
-      "duration_s": 0.014195132000011768
+      "duration_s": 0.011902046999999527
     },
     "tests/test_copilot_detach.py::test_dry_run_without_workspace_fails_before_remote_ssh": {
-      "duration_s": 0.0015852379999898858
+      "duration_s": 0.0011690480000012826
     },
     "tests/test_copilot_detach.py::test_forward_keeper_rewrites_state_when_relay_pid_changes": {
-      "duration_s": 0.013426746000007483
+      "duration_s": 0.08882412500000925
     },
     "tests/test_copilot_detach.py::test_keeper_hold_store_reads_legacy_single_mux_state": {
-      "duration_s": 0.002291793999972924
+      "duration_s": 0.0018454590000018811
     },
     "tests/test_copilot_detach.py::test_keeper_hold_store_uses_sanitized_keeper_state_path": {
-      "duration_s": 0.0019532889999993586
+      "duration_s": 0.001491845999993302
     },
     "tests/test_copilot_detach.py::test_launch_failure_cleanup_kills_mux_and_stops_keeper": {
-      "duration_s": 0.0018049900000107755
+      "duration_s": 0.00135419400000103
     },
     "tests/test_copilot_detach.py::test_missing_agent_worktrees_message": {
-      "duration_s": 0.0021204230000080315
+      "duration_s": 0.0015332770000071605
     },
     "tests/test_copilot_detach.py::test_missing_workspace_error_names_configuration_options": {
-      "duration_s": 0.001322774000001914
+      "duration_s": 0.0009959520000180078
     },
     "tests/test_copilot_detach.py::test_non_dry_run_checks_posix_before_missing_workspace": {
-      "duration_s": 0.0018112830000234226
+      "duration_s": 0.0013061410000005935
     },
     "tests/test_copilot_detach.py::test_non_posix_target_is_refused": {
-      "duration_s": 0.0017878860000024588
+      "duration_s": 0.00131657699999721
     },
     "tests/test_copilot_detach.py::test_rejoin_launch_failure_does_not_release_existing_keeper_hold": {
-      "duration_s": 0.0018970439999890232
+      "duration_s": 0.0013706869999978721
     },
     "tests/test_copilot_detach.py::test_rejoin_reuses_keeper_and_does_not_stop_it": {
-      "duration_s": 0.002374799999998345
+      "duration_s": 0.00176072499999691
     },
     "tests/test_copilot_detach.py::test_resolve_workspace_reports_corrupt_copilot_config": {
-      "duration_s": 0.0021500290000062705
+      "duration_s": 0.001491895999997439
     },
     "tests/test_copilot_detach.py::test_stale_launch_cleanup_does_not_remove_refreshed_keeper_hold": {
-      "duration_s": 0.008090686999977947
+      "duration_s": 0.007107504000003928
     },
     "tests/test_copilot_detach.py::test_stop_hold_mux_error_still_stops_releases_and_deregisters": {
-      "duration_s": 0.0023369280000196113
+      "duration_s": 0.0020037740000020676
     },
     "tests/test_copilot_detach.py::test_stop_keeper_lock_timeout_still_releases_and_deregisters": {
-      "duration_s": 0.19605397099999777
+      "duration_s": 0.1820245900000046
     },
     "tests/test_copilot_detach.py::test_stop_kills_mux_stops_keeper_and_deregisters": {
-      "duration_s": 0.003103568000000223
+      "duration_s": 0.002433811000003061
     },
     "tests/test_copilot_detach.py::test_stop_uses_detached_hold_mux_when_attached_hold_is_aggregate_mux": {
-      "duration_s": 0.009279769999992027
+      "duration_s": 0.11182938199999626
     },
     "tests/test_copilot_detach.py::test_superseded_forward_keeper_never_overwrites_the_new_instance": {
-      "duration_s": 0.0036698039999976118
+      "duration_s": 0.0029641640000050984
     },
     "tests/test_copilot_detach.py::test_ttl_seconds_with_detach_is_usage_error": {
-      "duration_s": 0.001810070000004771
+      "duration_s": 0.001243168000002015
     },
     "tests/test_copilot_detach.py::test_two_attached_holds_share_keeper_and_first_exit_keeps_route": {
-      "duration_s": 0.01678469099999802
+      "duration_s": 0.07601962700000087
     },
     "tests/test_copilot_detach.py::test_workspace_normalization_trims_slashes_but_keeps_the_root": {
-      "duration_s": 0.0012229969999992818
+      "duration_s": 0.0009220230000082097
     },
     "tests/test_copilot_detach.py::test_workspace_resolution_order_prefers_explicit_then_host_config": {
-      "duration_s": 0.002425915999992867
+      "duration_s": 0.0019302460000005794
     },
     "tests/test_dtssh_host_launcher.py::test_pre_auth_pressure_excludes_authenticated_session_roots": {
-      "duration_s": 0.886729846999998
+      "duration_s": 0.7194513190000009
     },
     "tests/test_dtssh_host_launcher.py::test_released_dtssh_leaks_are_classified_before_reaping": {
-      "duration_s": 0.002047094000005245
+      "duration_s": 0.0015791960000015592
     },
     "tests/test_dtssh_host_launcher.py::test_session_pressure_classifies_idle_command_and_forwarding_roots": {
-      "duration_s": 0.8343111749999963
+      "duration_s": 0.6987171209999872
     },
     "tests/test_explore.py::test_derive_agents_carries_purpose": {
-      "duration_s": 0.0027063330000061114
+      "duration_s": 0.0020100249999899233
     },
     "tests/test_explore.py::test_derive_agents_only_agent_backing": {
-      "duration_s": 0.0012691229999859388
+      "duration_s": 0.000986320000009755
     },
     "tests/test_explore.py::test_derive_agents_skips_unnamed_or_pathless": {
-      "duration_s": 0.0011636759999902324
+      "duration_s": 0.00087935100000891
     },
     "tests/test_explore.py::test_explore_reachable": {
-      "duration_s": 0.0015554929999979095
+      "duration_s": 0.0011633510000166325
     },
     "tests/test_explore.py::test_explore_reachable_annotates_purpose": {
-      "duration_s": 0.003035753000006025
+      "duration_s": 0.002222227999979509
     },
     "tests/test_explore.py::test_explore_ssh_missing": {
-      "duration_s": 0.0012485250000082715
+      "duration_s": 0.0008991110000096114
     },
     "tests/test_explore.py::test_explore_unreachable": {
-      "duration_s": 0.0013135580000067648
+      "duration_s": 0.0009898050000174408
     },
     "tests/test_explore.py::test_format_report_reachable": {
-      "duration_s": 0.0012701960000072177
+      "duration_s": 0.0009721769999941898
     },
     "tests/test_explore.py::test_format_report_shows_purpose": {
-      "duration_s": 0.0027243560000016487
+      "duration_s": 0.0020041049999832694
     },
     "tests/test_explore.py::test_format_report_unreachable": {
-      "duration_s": 0.0011395610000164424
+      "duration_s": 0.0008066429999900038
     },
     "tests/test_explore.py::test_parse_probe_bad_repos_json_is_safe": {
-      "duration_s": 0.0014093680000115683
+      "duration_s": 0.0010220420000024433
     },
     "tests/test_explore.py::test_parse_probe_repos": {
-      "duration_s": 0.0013102209999971137
+      "duration_s": 0.0008993509999868365
     },
     "tests/test_explore.py::test_parse_probe_runtimes": {
-      "duration_s": 0.0013318910000066353
+      "duration_s": 0.000986990000015453
     },
     "tests/test_explore.py::test_parse_probe_surfaces_purposes": {
-      "duration_s": 0.002716503000016246
+      "duration_s": 0.0020067799999878844
     },
     "tests/test_explore.py::test_parse_related_bad_yaml_is_skipped": {
-      "duration_s": 0.0012571930000007114
+      "duration_s": 0.0009704759999920043
     },
     "tests/test_explore.py::test_parse_related_empty_is_safe": {
-      "duration_s": 0.0012005139999899939
+      "duration_s": 0.0008608130000027359
     },
     "tests/test_explore.py::test_parse_related_union_first_nonempty_wins": {
-      "duration_s": 0.004096684999993272
+      "duration_s": 0.003052825000011694
     },
     "tests/test_explore.py::test_section_extraction": {
-      "duration_s": 0.0014380000000073778
+      "duration_s": 0.001104464999983179
     },
     "tests/test_fragment_registry.py::test_absent_registry_is_authoritative_empty": {
-      "duration_s": 0.002024872999996319
+      "duration_s": 0.0014703940000089233
     },
     "tests/test_fragment_registry.py::test_boolean_options_render_as_openssh_yes_no": {
-      "duration_s": 0.0012762080000072729
+      "duration_s": 0.0009249879999941868
     },
     "tests/test_fragment_registry.py::test_changed_topology_withdraws_stale_fragment": {
-      "duration_s": 0.006639291000013259
+      "duration_s": 0.005054256000008195
     },
     "tests/test_fragment_registry.py::test_compatibility_emitter_rejects_transport_mismatch": {
-      "duration_s": 0.004705417999986139
+      "duration_s": 0.0036326240000050802
     },
     "tests/test_fragment_registry.py::test_crlf_fragment_matches_posix_rendered_sources": {
-      "duration_s": 0.006690605999992272
+      "duration_s": 0.004966267000014568
     },
     "tests/test_fragment_registry.py::test_current_and_stale_host_collision_quarantines_current_alias": {
-      "duration_s": 0.009102435999977843
+      "duration_s": 0.006723685999986628
     },
     "tests/test_fragment_registry.py::test_displaced_schema_metadata_is_not_downgraded_to_legacy": {
-      "duration_s": 0.0043616119999967395
+      "duration_s": 0.0032072750000082806
     },
     "tests/test_fragment_registry.py::test_doctor_human_json_parity_and_report_only": {
-      "duration_s": 0.021654023000010625
+      "duration_s": 0.01586854399999993
     },
     "tests/test_fragment_registry.py::test_duplicate_host_identity_quarantines_both_fragments": {
-      "duration_s": 0.011353004000000055
+      "duration_s": 0.008687231000010343
     },
     "tests/test_fragment_registry.py::test_duplicate_host_inside_one_fragment_is_blocked": {
-      "duration_s": 0.0023463660000118125
+      "duration_s": 0.0016934650000024476
     },
     "tests/test_fragment_registry.py::test_emit_profile_rejects_linked_config_directory": {
-      "duration_s": 0.011734901000011178
+      "duration_s": 0.00866693999998347
     },
     "tests/test_fragment_registry.py::test_emit_profile_reports_broken_root_config_symlink": {
-      "duration_s": 0.013332679000015446
+      "duration_s": 0.04431408499998213
     },
     "tests/test_fragment_registry.py::test_filename_content_identity_mismatch_is_inactive": {
-      "duration_s": 0.0042700209999964045
+      "duration_s": 0.0031364099999819928
     },
     "tests/test_fragment_registry.py::test_find_shadowed_aliases_flags_alias_duplicated_in_root_config": {
-      "duration_s": 0.007399848999995129
+      "duration_s": 0.0053785660000045254
     },
     "tests/test_fragment_registry.py::test_find_shadowed_aliases_is_empty_when_no_collision": {
-      "duration_s": 0.0069958210000038434
+      "duration_s": 0.005045954999999935
     },
     "tests/test_fragment_registry.py::test_host_claim_before_malformed_content_is_blocked": {
-      "duration_s": 0.002366354000002957
+      "duration_s": 0.0016845119999970848
     },
     "tests/test_fragment_registry.py::test_incomplete_claims_block_alias_from_other_active_fragment": {
-      "duration_s": 0.00686636699998644
+      "duration_s": 0.005084311000004504
     },
     "tests/test_fragment_registry.py::test_indented_global_option_before_first_host_blocks_all_probes": {
-      "duration_s": 0.002288348000007545
+      "duration_s": 0.0016411379999965447
     },
     "tests/test_fragment_registry.py::test_legacy_fragment_is_active_with_advisory": {
-      "duration_s": 0.002366192999986083
+      "duration_s": 0.0017234900000033804
     },
     "tests/test_fragment_registry.py::test_malformed_nested_source_does_not_abort_valid_peer": {
-      "duration_s": 0.010604066999988504
+      "duration_s": 0.007839376000006837
     },
     "tests/test_fragment_registry.py::test_malformed_prefix_with_later_host_blocks_fresh_probes": {
-      "duration_s": 0.002264322999991464
+      "duration_s": 0.0016953480000125865
     },
     "tests/test_fragment_registry.py::test_missing_source_withdraws_fragment_and_blocks_its_alias": {
-      "duration_s": 0.004318500999985986
+      "duration_s": 0.003151450999979488
     },
     "tests/test_fragment_registry.py::test_only_managed_namespace_is_inspected": {
-      "duration_s": 0.002579043999986652
+      "duration_s": 0.001879400000007081
     },
     "tests/test_fragment_registry.py::test_openssh_syntax_failure_is_inactive": {
-      "duration_s": 0.0066760699999832696
+      "duration_s": 0.005377444999993486
     },
     "tests/test_fragment_registry.py::test_persistent_warning_recovery_is_fingerprint_based": {
-      "duration_s": 0.0037554730000124437
+      "duration_s": 0.0034549999999882175
     },
     "tests/test_fragment_registry.py::test_profile_validation_rejects_duplicate_aliases": {
-      "duration_s": 0.002597346999991146
+      "duration_s": 0.0018456110000073522
     },
     "tests/test_fragment_registry.py::test_published_schema_matches_runtime_constraints": {
-      "duration_s": 0.0075512030000055574
+      "duration_s": 0.005396963999999116
     },
     "tests/test_fragment_registry.py::test_registry_enumeration_uncertainty_retains_last_known_set": {
-      "duration_s": 0.007017520000005106
+      "duration_s": 0.00517877100000419
     },
     "tests/test_fragment_registry.py::test_render_rejects_path_escape_include_and_host_injection": {
-      "duration_s": 0.0012969960000077663
+      "duration_s": 0.0009005029999968883
     },
     "tests/test_fragment_registry.py::test_replaced_source_symlink_is_rejected": {
-      "duration_s": 0.00439959399999168
+      "duration_s": 0.003259972999984484
     },
     "tests/test_fragment_registry.py::test_root_include_preserves_symlinked_config": {
-      "duration_s": 0.0035875860000089688
+      "duration_s": 0.002767584000011425
     },
     "tests/test_fragment_registry.py::test_root_include_serializes_symlink_and_direct_target_callers": {
-      "duration_s": 0.004614368999980911
+      "duration_s": 0.003551404999996066
     },
     "tests/test_fragment_registry.py::test_root_include_update_is_serialized_and_atomic": {
-      "duration_s": 0.00627877600000204
+      "duration_s": 0.020277436000000648
     },
     "tests/test_fragment_registry.py::test_source_uncertainty_retains_only_unchanged_last_known_fragment": {
-      "duration_s": 0.008353920999994102
+      "duration_s": 0.006175265000010199
     },
     "tests/test_fragment_registry.py::test_symlink_managed_fragment_is_rejected": {
-      "duration_s": 0.0022584320000191838
+      "duration_s": 0.0016217890000262969
     },
     "tests/test_fragment_registry.py::test_valid_managed_fragment_survives_malformed_peer_and_ignores_unrelated": {
-      "duration_s": 0.00814466799999991
+      "duration_s": 0.0061340139999828125
     },
     "tests/test_fragment_registry.py::test_verify_fails_closed_on_unscoped_registry_uncertainty": {
-      "duration_s": 0.009542053000004103
+      "duration_s": 0.007158199000002696
     },
     "tests/test_fragment_registry.py::test_verify_network_failure_does_not_reclassify_active_fragment": {
-      "duration_s": 0.012283551000010107
+      "duration_s": 0.009525641999985623
     },
     "tests/test_fragment_registry.py::test_warning_cap_dedup_and_recovery": {
-      "duration_s": 0.00403518000000247
+      "duration_s": 0.0028762340000128006
     },
     "tests/test_fragment_registry.py::test_warning_dedup_and_recovery_persist_across_registry_instances": {
-      "duration_s": 0.006241062000000852
+      "duration_s": 0.02452381900000944
     },
     "tests/test_fragment_registry.py::test_warning_state_file_ignores_relative_runtime_root": {
-      "duration_s": 0.002162000000012654
+      "duration_s": 0.0015210600000017394
     },
     "tests/test_fragment_registry.py::test_warning_state_file_uses_selected_runtime_root": {
-      "duration_s": 0.0022988179999856584
+      "duration_s": 0.0016844219999967436
     },
     "tests/test_fragment_registry.py::test_warning_state_lock_failure_falls_back_in_memory": {
-      "duration_s": 0.002353930999987597
+      "duration_s": 0.0016522850000058042
     },
     "tests/test_fragment_registry.py::test_write_fragment_uses_unique_temporary_outside_included_directory": {
-      "duration_s": 0.005549372999993807
+      "duration_s": 0.003527728999998203
     },
     "tests/test_fragment_registry.py::test_write_fragment_validates_before_atomic_replace": {
-      "duration_s": 0.00882569399999511
+      "duration_s": 0.00710099499998762
     },
     "tests/test_host_restore.py::test_detached_guidance_includes_complete_verification_command": {
-      "duration_s": 0.0015736540000119703
+      "duration_s": 0.0011092490000095268
     },
     "tests/test_host_restore.py::test_dispatch_companion_config_persists_effective_backup_root": {
-      "duration_s": 0.0008511970000029123
+      "duration_s": 0.0006023689999778981
     },
     "tests/test_host_restore.py::test_dtssh_apply_over_ssh_launches_detached_and_requires_verification": {
-      "duration_s": 0.002589521999993849
+      "duration_s": 0.001929043999993496
     },
     "tests/test_host_restore.py::test_dtssh_apply_over_ssh_reports_detached_launch_failure": {
-      "duration_s": 0.0025810889999888786
+      "duration_s": 0.0018984090000060405
     },
     "tests/test_host_restore.py::test_dtssh_apply_updates_existing_binary_without_login": {
-      "duration_s": 0.004149421999997571
+      "duration_s": 0.0031793029999960254
     },
     "tests/test_host_restore.py::test_dtssh_dry_run_uses_status": {
-      "duration_s": 0.0026582619999970802
+      "duration_s": 0.0019886120000052188
     },
     "tests/test_host_restore.py::test_dtssh_host_identity_is_synced_before_stop_and_after_start": {
-      "duration_s": 0.0009668459999971901
+      "duration_s": 0.0007073169999927131
     },
     "tests/test_host_restore.py::test_dtssh_host_identity_round_trips_through_durable_backup_root": {
-      "duration_s": 0.000578156000003105
+      "duration_s": 0.000446420000002945
     },
     "tests/test_host_restore.py::test_dtssh_launcher_uses_stable_install_working_directory": {
-      "duration_s": 0.0009117620000012039
+      "duration_s": 0.0006585239999878922
     },
     "tests/test_host_restore.py::test_dtssh_restore_blocks_without_login": {
-      "duration_s": 0.002378356999997777
+      "duration_s": 0.0018060510000026397
     },
     "tests/test_host_restore.py::test_dtssh_restore_launches_helpers_without_console_windows": {
-      "duration_s": 0.002784320000003504
+      "duration_s": 0.0020733579999898666
     },
     "tests/test_host_restore.py::test_dtssh_restore_rejects_unsupported_platform": {
-      "duration_s": 0.0013013650000033294
+      "duration_s": 0.000907251000000997
     },
     "tests/test_host_restore.py::test_login_preflight_uses_dtssh_sibling_devtunnel": {
-      "duration_s": 0.002511948999995184
+      "duration_s": 0.0018705370000162702
     },
     "tests/test_host_restore.py::test_missing_dispatch_companion_config_is_not_healthy": {
-      "duration_s": 0.0011677130000151692
+      "duration_s": 0.0008453800000154388
     },
     "tests/test_host_restore.py::test_nonzero_status_is_never_healthy": {
-      "duration_s": 0.0025889239999941083
+      "duration_s": 0.0018685139999945477
     },
     "tests/test_host_restore.py::test_payload_root_ignores_relative_runtime_root_override": {
-      "duration_s": 0.0030506600000137496
+      "duration_s": 0.002205504000002634
     },
     "tests/test_host_restore.py::test_payload_root_keeps_local_deployment_marker": {
-      "duration_s": 0.0033617350000270108
+      "duration_s": 0.00244910299998935
     },
     "tests/test_host_restore.py::test_payload_root_prefers_current_marketplace_over_stale_marker": {
-      "duration_s": 0.0036483430000089356
+      "duration_s": 0.0026458340000061753
     },
     "tests/test_host_restore.py::test_payload_root_uses_runtime_marker": {
-      "duration_s": 0.0029155359999890607
+      "duration_s": 0.0021508410000024014
     },
     "tests/test_host_restore.py::test_payload_root_uses_selected_runtime_root": {
-      "duration_s": 0.0030657380000036483
+      "duration_s": 0.0022372689999912154
     },
     "tests/test_host_restore.py::test_pending_durable_identity_is_not_healthy": {
-      "duration_s": 0.002608639999991169
+      "duration_s": 0.0018828460000008818
     },
     "tests/test_host_restore.py::test_unknown_transport_is_reported_before_platform": {
-      "duration_s": 0.0012402189999960456
+      "duration_s": 0.0008858699999905184
     },
     "tests/test_host_restore.py::test_wmi_broker_uses_resolved_powershell_path": {
-      "duration_s": 0.0021107649999976275
+      "duration_s": 0.0016032110000026023
     },
     "tests/test_host_restore.py::test_zero_tunnel_connections_are_unhealthy": {
-      "duration_s": 0.0011542479999917532
+      "duration_s": 0.0008390819999988253
     },
     "tests/test_install_manifest_source_path.py::test_install_scripts_exist": {
-      "duration_s": 0.0008480019999979049
+      "duration_s": 0.0005915759999766124
     },
     "tests/test_install_manifest_source_path.py::test_ps1_manifest_source_path_prefers_staged_from": {
-      "duration_s": 0.004332077000015033
+      "duration_s": 0.003221807000016952
     },
     "tests/test_install_manifest_source_path.py::test_sh_manifest_source_path_prefers_staged_from": {
-      "duration_s": 0.0031181070000059208
+      "duration_s": 0.0023734420000067757
     },
     "tests/test_installer_fallback.py::test_package_install_falls_back_when_resolved_uv_cannot_launch": {
-      "duration_s": 0.0004234249999939266
+      "duration_s": 0.00031890099999998256
     },
     "tests/test_installer_fallback.py::test_powershell_installer_resolves_uv_editable_libs_via_shared_helper": {
-      "duration_s": 0.0009585100000037983
+      "duration_s": 0.0007687669999967284
     },
     "tests/test_installer_fallback.py::test_shell_pip_fallback_includes_vendored_dependencies": {
-      "duration_s": 0.01708348399999693
+      "duration_s": 0.014016283999993107
     },
     "tests/test_installer_fallback.py::test_shell_pip_fallback_resolves_canonical_when_local_copy_absent": {
-      "duration_s": 0.01655776799999842
+      "duration_s": 0.014269738999999504
     },
     "tests/test_maintenance_guidance.py::test_agent_ssh_guidance_keeps_queue_ownership_outside_transport": {
-      "duration_s": 0.0011588169999896536
+      "duration_s": 0.0008263720000059038
     },
     "tests/test_maintenance_guidance.py::test_mesh_pointer_emitters_share_unreachable_maintenance_contract": {
-      "duration_s": 0.0010127629999914234
+      "duration_s": 0.0007419670000103906
     },
     "tests/test_mesh.py::test_empty_on_malformed_yaml": {
-      "duration_s": 0.002440192999998203
+      "duration_s": 0.0018194319999906838
     },
     "tests/test_mesh.py::test_empty_when_not_a_mapping": {
-      "duration_s": 0.002433519999996747
+      "duration_s": 0.001838009000010743
     },
     "tests/test_mesh.py::test_find_machines_file_walks_parents": {
-      "duration_s": 0.004246116000004463
+      "duration_s": 0.0034987860000086357
     },
     "tests/test_mesh.py::test_format_report_mentions_hosts_and_dtssh": {
-      "duration_s": 0.007777117000003386
+      "duration_s": 0.005725971000003938
     },
     "tests/test_mesh.py::test_json_projection_includes_machine_metadata": {
-      "duration_s": 0.007904447000001369
+      "duration_s": 0.005846589000015001
     },
     "tests/test_mesh.py::test_load_mesh_projects_machines": {
-      "duration_s": 0.008371191999998473
+      "duration_s": 0.006430172999998263
     },
     "tests/test_mesh.py::test_malformed_metadata_fails_open": {
-      "duration_s": 0.003020322999987002
+      "duration_s": 0.002218921999997292
     },
     "tests/test_mesh.py::test_mesh_status_json_includes_machine_metadata": {
-      "duration_s": 0.00908881099998382
+      "duration_s": 0.0070703300000047875
     },
     "tests/test_mesh.py::test_summary_line": {
-      "duration_s": 0.0077511880000002975
+      "duration_s": 0.0058534289999983
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_flags_unreachable_alias": {
-      "duration_s": 0.006698952000022018
+      "duration_s": 0.00491086399999574
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_reports_emit_registry_failure": {
-      "duration_s": 0.006521028000008755
+      "duration_s": 0.004792058999996129
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_reports_missing_machines_yaml": {
-      "duration_s": 0.0020581760000055738
+      "duration_s": 0.001555142000000842
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_reports_missing_transport_assets": {
-      "duration_s": 0.005877741000006154
+      "duration_s": 0.0042922289999864915
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_reports_no_dtssh_machines": {
-      "duration_s": 0.003387730999989458
+      "duration_s": 0.002675688000010723
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_reports_unresolvable_payload_root": {
-      "duration_s": 0.005549282999993466
+      "duration_s": 0.004102328000001876
     },
     "tests/test_mesh_refresh.py::test_refresh_mesh_success_probes_every_alias": {
-      "duration_s": 0.006827304000026402
+      "duration_s": 0.005023281000006818
     },
     "tests/test_payload_invocation.py::test_bootstrap_stands_down_for_explicit_installation_context": {
-      "duration_s": 0.000918365999993398
+      "duration_s": 0.0006505829999952084
     },
     "tests/test_payload_invocation.py::test_compatibility_wrappers_do_not_reference_global_binstub": {
-      "duration_s": 0.00106009200000301
+      "duration_s": 0.0007835989999875892
     },
     "tests/test_payload_invocation.py::test_payload_manifest_describes_installation_context_runtime": {
-      "duration_s": 0.0010092149999962885
+      "duration_s": 0.0007302610000010645
     },
     "tests/test_payload_invocation.py::test_posix_compatibility_wrapper_uses_own_payload_command[emit-profile.sh-emit-profile]": {
-      "duration_s": 0.007780442999987258
+      "duration_s": 0.006607363999989957
     },
     "tests/test_payload_invocation.py::test_posix_compatibility_wrapper_uses_own_payload_command[verify.sh-verify]": {
-      "duration_s": 0.007494005000026505
+      "duration_s": 0.005966426999989949
     },
     "tests/test_payload_invocation.py::test_posix_runtime_gate_selects_cell_local_home": {
-      "duration_s": 0.3037039119999889
+      "duration_s": 0.2383062890000076
     },
     "tests/test_payload_invocation.py::test_runtime_gate_rejects_invalid_or_spoofed_context[bash-status_payload0-requested installation context is not active]": {
-      "duration_s": 0.08319108099999539
+      "duration_s": 0.06643780199999583
     },
     "tests/test_payload_invocation.py::test_runtime_gate_rejects_invalid_or_spoofed_context[pwsh-status_payload1-active installation context is incomplete]": {
-      "duration_s": 0.0022756349999895065
+      "duration_s": 0.0016873250000060125
     },
     "tests/test_payload_invocation.py::test_runtime_gates_keep_first_use_provisioning_lock": {
-      "duration_s": 0.000956657000003247
+      "duration_s": 0.0006361909999981208
     },
     "tests/test_payload_invocation.py::test_windows_compatibility_wrapper_uses_own_payload_command[emit-profile.ps1-emit-profile]": {
-      "duration_s": 0.00047651600000619965
+      "duration_s": 0.00033462399998995807
     },
     "tests/test_payload_invocation.py::test_windows_compatibility_wrapper_uses_own_payload_command[verify.ps1-verify]": {
-      "duration_s": 0.0004478509999898961
+      "duration_s": 0.00030903699999385026
     },
     "tests/test_payload_invocation.py::test_windows_runtime_gate_selects_cell_local_home": {
-      "duration_s": 0.0004938579999986814
+      "duration_s": 0.00038835499999834155
     },
     "tests/test_probe.py::test_probe_alias_reachable": {
-      "duration_s": 0.001406121999991683
+      "duration_s": 0.001120558000010874
     },
     "tests/test_probe.py::test_probe_alias_unreachable": {
-      "duration_s": 0.001270386000001622
+      "duration_s": 0.0009330799999958117
     },
     "tests/test_probe.py::test_probe_alias_uses_shell_agnostic_noop": {
-      "duration_s": 0.001245078999986049
+      "duration_s": 0.0009489320000000134
     },
     "tests/test_ssh_profile.py::test_chmod_windows_removes_owner_rights": {
-      "duration_s": 0.00043922500000803666
+      "duration_s": 0.0003677440000160459
     },
     "tests/test_ssh_profile.py::test_cloudflare_recipe_direct_recipe_and_coexistence": {
-      "duration_s": 0.027048712999999225
+      "duration_s": 0.019140285000005974
     },
     "tests/test_ssh_profile.py::test_provider_exec_recipe_uses_no_network_endpoint_or_key": {
-      "duration_s": 0.004377402000017128
+      "duration_s": 0.0031659139999931085
     },
     "tests/test_ssh_profile.py::test_wsl_emit_registry_from_machines_yaml": {
-      "duration_s": 0.012894588999998291
+      "duration_s": 0.009952241999997113
     },
     "tests/test_ssh_profile.py::test_wsl_identity_selection_falls_back_and_requires_public_sibling": {
-      "duration_s": 0.002166148999990014
+      "duration_s": 0.0015527570000131163
     },
     "tests/test_ssh_profile.py::test_wsl_identity_selection_prefers_machine_scoped_then_canonical": {
-      "duration_s": 0.004136640000012903
+      "duration_s": 0.0030545480000085945
     },
     "tests/test_ssh_profile.py::test_wsl_transport_interop_proxycommand": {
-      "duration_s": 0.006595649000004755
+      "duration_s": 0.004970694000007825
     },
     "tests/test_write_session_guidance.py::test_combines_catalog_and_mesh_pointer": {
-      "duration_s": 0.0030098120000019435
+      "duration_s": 0.0022915099999920585
     },
     "tests/test_write_session_guidance.py::test_hook_and_projection_contracts": {
-      "duration_s": 0.0011075490000109767
+      "duration_s": 0.0008327320000205418
     },
     "tests/test_write_session_guidance.py::test_main_always_emits_empty_object": {
-      "duration_s": 0.0012372630000072604
+      "duration_s": 0.0008597709999946801
     },
     "tests/test_write_session_guidance.py::test_mesh_pointer_is_invoked_with_require_cwd_flag": {
-      "duration_s": 0.0026920659999944974
+      "duration_s": 0.0019978959999917834
     },
     "tests/test_write_session_guidance.py::test_mesh_pointer_receives_validated_cwd_when_present": {
-      "duration_s": 0.0029631659999864723
+      "duration_s": 0.00207672200001241
     },
     "tests/test_write_session_guidance.py::test_no_content_replaces_stale_guidance": {
-      "duration_s": 0.003038176999993425
+      "duration_s": 0.0021924140000066927
     },
     "tests/test_write_session_guidance.py::test_over_budget_content_writes_explicit_status": {
-      "duration_s": 0.0028053500000027043
+      "duration_s": 0.0019608300000157897
     },
     "tests/test_write_session_guidance.py::test_powershell_wrapper_skips_mesh_pointer_without_valid_payload_cwd": {
-      "duration_s": 0.8979921779999955
+      "duration_s": 0.7661124899999834
     },
     "tests/test_write_session_guidance.py::test_powershell_wrapper_writes_bounded_session_file": {
-      "duration_s": 0.9269531059999849
+      "duration_s": 0.7781988779999978
     },
     "tests/test_write_session_guidance.py::test_rejects_ancestor_escape[.copilot]": {
-      "duration_s": 0.00216897500000357
+      "duration_s": 0.0015432339999819078
     },
     "tests/test_write_session_guidance.py::test_rejects_ancestor_escape[session-1]": {
-      "duration_s": 0.002456793999982665
+      "duration_s": 0.0017072160000140002
     },
     "tests/test_write_session_guidance.py::test_rejects_ancestor_escape[session-state]": {
-      "duration_s": 0.0022315609999878916
+      "duration_s": 0.0015975539999999455
     },
     "tests/test_write_session_guidance.py::test_rejects_unsafe_session_ids[../escape]": {
-      "duration_s": 0.0018284150000198451
+      "duration_s": 0.0013043110000126035
     },
     "tests/test_write_session_guidance.py::test_rejects_unsafe_session_ids[]": {
-      "duration_s": 0.0018007019999828344
+      "duration_s": 0.001280423999986624
     },
     "tests/test_write_session_guidance.py::test_rejects_unsafe_session_ids[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]": {
-      "duration_s": 0.0019127729999866006
+      "duration_s": 0.0013361870000068166
     },
     "tests/test_write_session_guidance.py::test_rejects_unsafe_session_ids[slash/value]": {
-      "duration_s": 0.0018181039999944915
+      "duration_s": 0.0013015849999931106
     },
     "tests/test_write_session_guidance.py::test_reparse_detection_without_link_creation": {
-      "duration_s": 0.00074360599998613
+      "duration_s": 0.0005327669999815043
     },
     "tests/test_write_session_guidance.py::test_resolve_runtime_error_fails_open": {
-      "duration_s": 0.002002902000015183
+      "duration_s": 0.0014584990000088283
     },
     "tests/test_write_session_guidance.py::test_run_contributor_skips_subprocess_when_cwd_required_but_missing": {
-      "duration_s": 0.0010515139999824896
+      "duration_s": 0.0007848120000062409
     },
     "tests/test_write_session_guidance.py::test_validated_payload_cwd_accepts_absolute_existing_directory": {
-      "duration_s": 0.0018603440000077853
+      "duration_s": 0.0013586799999956156
     },
     "tests/test_write_session_guidance.py::test_validated_payload_cwd_rejects_missing_relative_or_nonexistent[None]": {
-      "duration_s": 0.0017196509999877208
+      "duration_s": 0.0012323140000063404
     },
     "tests/test_write_session_guidance.py::test_validated_payload_cwd_rejects_missing_relative_or_nonexistent[]": {
-      "duration_s": 0.0017787110000142548
+      "duration_s": 0.0012443209999872806
     },
     "tests/test_write_session_guidance.py::test_validated_payload_cwd_rejects_missing_relative_or_nonexistent[does-not-exist-anywhere]": {
-      "duration_s": 0.0018733180000225502
+      "duration_s": 0.0014063600000042698
     },
     "tests/test_write_session_guidance.py::test_validated_payload_cwd_rejects_missing_relative_or_nonexistent[relative/path]": {
-      "duration_s": 0.001741490999975781
+      "duration_s": 0.0012502099999949223
     },
     "tests/test_write_session_guidance.py::test_validated_payload_cwd_rejects_unrelated_file_path": {
-      "duration_s": 0.0019174110000079736
+      "duration_s": 0.001442764000003649
     },
     "tests/test_z_dispatch_companion.py::test_companion_declaration_and_hook_remain_non_provisioning": {
-      "duration_s": 0.0010350139999957264
+      "duration_s": 0.0007744629999990593
     },
     "tests/test_z_dispatch_companion.py::test_companion_handles_missing_backup_root_in_config": {
-      "duration_s": 4.053146276000007
+      "duration_s": 3.345778721000002
     },
     "tests/test_z_dispatch_companion.py::test_companion_restores_presence_without_startup_shortcut": {
-      "duration_s": 7.9899203910000125
+      "duration_s": 6.169423538000004
     },
     "tests/test_z_dispatch_companion.py::test_provider_activates_for_windows_install": {
-      "duration_s": 0.0027844049999998788
+      "duration_s": 0.0020739990000038233
     },
     "tests/test_z_dispatch_companion.py::test_provider_is_inactive_without_config": {
-      "duration_s": 0.002616199000001984
+      "duration_s": 0.002048188999992817
     },
     "tests/test_z_dispatch_companion.py::test_provider_reports_malformed_config_as_indeterminate": {
-      "duration_s": 0.002734510999999884
+      "duration_s": 0.0020321259999889207
     },
     "tests/test_z_dispatch_companion.py::test_registrar_hook_wrapper_publishes_candidate[bash]": {
-      "duration_s": 0.039516123000012726
+      "duration_s": 0.033012937999998826
     },
     "tests/test_z_dispatch_companion.py::test_registrar_hook_wrapper_publishes_candidate[powershell]": {
-      "duration_s": 0.8519279599999976
+      "duration_s": 0.7030943000000036
     },
     "tests/test_z_dispatch_companion.py::test_session_hook_publishes_attributed_registrar_candidate": {
-      "duration_s": 0.004514382000010642
+      "duration_s": 0.003972807000010903
     }
   }
 }

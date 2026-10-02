@@ -41,12 +41,18 @@ _SHELL_TAIL = re.compile(
 )
 #: Lines Copilot draws under its input box (the key-hint footer).
 _MAX_FOOTER_LINES = 2
-#: A Copilot key-hint footer row (e.g. "← open sidebar · / commands · ? help"):
-#: anything else under the box (``Connection closed``, later output) means the
-#: box is stale scrollback, not live input.
-_FOOTER_ROW = re.compile(
-    r"\s·\s|\b(?:esc|ctrl|shift|tab|enter|help|commands|sidebar)\b", re.IGNORECASE,
+#: One key-hint segment of Copilot's footer: a key, then a short lowercase
+#: action ("← open sidebar", "/ commands", "shift+tab mode"). A footer row is
+#: made only of these, joined by " · "; any other text under the box (e.g.
+#: "Connection closed; press Enter to reconnect") means it is stale scrollback.
+_FOOTER_SEGMENT = re.compile(
+    r"^(?:[←→↑↓/?@!#]|esc|tab|enter|space|(?:ctrl|shift|alt|cmd)\+\S+)"
+    r"\s+[a-z][a-z' -]*$"
 )
+
+
+def _is_footer_row(line: str) -> bool:
+    return all(_FOOTER_SEGMENT.match(seg.strip()) for seg in line.split("·"))
 
 
 def _live_box(capture: str) -> bool:
@@ -62,7 +68,7 @@ def _live_box(capture: str) -> bool:
         return False
     tail = lines[bottom + 1:]
     return len(tail) <= _MAX_FOOTER_LINES and all(
-        _FOOTER_ROW.search(line) and not _SHELL_TAIL.search(line) for line in tail
+        _is_footer_row(line) and not _SHELL_TAIL.search(line) for line in tail
     )
 
 

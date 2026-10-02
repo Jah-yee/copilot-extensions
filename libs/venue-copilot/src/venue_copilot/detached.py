@@ -200,10 +200,17 @@ def launch_detached(
                 ),
             )
 
+        launch_timeout = register_timeout + 300.0
+        if seed or refs:  # refs become (part of) the seed
+            launch_timeout = max(launch_timeout, _SEED_READY_HARD_CAP + 300.0)
+        # The reservation must outlive the refs upload, the launch (with its seed
+        # readiness wait) and registration, or a concurrent rejoin could replace it.
+        ttl = max(float(plan.get("reservation_ttl", 900.0)),
+                  (600.0 if refs else 0.0) + launch_timeout + register_timeout + 120.0)
         reservation = reserve_with_retry(
             plan["scope_id"],
             plan["venue"],
-            ttl_seconds=float(plan.get("reservation_ttl", 900.0)),
+            ttl_seconds=ttl,
             retry_window=float(plan.get("reserve_retry_window", 90.0)),
             on_wait=lambda: progress(
                 "waiting",
@@ -225,9 +232,6 @@ def launch_detached(
             seed = f"{seed.rstrip()}\n\n{notes}" if seed else notes
         progress("launch", _venue_text(plan, "launch_detail", "`agent-worktrees embody` on the venue"))
         seed_ready_timeout = max(register_timeout, 180.0)
-        launch_timeout = register_timeout + 300.0
-        if seed:
-            launch_timeout = max(launch_timeout, _SEED_READY_HARD_CAP + 300.0)
         rc, stdout, stderr = adapter.launch(
             _launch_command(
                 plan,

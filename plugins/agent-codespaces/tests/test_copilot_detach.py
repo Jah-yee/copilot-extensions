@@ -729,6 +729,40 @@ def test_launch_retries_a_transient_transport_failure_then_succeeds(seams, monke
     assert json.loads(capsys.readouterr().out)["session_id"] == "sid-42"
 
 
+def test_a_lost_create_result_then_a_rejoin_never_reports_the_seed_delivered(seams, monkeypatch, capsys):
+    """The first attempt may have created the session (its JSON was lost); the
+    retry rejoins it. The seed's fate is unknown: not resent, not claimed."""
+    rejoined = json.dumps({"ok": True, "created": False, "resumed": True,
+                           "session": "wt-anchor-example-web"})
+    outcomes = [types.SimpleNamespace(exit_code=255, stdout="", stderr="ssh: connection reset"),
+                types.SimpleNamespace(exit_code=0, stdout=rejoined, stderr="")]
+
+    def fake(ns, *, remote_cmd_builder=None, result_sink=None, settle_on_disconnect=True):
+        seams.ssh.append({"ns": ns, "remote": remote_cmd_builder(["/stage/x"]), "settle": settle_on_disconnect})
+        return result_sink(outcomes.pop(0))
+
+    from venue_copilot import refs
+
+    monkeypatch.setattr(refs, "deliver_note", lambda *a, **k: pytest.fail("must not resend the seed"))
+    monkeypatch.setattr(detach.time, "sleep", lambda s: None)
+    assert detach.cmd_detach(_args(), ssh_session=fake) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["seeded"] is False and out["seed_delivery"] == "unconfirmed"
+    assert "agent-bridge send" in out["warning"]
+
+
+def test_the_reservation_outlives_every_launch_attempt_and_registration(seams, monkeypatch, capsys):
+    ttls: list[float] = []
+    monkeypatch.setattr(
+        venue_copilot, "reserve_cli_mode",
+        lambda scope, ttl_seconds, venue: ttls.append(ttl_seconds) or {"reservation_id": "r1"},
+    )
+    args = _args()
+    assert detach.cmd_detach(args, ssh_session=_ssh(seams, stdout=_CREATED)) == 0
+    launch = max(args.register_timeout + 300.0, detach._SEED_READY_HARD_CAP + 300.0)
+    assert ttls and ttls[0] >= detach._LAUNCH_ATTEMPTS * launch + args.register_timeout
+
+
 def test_launch_does_not_retry_a_genuine_remote_failure(seams, monkeypatch, capsys):
     def fake(ns, *, remote_cmd_builder=None, result_sink=None, settle_on_disconnect=True):
         seams.ssh.append(1)

@@ -1933,6 +1933,17 @@ def test_ordinary_output_under_a_stale_prompt_is_not_ready():
     assert pane_readiness.ready_signature(_BOXED_INPUT) == "boxed-input"
 
 
+def test_output_with_generic_key_words_under_a_box_is_not_ready():
+    """A footer row is a run of complete key-hint segments; ordinary output
+    that merely mentions Enter or help is not one."""
+    from agent_worktrees import pane_readiness
+
+    for later in ("Connection closed; press Enter to reconnect\n", "Press enter for help\n"):
+        assert pane_readiness.ready_signature(_BOXED_INPUT + later) is None
+    two_rows = _BOXED_INPUT + " shift+tab mode · ctrl+c exit\n"
+    assert pane_readiness.ready_signature(two_rows) == "boxed-input"
+
+
 def test_an_attached_powershell_or_cmd_prompt_is_not_ready():
     from agent_worktrees import pane_readiness
 

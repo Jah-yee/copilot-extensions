@@ -321,11 +321,11 @@ def _commands(plan: dict[str, Any], session_id: str, effort: str | None = None) 
     }
 
 
-def _reserve(plan: dict[str, Any]) -> dict[str, Any]:
+def _reserve(plan: dict[str, Any], ttl: float = _RESERVATION_TTL) -> dict[str, Any]:
     return reserve_with_retry(
         plan["scope_id"],
         plan["venue"],
-        ttl_seconds=_RESERVATION_TTL,
+        ttl_seconds=ttl,
         retry_window=_RESERVE_RETRY_WINDOW,
         on_wait=lambda: _progress(
             "waiting", "another launch on this CodeSpace holds the reservation",
@@ -438,7 +438,17 @@ def cmd_detach(
                 "the CodeSpace cannot reach the host bridge through the forward "
                 "(authenticated probe failed)", plan,
             )
-        reservation = _reserve(plan)
+        launch_timeout = args.register_timeout + 300.0
+        if seed or ref_files:  # refs become (part of) the seed
+            launch_timeout = max(launch_timeout, _SEED_READY_HARD_CAP + 300.0)
+        # The reservation must outlive the refs upload, every launch attempt (with
+        # its seed readiness wait) and registration, or a concurrent rejoin could
+        # replace it while this launch is still waiting.
+        reservation = _reserve(plan, max(
+            _RESERVATION_TTL,
+            (600.0 if ref_files else 0.0) + _LAUNCH_ATTEMPTS * (launch_timeout + 10.0)
+            + args.register_timeout + 120.0,
+        ))
         _progress("reserved", reservation.get("reservation_id", ""))
         refs_note_text = None
         if ref_files:
@@ -487,12 +497,10 @@ def cmd_detach(
         _progress("launch", "venue prep + `agent-worktrees embody` (can take minutes on first use)")
         # `embody` is idempotent (it rejoins a running session and never
         # re-seeds it), so a launch whose *transport* failed is retried.
+        uncertain = False  # an earlier attempt may have run (and seeded) unseen
         for attempt in range(_LAUNCH_ATTEMPTS):
             captured.pop("result", None)
             try:
-                launch_timeout = args.register_timeout + 300.0
-                if seed:
-                    launch_timeout = max(launch_timeout, _SEED_READY_HARD_CAP + 300.0)
                 rc = ssh_session(
                     _ssh_namespace(args, "agent-worktrees embody", timeout=launch_timeout),
                     remote_cmd_builder=builder, result_sink=sink, settle_on_disconnect=False,
@@ -502,6 +510,7 @@ def cmd_detach(
                 return _COORDINATION_EXIT
             except (RuntimeError, OSError) as exc:
                 if attempt + 1 < _LAUNCH_ATTEMPTS and _transient(str(exc)):
+                    uncertain = True
                     _progress("launch-retry", f"transient connection failure: {str(exc)[:200]}")
                     time.sleep(10.0)
                     continue
@@ -512,6 +521,7 @@ def cmd_detach(
                 and not _last_json(getattr(result, "stdout", "") or "")
                 and _is_transient_result(result)
             ):
+                uncertain = True
                 _progress("launch-retry", f"transient SSH failure (exit {getattr(result, 'exit_code', '?')})")
                 time.sleep(10.0)
                 continue
@@ -553,6 +563,10 @@ def cmd_detach(
         seed_needs_bridge = bool(created and seed and not embodied.get("seed_submitted"))
         if seed_typed:
             seed_delivery_status = "typed"
+        # A lost earlier attempt may have created (and maybe seeded) the session
+        # this rejoin found: its seed's fate is unknown, so never resend it
+        # blindly nor report it seeded.
+        seed_unconfirmed = bool(uncertain and seed and not created)
         _progress("register", "waiting for the session to register with the host bridge")
         session_id = _await_claim(plan["scope_id"], reservation["reservation_id"], args.register_timeout)
         if not session_id:
@@ -611,6 +625,11 @@ def cmd_detach(
             "resumed": not created,
             "seeded": bool(created and seed and seed_delivery_status in {"typed", "bridge"}),
             **({"seed_delivery": seed_delivery_status} if created and seed else {}),
+            **({"seed_delivery": "unconfirmed",
+                "warning": "a lost earlier launch attempt may have started this session; "
+                           "its seed can't be confirmed -- check `agent-bridge result "
+                           f"{session_id}` and resend with `agent-bridge send` if missing"}
+               if seed_unconfirmed else {}),
             # A rejoin of a running session applied none of them: nothing was recalled.
             **({"recalled": recalled} if recalled and created else {}),
             "plugin_dirs": captured.get("plugin_dirs", []),

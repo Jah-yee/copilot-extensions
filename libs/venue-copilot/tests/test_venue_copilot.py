@@ -561,6 +561,25 @@ class TestDetachedRunner:
         assert payload["scope_id"] == "anchor-repo@venue"
         assert detached.public_plan(plan) == self._plan()
 
+    def test_reservation_outlives_the_launch_and_registration_budget(self, monkeypatch) -> None:
+        """A concurrent rejoin can replace an expired reservation; the TTL covers
+        the refs upload, the seeded launch and registration."""
+        from venue_copilot import detached
+
+        self._patch_bridge(monkeypatch)
+        ttls: list[float] = []
+        monkeypatch.setattr(
+            "venue_copilot.detached.reserve_with_retry",
+            lambda scope, venue, **kw: ttls.append(kw["ttl_seconds"]) or {"reservation_id": "r1"},
+        )
+        rc, _ = detached.launch_detached(
+            _Adapter(), self._plan(), seed="do it", driver=None, copilot_args=[],
+            ensure_mux=True, register_timeout=600.0, progress=lambda *a: None, refs=self._refs(),
+        )
+        assert rc == 0
+        launch = detached._SEED_READY_HARD_CAP + 300.0
+        assert ttls == [600.0 + launch + 600.0 + 120.0]
+
     def _patch_bridge(self, monkeypatch) -> None:
         monkeypatch.setattr("venue_copilot.detached.resolve_daemon_port", lambda: 41234)
         monkeypatch.setattr("venue_copilot.detached.resolve_local_auth_token", lambda: "tok")

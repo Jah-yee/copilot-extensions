@@ -146,7 +146,11 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({
 })
 _GIT_TOKEN = re.compile(r""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+""")
 _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
-    "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+    "--namespace", "--super-prefix",
+})
+_GIT_TERMINAL_OPTIONS = frozenset({
+    "-h", "--help", "-v", "--version", "--html-path", "--man-path",
+    "--info-path", "--exec-path",
 })
 # ``pull`` is the one write-sub verb with a narrow, precise exemption: this
 # guard's invariant is "no agent-authored content lands in the anchor" (a
@@ -195,20 +199,26 @@ def _unquote_shell_token(token: str) -> str:
     return token
 
 
-def _git_invocation(seg: str) -> tuple[str | None, bool]:
-    """Return the actual git subcommand and whether global ``-C`` is present.
+def _git_invocation(
+    seg: str, cwd: str,
+) -> tuple[str | None, list[tuple[str, str]], bool]:
+    """Return the Git subcommand and resolved explicit repository targets.
 
     Git accepts global options before the subcommand. Parse only that prefix;
     arguments after the subcommand cannot change which operation is running.
+    The final boolean records an explicit target even when its value cannot be
+    resolved, preserving the guard's existing fail-open behavior for variables.
     """
     tokens = [_unquote_shell_token(token) for token in _GIT_TOKEN.findall(seg)]
     if not tokens:
-        return None, False
+        return None, [], False
     first = tokens[0].lstrip("\"'")
     if first.lower() != "git":
-        return None, False
+        return None, [], False
 
-    has_dash_c = False
+    git_cwd = cwd
+    targets: list[tuple[str, str]] = []
+    has_explicit_target = False
     index = 1
     while index < len(tokens):
         token = tokens[index]
@@ -216,15 +226,52 @@ def _git_invocation(seg: str) -> tuple[str | None, bool]:
         if token == "--":
             index += 1
             break
-        if token in {"-C", "-c"} or lower in _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE:
-            has_dash_c = has_dash_c or token == "-C"
+        if lower in _GIT_TERMINAL_OPTIONS:
+            return None, targets, has_explicit_target
+        if token == "-C":
+            has_explicit_target = True
+            if index + 1 < len(tokens):
+                value = tokens[index + 1]
+                if "$" not in value and "%" not in value:
+                    git_cwd = _resolve(value, git_cwd)
+                    targets.append(("work-tree", git_cwd))
             index += 2
             continue
         if token.startswith("-C") and token != "-C":
-            has_dash_c = True
+            has_explicit_target = True
+            value = _unquote_shell_token(token[2:])
+            if value and "$" not in value and "%" not in value:
+                git_cwd = _resolve(value, git_cwd)
+                targets.append(("work-tree", git_cwd))
             index += 1
             continue
+        if token == "-c":
+            index += 2
+            continue
         if token.startswith("-c") and token != "-c":
+            index += 1
+            continue
+        if lower in {"--git-dir", "--work-tree"}:
+            has_explicit_target = True
+            if index + 1 < len(tokens):
+                value = tokens[index + 1]
+                if "$" not in value and "%" not in value:
+                    targets.append((lower[2:], _resolve(value, git_cwd)))
+            index += 2
+            continue
+        matched_target = False
+        for option in ("--git-dir", "--work-tree"):
+            if lower.startswith(option + "="):
+                has_explicit_target = True
+                value = _unquote_shell_token(token.split("=", 1)[1])
+                if value and "$" not in value and "%" not in value:
+                    targets.append((option[2:], _resolve(value, git_cwd)))
+                matched_target = True
+                break
+        if matched_target:
+            index += 1
+            continue
+        if lower.startswith("--exec-path="):
             index += 1
             continue
         if any(
@@ -236,10 +283,10 @@ def _git_invocation(seg: str) -> tuple[str | None, bool]:
         if token.startswith("-"):
             index += 1
             continue
-        return lower, has_dash_c
+        return lower, targets, has_explicit_target
     if index < len(tokens):
-        return tokens[index].lower(), has_dash_c
-    return None, has_dash_c
+        return tokens[index].lower(), targets, has_explicit_target
+    return None, targets, has_explicit_target
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An
@@ -531,6 +578,19 @@ def _cwd_anchor_dict(path: str, canon_anchor: dict) -> dict | None:
     return canon_anchor.get(_canon(str(root)))
 
 
+def _git_target_anchor(
+    kind: str, path: str, canon_anchor: dict,
+) -> dict | None:
+    if kind != "git-dir":
+        return _cwd_anchor_dict(path, canon_anchor)
+    target = _canon(path)
+    for root, anchor in canon_anchor.items():
+        git_dir = os.path.join(root, ".git")
+        if target == root or target == git_dir or target.startswith(git_dir + os.sep):
+            return anchor
+    return None
+
+
 def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
     """Return an anchor hit for a shell command that WRITES into an anchor, or
     None. Fires only on a real write target (redirect target / command-position
@@ -550,7 +610,9 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         eff = _effective_seg(seg)
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))
         is_git = bool(_GIT_START.match(eff))
-        subcmd, has_dash_c = _git_invocation(eff) if is_git else (None, False)
+        subcmd, git_targets, has_explicit_target = (
+            _git_invocation(eff, eff_cwd) if is_git else (None, [], False)
+        )
         git_write = subcmd in _GIT_WRITE_SUBCOMMANDS
         # A ``pull`` invocation is exempt from ``git_write`` ONLY when its
         # actual SUBCOMMAND (not merely the word ``pull`` anywhere in the
@@ -574,15 +636,17 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
             #    argument (e.g. ``Set-Content "<anchor>\x"``, ``rm <anchor>``).
             if at_write_cmd and re.search(tok, seg_hay):
                 return {**a, "reason": _deny_reason(a["name"], a["path"])}
-            # 3a. A git mutation naming the anchor via ``-C <anchor>``.
-            if git_write and has_dash_c and re.search(
-                r"(?:^|\s)-C\s+[\"']?" + tok, seg_hay, re.IGNORECASE
-            ):
-                return {**a, "reason": _deny_reason(a["name"], a["path"])}
-        # 3b. A repo-scoped git write (no ``-C``) targets the EFFECTIVE cwd's
-        #     repo -- catches ``cd <anchor>; git commit`` as well as a session
-        #     already inside the anchor.
-        if git_write and not has_dash_c:
+        # 3a. A git mutation with an explicit ``-C`` / ``--git-dir`` /
+        #     ``--work-tree`` target writes any anchor named by those options.
+        if git_write:
+            for kind, target in git_targets:
+                a = _git_target_anchor(kind, target, canon_anchor)
+                if a is not None:
+                    return {**a, "reason": _deny_reason(a["name"], a["path"])}
+        # 3b. Without an explicit target, a repo-scoped git write targets the
+        #     EFFECTIVE cwd's repo -- catches ``cd <anchor>; git commit`` as
+        #     well as a session already inside the anchor.
+        if git_write and not has_explicit_target:
             a = _cwd_anchor_dict(eff_cwd, canon_anchor)
             if a is not None:
                 return {**a, "reason": _deny_reason(a["name"], a["path"])}

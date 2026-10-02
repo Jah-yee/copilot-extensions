@@ -237,6 +237,60 @@ def test_shell_git_write_with_global_options_still_denies(tmp_path, anchor):
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize("dash_c", ["-C", "-C{}"])
+def test_shell_git_commit_with_dashC_forms_still_denies(
+    tmp_path, anchor, dash_c,
+):
+    gp = anchor[0]["path"]
+    option = f'-C "{gp}"' if dash_c == "-C" else dash_c.format(gp)
+    d = guard.decide(_shell(f"git {option} commit -m example", tmp_path),
+                     env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        '--git-dir "{}\\.git"',
+        '--git-dir="{}\\.git"',
+        '--work-tree "{}"',
+        '--work-tree="{}"',
+    ],
+)
+def test_shell_git_commit_with_repository_target_options_denies(
+    tmp_path, anchor, option,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell(
+        f"git {option.format(gp)} commit -m example", tmp_path,
+    ), env={}, home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_dir_elsewhere_overrides_anchor_cwd(tmp_path, anchor):
+    other = _main_checkout(tmp_path, "other-repo")
+    gp = anchor[0]["path"]
+    assert guard.decide(
+        _shell(f'git --git-dir "{other / ".git"}" commit -m example', gp),
+        env={}, home=tmp_path, anchors=anchor,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git --help commit",
+        "git --version commit",
+        "git --exec-path commit",
+        "git -C . --help commit",
+    ],
+)
+def test_shell_git_terminal_global_options_allow(tmp_path, anchor, command):
+    gp = anchor[0]["path"]
+    assert guard.decide(_shell(command, gp), env={}, home=tmp_path,
+                        anchors=anchor) is None
+
+
 @pytest.mark.parametrize("separator", ["\n", "; ", " && "])
 def test_shell_git_batch_with_real_mutation_still_denies(
     tmp_path, anchor, separator,

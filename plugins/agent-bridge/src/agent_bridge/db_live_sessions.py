@@ -99,10 +99,8 @@ class _LiveSessionsMixin:
         )
         session_id = self.resolve_live_session_id(session_id)  # the id actually written
         if cur.rowcount == 1:
-            # Best-effort bookkeeping, never an admission gate: claim a pending
-            # CLI-mode reservation (inheriting its trusted venue descriptor),
-            # then fold in a same-process predecessor -- also after a fresh
-            # claim, since a resume may rename the session mid-rejoin.
+            # Best-effort bookkeeping, never an admission gate: claim a pending CLI-mode reservation (its
+            # trusted venue too), then fold in a same-process predecessor (a resume may rename mid-rejoin).
             if worktree_id is not None and self.claim_cli_mode_reservation(
                 worktree_id, session_id, now=now
             ):
@@ -247,15 +245,12 @@ class _LiveSessionsMixin:
         return cur.rowcount > 0
 
     def deregister_live_session(self, session_id: str) -> bool:
-        """Remove a live registration, its queue and aliases in one transaction
-        (a concurrent rollover can't slip between the check and the cleanup).
-        True only when this exact row was deleted."""
+        """Atomically remove a live registration, its queue and aliases; True only if this exact row went."""
         conn = self._get_conn()
         with self._write_lock:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if conn.execute("DELETE FROM live_sessions WHERE session_id=?",
-                                (session_id,)).rowcount != 1:
+                if conn.execute("DELETE FROM live_sessions WHERE session_id=?", (session_id,)).rowcount != 1:
                     conn.rollback()
                     return False
                 conn.execute("DELETE FROM live_messages WHERE session_id=?", (session_id,))

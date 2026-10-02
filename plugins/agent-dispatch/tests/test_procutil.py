@@ -290,7 +290,10 @@ def test_namespaced_sibling_resolution_stays_in_active_marketplace_cell(
 ):
     if owner != "agent-dispatch" and sibling_id != "agent-worktrees":
         pytest.skip("Venue plugins only compose with worktrees")
-    tmp_path = tmp_path / "cells & ' \u96ea"
+    # Keep the quoting + Unicode coverage this test needs without depending
+    # on Windows long-path policy in deep worktrees: reuse a much shorter
+    # per-case leaf than pytest's default parameterized directory name.
+    tmp_path = tmp_path.parents[2] / tmp_path.name[-2:] / "c'雪"
     first_cell = tmp_path / "marketplaces" / FIRST_MARKETPLACE_ID
     second_cell = tmp_path / "marketplaces" / SECOND_MARKETPLACE_ID
     first_context = _make_namespaced_context(first_cell, plugin_id=owner)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 import time
@@ -34,11 +35,15 @@ def _submitted_task(
     *,
     require_verification: bool,
     evaluator_ref: str | None,
+    repo: str = TEST_REPO,
+    payload_inline: str | None = None,
 ) -> str:
     task = queue.create(
         title,
+        repo=repo,
         require_verification=require_verification,
         evaluator_ref=evaluator_ref,
+        payload_inline=payload_inline,
     )
     queue.claim_one("worker-1", task_id=task.id)
     queue.start(task.id, "worker-1")
@@ -52,16 +57,21 @@ def _register_script(
     *,
     repo: str = TEST_REPO,
     env: str = "default",
+    evaluator_ref: str = "review-loop",
+    reviewer_loop: dict | None = None,
 ) -> None:
+    spec = {
+        "repo": repo,
+        "evaluator_ref": evaluator_ref,
+        "evaluator_spec": {
+            "scripts": {evaluator_ref: [sys.executable, script_path]}
+        },
+    }
+    if reviewer_loop is not None:
+        spec["reviewer_loop"] = reviewer_loop
     queue.register_registration(
         "evaluator",
-        {
-            "repo": repo,
-            "evaluator_ref": "review-loop",
-            "evaluator_spec": {
-                "scripts": {"review-loop": [sys.executable, script_path]}
-            },
-        },
+        spec,
         machine=_registration_machine(),
         env=env,
     )
@@ -180,6 +190,103 @@ def test_evaluate_submitted_rejects_emit_decisions(tmp_path):
 
     assert report["eligible"] is True
     assert "complete/abandon/noop" in report["reason"]
+    assert queue.get(task_id).status == Status.SUBMITTED
+
+
+def test_reviewer_loop_stale_after_days_is_per_declaration(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/repo-seven",
+        evaluator_ref="review-loop-seven",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/repo-thirty",
+        evaluator_ref="review-loop-thirty",
+        reviewer_loop={"stale_after_days": 30},
+    )
+    last_commit_at = 1_000_000.0
+    payload = json.dumps({"reviewer_loop": {"last_commit_at": last_commit_at}})
+    seven_day_id = _submitted_task(
+        queue,
+        "review repo-seven",
+        repo="example/repo-seven",
+        require_verification=True,
+        evaluator_ref="review-loop-seven",
+        payload_inline=payload,
+    )
+    thirty_day_id = _submitted_task(
+        queue,
+        "review repo-thirty",
+        repo="example/repo-thirty",
+        require_verification=True,
+        evaluator_ref="review-loop-thirty",
+        payload_inline=payload,
+    )
+
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (8 * 86400.0),
+    )
+    seven_day = evaluate_submitted_task(queue, seven_day_id, trigger="submitted")
+    thirty_day = evaluate_submitted_task(queue, thirty_day_id, trigger="submitted")
+
+    assert seven_day["applied"][0]["decision"] == "abandon"
+    assert queue.get(seven_day_id).status == Status.ABANDONED
+    assert thirty_day["applied"][0]["decision"] == "noop"
+    assert queue.get(thirty_day_id).status == Status.SUBMITTED
+
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (31 * 86400.0),
+    )
+    thirty_day_late = evaluate_submitted_task(queue, thirty_day_id, trigger="backfill")
+
+    assert thirty_day_late["applied"][0]["decision"] == "abandon"
+    assert queue.get(thirty_day_id).status == Status.ABANDONED
+
+
+def test_reviewer_loop_without_stale_after_days_never_stales(tmp_path, monkeypatch):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/repo-none",
+        evaluator_ref="review-loop-none",
+    )
+    last_commit_at = 1_000_000.0
+    task_id = _submitted_task(
+        queue,
+        "review repo-none",
+        repo="example/repo-none",
+        require_verification=True,
+        evaluator_ref="review-loop-none",
+        payload_inline=json.dumps({"reviewer_loop": {"last_commit_at": last_commit_at}}),
+    )
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (365 * 86400.0),
+    )
+
+    report = evaluate_submitted_task(queue, task_id, trigger="submitted")
+
+    assert report["applied"][0]["decision"] == "noop"
     assert queue.get(task_id).status == Status.SUBMITTED
 
 

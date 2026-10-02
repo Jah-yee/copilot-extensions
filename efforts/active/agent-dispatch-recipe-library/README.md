@@ -345,7 +345,7 @@ below — read it before starting any Phase 3 work).
       the global-recipes item above and is not complete until that lands.
 
 ### Phase 4 — Reviewer-recipe delta (Request item b's remainder)
-- [ ] Add a **configurable stale-exit parameter** to the reviewer recipe
+- [x] Add a **configurable stale-exit parameter** to the reviewer recipe
       (e.g. `stale_after_days`, measured since the target change's last
       commit) alongside merged/abandoned in its resolution logic. This is a
       **per-declaration param, not an engine constant** — different
@@ -354,13 +354,13 @@ below — read it before starting any Phase 3 work).
       GitHub repo like this one or a harness repo). No default bakes in a
       single "one true" cadence; a declaration that omits the param leaves
       staleness un-checked (never silently applies a guessed default).
-- [ ] Confirm (and extend if needed) the reviewer recipe's evaluator uses
+- [x] Confirm (and extend if needed) the reviewer recipe's evaluator uses
       `task-verification-gate`'s `require_verification` +
       suspend-requires-verdict pattern: when a reviewer task suspends
       (`run`-hibernates) without having posted a verdict, the evaluator (or
       the `run`-outage recovery sweep, whichever owns this case) wakes it
       rather than leaving it silently parked.
-- [ ] Tests: a reviewer task that suspends without a verdict is woken, not
+- [x] Tests: a reviewer task that suspends without a verdict is woken, not
       left parked; two fixture declarations with different
       `stale_after_days` values (e.g. 7 and 30) each resolve via the
       stale-exit path only once *their own* configured threshold is crossed,
@@ -918,6 +918,56 @@ concurrent session was already deep in this exact file):
 
 Also found and fixed two false positives during validation, both confirmed
 not to be real regressions before moving on:
+
+### 2026-10-02 — Phase 4: reviewer stale-exit + verification-gate wiring landed
+- Added an optional top-level `stale_after_days` field to
+  `kind: reviewer-loop` declarations (`reviewer_loops.py`). It is validated
+  as a positive number, rejected from inline `evaluator` overrides as a
+  derived field, and threaded onto the expanded evaluator registration as
+  `spec.reviewer_loop.stale_after_days` — explicitly per declaration, with
+  **no default** when omitted.
+- Wired the reviewer-loop lifecycle extension into submitted verification:
+  `verification.py` now wraps matching evaluator registrations with
+  `ReviewerLoopEvaluator`, which preserves any existing merged/abandoned
+  decisions from the underlying evaluator and adds one extra abandon path:
+  if the declaration configured `stale_after_days` and the task's
+  `payload_inline` reviewer metadata reports
+  `reviewer_loop.last_commit_at` older than that threshold, verification
+  abandons the submitted task as stale.
+- Confirmed the suspend-requires-verdict wiring was already present in the
+  generic machinery; no new wake logic was needed. The existing trusted
+  emitter event-note route (`coordinator_verification.append_event_note`
+  -> `queue.append_event_note(... wake_agent=True, enqueue_verification=True)`)
+  already does the right thing: for a suspended reviewer task it wakes the
+  hibernated owner/run-waiter instead of leaving the task parked, and for a
+  submitted reviewer task the same route also queues submitted verification.
+- Tests added/extended:
+  - `test_verification.py`: one declaration with `stale_after_days: 7` and
+    one with `30` abandon only at their own thresholds; a declaration with
+    no `stale_after_days` never takes the stale-exit path.
+  - `test_coordinator.py`: a suspended reviewer task hit by an emitter
+    event note is woken (run-waiter superseded + wake queued), not left
+    silently parked.
+  - `test_registrar_discovery.py`: reviewer-loop expansion threads
+    `stale_after_days` onto the evaluator registration spec.
+- README updated (`plugins/agent-dispatch/README.md`) to document the new
+  reviewer-loop parameter and its no-default behavior.
+- Validation:
+  - focused reviewer-loop tests: pass
+  - full `agent-dispatch` suite: **3747 passed, 23 skipped**
+  - neither of the two effort-noted unrelated flakes
+    (`test_idle_headless_fleet_nudge_includes_remote_host`,
+    `test_consume_baton_*` under a live Copilot CLI session) appeared in
+    this run.
+- Ancillary validation-coupled fix found while driving the full suite:
+  `payload.py`'s temporary spill file names were unnecessarily long for
+  deep Windows worktree paths, which made
+  `test_payload_endpoint_spilled_blob` fail before the Phase 4 assertions
+  were even reachable in a full-suite run. Shortened the temp spill suffix
+  without changing blob refs or persisted payload names. Also shortened one
+  procutil test's per-case leaf while keeping its quoting/Unicode coverage,
+  so the suite no longer depends on Windows long-path policy in this deep
+  worktree.
 - `test_idle_headless_fleet_nudge_includes_remote_host` — a known,
   previously-confirmed pre-existing flake (fails in isolation on a clean
   `dev` checkout too).

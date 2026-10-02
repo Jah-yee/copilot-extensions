@@ -861,6 +861,63 @@ def test_event_note_wakes_and_supersedes_active_run_waiter(api, monkeypatch):
     assert wakes[0].status == "pending"
 
 
+def test_event_note_wakes_a_suspended_reviewer_task_instead_of_leaving_it_parked(api):
+    tid = api.post(
+        "/tasks",
+        json={
+            "title": "review PR 42",
+            "repo": TEST_REPO,
+            "origin_ref": "review-emitter",
+            "require_verification": True,
+            "evaluator_ref": "review-loop",
+        },
+    ).json()["id"]
+    api.post("/claim", json={"worker_id": "w1", "repo": TEST_REPO})
+    api.post(
+        f"/tasks/{tid}/start",
+        json={"worker_id": "w1", "owner_session_id": "session-1"},
+    )
+    api.post(
+        f"/tasks/{tid}/suspend",
+        json={"worker_id": "w1", "reason": "waiting for the next review round"},
+    )
+    prepared = api.post(
+        f"/tasks/{tid}/run-waiter/register",
+        json={
+            "worker_id": "w1",
+            "host": "test-host",
+            "reason": "hibernating: sleep 1",
+            "resume_worktree": "m/wt-1",
+            "command": ["sleep", "1"],
+        },
+    )
+    assert prepared.status_code == 200
+    armed = api.post(
+        f"/tasks/{tid}/run-waiter/arm",
+        json={
+            "generation": prepared.json()["generation"],
+            "pid": 101,
+            "host": "test-host",
+            "start_token": "token-101",
+        },
+    )
+    assert armed.status_code == 200
+    sender = _register_event_emitter(api)
+
+    response = api.post(
+        f"/tasks/{tid}/event-note",
+        json={"sender": sender, "note": "new review round; no verdict posted yet"},
+        headers=_control_headers(sender),
+    )
+
+    assert response.status_code == 200
+    wakes = api.app.state.queue.list_run_waiter_wakes(tid)
+    assert len(wakes) == 1
+    assert wakes[0].status == "pending"
+    assert api.app.state.queue.get_active_run_waiter(tid) is None
+    assert api.app.state.queue.list_verification_requests(tid) == []
+
+
 def test_event_note_wakes_and_supersedes_preparing_run_waiter(api):
     tid = api.post(
         "/tasks", json={"title": "x", "repo": TEST_REPO, "origin_ref": "review-emitter"}

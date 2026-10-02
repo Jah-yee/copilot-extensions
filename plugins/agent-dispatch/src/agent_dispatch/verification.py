@@ -19,6 +19,7 @@ from .producers.evaluator import (
 )
 from .queue import Status, TaskError, TaskQueue
 from .registrations import RegistrationKind
+from .reviewer_loops import wrap_reviewer_loop_evaluator
 
 log = logging.getLogger("agent-dispatch.verification")
 
@@ -81,6 +82,7 @@ def _active_evaluators(
             continue
         try:
             loaded = load_registration_evaluator(spec)
+            loaded = wrap_reviewer_loop_evaluator(loaded, spec)
         except EvaluatorError as exc:
             log.warning(
                 "skipping evaluator registration %s (%s): %s",

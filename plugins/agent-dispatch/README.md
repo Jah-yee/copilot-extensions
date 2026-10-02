@@ -688,6 +688,13 @@ placement further; permit values are intersected, reject values are combined,
 and an impossible composition is rejected instead of creating a loop with no
 runnable worker.
 
+An optional top-level `stale_after_days` adds a reviewer-lifecycle stale-exit
+policy to the declaration's evaluator registration. When set, submitted
+verification abandons a reviewer task once the target change's
+`payload_inline` reviewer metadata reports `reviewer_loop.last_commit_at`
+older than that many days. The threshold is per declaration; omitting the key
+disables stale-exit checking entirely.
+
 ```bash
 agent-dispatch reviewer-loop setup .copilot-extensions/agent-dispatch/registrar/reviewer-loop.json
 agent-dispatch reviewer-loop inspect .copilot-extensions/agent-dispatch/registrar/reviewer-loop.json

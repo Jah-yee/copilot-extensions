@@ -1,8 +1,13 @@
-"""Repository reviewer-loop declarations expanded onto existing primitives."""
+"""Repository reviewer-loop declarations + lifecycle helpers."""
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from .registrar import (
     Filters,
@@ -11,6 +16,7 @@ from .registrar import (
     _load_filters,
     load_declaration,
 )
+from .producers.evaluator import Abandon, Confirm, Decision, EvaluatorError, NoOp
 
 _KNOWN_KEYS = frozenset(
     {
@@ -24,6 +30,7 @@ _KNOWN_KEYS = frozenset(
         "pool",
         "owner",
         "description",
+        "stale_after_days",
     }
 )
 
@@ -44,6 +51,20 @@ def _string(data: Mapping, key: str) -> str:
             f"reviewer-loop {key}: expected a non-empty string, got {value!r}"
         )
     return value
+
+
+def _optional_positive_number(data: Mapping, key: str) -> float | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RegistrarError(
+            f"reviewer-loop {key}: expected a number > 0, got {value!r}"
+        )
+    result = float(value)
+    if result <= 0:
+        raise RegistrarError(f"reviewer-loop {key}: expected a number > 0")
+    return result
 
 
 def _strings(data: dict, key: str) -> tuple[str, ...]:
@@ -102,6 +123,135 @@ def _compose_filters(common: Filters, specific: Filters) -> Filters:
     return Filters(permit=permit, reject=reject)
 
 
+@dataclass(frozen=True)
+class ReviewerLoopLifecycleConfig:
+    stale_after_days: float | None = None
+
+
+class ReviewerLoopEvaluator:
+    """Whole-goal reviewer lifecycle wrapper.
+
+    Keeps the declaration's ordinary evaluator behavior intact, but layers the
+    reviewer-loop's stale-exit policy over it when configured.
+    """
+
+    def __init__(
+        self,
+        evaluator: Any,
+        config: ReviewerLoopLifecycleConfig,
+        *,
+        clock=None,
+    ) -> None:
+        self._evaluator = evaluator
+        self._config = config
+        self._clock = time.time if clock is None else clock
+
+    def evaluate(self, event: dict[str, Any]) -> list[Decision]:
+        decisions = list(self._evaluator.evaluate(event))
+        if any(isinstance(decision, (Confirm, Abandon)) for decision in decisions):
+            return decisions
+        stale = reviewer_loop_stale_decision(
+            event,
+            stale_after_days=self._config.stale_after_days,
+            now=self._clock(),
+        )
+        if stale is not None and all(isinstance(decision, NoOp) for decision in decisions):
+            return [stale]
+        return decisions
+
+
+def _reviewer_loop_payload(task: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    raw = task.get("payload_inline")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(decoded, Mapping):
+        return None
+    nested = decoded.get("reviewer_loop")
+    if isinstance(nested, Mapping):
+        return nested
+    return decoded
+
+
+def _timestamp(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def reviewer_loop_stale_decision(
+    event: Mapping[str, Any],
+    *,
+    stale_after_days: float | None,
+    now: float | None = None,
+) -> Abandon | None:
+    """Return the reviewer loop's stale-exit decision, if any."""
+    if stale_after_days is None:
+        return None
+    task = event.get("task")
+    if not isinstance(task, Mapping):
+        return None
+    payload = _reviewer_loop_payload(task)
+    if payload is None:
+        return None
+    last_commit_at = _timestamp(payload.get("last_commit_at"))
+    if last_commit_at is None:
+        return None
+    current_time = time.time() if now is None else now
+    stale_after_seconds = stale_after_days * 86400.0
+    if current_time - last_commit_at < stale_after_seconds:
+        return None
+    return Abandon(
+        reason=(
+            "review target stale: last commit is older than "
+            f"{stale_after_days:g} day(s)"
+        )
+    )
+
+
+def reviewer_loop_lifecycle_config(
+    spec: Mapping[str, Any],
+) -> ReviewerLoopLifecycleConfig | None:
+    raw = spec.get("reviewer_loop")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise EvaluatorError(
+            "reviewer-loop evaluator config must be a mapping"
+        )
+    stale_after_days = raw.get("stale_after_days")
+    if stale_after_days is not None and (
+        isinstance(stale_after_days, bool)
+        or not isinstance(stale_after_days, (int, float))
+        or float(stale_after_days) <= 0
+    ):
+        raise EvaluatorError(
+            "reviewer-loop evaluator stale_after_days must be a number > 0"
+        )
+    return ReviewerLoopLifecycleConfig(
+        stale_after_days=(
+            None if stale_after_days is None else float(stale_after_days)
+        )
+    )
+
+
+def wrap_reviewer_loop_evaluator(evaluator: Any, spec: Mapping[str, Any]) -> Any:
+    config = reviewer_loop_lifecycle_config(spec)
+    if config is None:
+        return evaluator
+    return ReviewerLoopEvaluator(evaluator, config)
+
+
 def _placement_filters(data: object) -> Filters:
     try:
         filters = _load_filters(data)
@@ -139,6 +289,7 @@ def expand_reviewer_loop(data: Mapping) -> tuple[ProfileDeclaration, ...]:
     name = _string(data, "name")
     repo = _string(data, "repo")
     task_label = _string(data, "task_label")
+    stale_after_days = _optional_positive_number(data, "stale_after_days")
     owner = data.get("owner")
     description = data.get("description")
     for key, value in (("owner", owner), ("description", description)):
@@ -157,7 +308,7 @@ def expand_reviewer_loop(data: Mapping) -> tuple[ProfileDeclaration, ...]:
         raise RegistrarError(f"reviewer-loop pool.filters: {exc}") from exc
     additional_labels = _strings(pool, "additional_labels")
     _reject_reserved("emitter", emitter, {"id", "evaluator_ref"})
-    _reject_reserved("evaluator", evaluator, {"repo", "evaluator_ref"})
+    _reject_reserved("evaluator", evaluator, {"repo", "evaluator_ref", "reviewer_loop"})
     _reject_reserved(
         "pool",
         pool,
@@ -189,6 +340,11 @@ def expand_reviewer_loop(data: Mapping) -> tuple[ProfileDeclaration, ...]:
                 **evaluator,
                 "repo": repo,
                 "evaluator_ref": evaluator_ref,
+                **(
+                    {"reviewer_loop": {"stale_after_days": stale_after_days}}
+                    if stale_after_days is not None
+                    else {}
+                ),
             },
             "filters": common_filters,
             **common,

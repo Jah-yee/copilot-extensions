@@ -153,21 +153,24 @@ def retarget(token: str | None, merged: dict[str, tuple[str, dict[int, int]]]) -
     continuity_id = value.get("continuity")
     # Only a string can name a log; anything else (e.g. [] or {}) is left for
     # the routes' own token validation rather than raising TypeError here.
-    target = merged.get(continuity_id) if isinstance(continuity_id, str) else None
-    if target is None:
+    if not isinstance(continuity_id, str) or continuity_id not in merged:
         return token
-    continuity, ids = target
-    value = {**value, "continuity": continuity}
-    if value.get("kind") == "position":
-        # A read cursor: the furthest merged id at or before it (never moves back).
+    if value.get("kind") == "position" and not _is_id(value.get("event_id")):
         # Only an exact integer can be mapped; "1", 1.0 or true keep their old
         # continuity so validation reports the replaced history instead.
-        if not _is_id(value.get("event_id")):
-            return token
-        value["event_id"] = max([v for k, v in ids.items() if k <= value["event_id"]],
-                                default=0)
-    elif not _retarget_detail(value, ids):
-        return token  # unmapped or no longer contiguous: normal validation reports it
+        return token
+    # Follow the merge chain (C->B->A), translating at every step; a cycle stops it.
+    seen: set[str] = set()
+    while isinstance(continuity_id, str) and continuity_id in merged and continuity_id not in seen:
+        seen.add(continuity_id)
+        continuity_id, ids = merged[continuity_id]
+        value = {**value, "continuity": continuity_id}
+        if value.get("kind") == "position":
+            # A read cursor: the furthest merged id at or before it (never moves back).
+            value["event_id"] = max([v for k, v in ids.items() if k <= value["event_id"]],
+                                    default=0)
+        elif not _retarget_detail(value, ids):
+            return token  # unmapped or no longer contiguous: normal validation reports it
     value.pop("v", None)
     return _encode_token(value)
 

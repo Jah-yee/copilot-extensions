@@ -14,7 +14,7 @@ from .db_core import (
 )
 from .db_live_session_aliases import (
     CANONICAL_SESSION_SQL as _CANON,
-    inherit_cli_mode_claim_for_session_id_change,
+    register_live_session_atomic,
 )
 
 LIVE_MESSAGE_DELIVERIES = {"queue", "steer", "interrupt"}
@@ -73,53 +73,16 @@ class _LiveSessionsMixin:
         insert/refresh, or a rejection reason -- ``'reserved'`` (an owned ACP
         reservation holds the worktree) or ``'taken-over'`` (this id was taken
         over). The route maps a rejection to HTTP 409.
+
+        The upsert, the CLI-mode reservation claim and a same-process rollover
+        (alias insertion + predecessor deletion) commit in one transaction, so
+        a concurrent deregistration can't strand a half-rolled-over successor.
         """
-        session_id = self.resolve_live_session_id(session_id)
-        cur = self.execute_write(
-            "INSERT INTO live_sessions (session_id, machine, cwd, worktree_id, repo, branch, "
-            "pid, role, driven_by, venue, process_started_at, status, registered_at, updated_at) "
-            f"SELECT {_CANON}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ? "  # rename-atomic
-            "WHERE NOT EXISTS ("
-            "  SELECT 1 FROM worktree_ownership wo "
-            "  JOIN sessions s ON s.id = wo.session_id "
-            "  WHERE wo.worktree_id = ? AND ? IS NOT NULL "
-            "    AND s.status IN ('running', 'idle')"
-            ") "
-            "ON CONFLICT(session_id) DO UPDATE SET "
-            "machine=excluded.machine, cwd=excluded.cwd, "
-            "worktree_id=excluded.worktree_id, repo=excluded.repo, "
-            "branch=excluded.branch, pid=COALESCE(excluded.pid, live_sessions.pid), role=excluded.role, "
-            "driven_by=COALESCE(excluded.driven_by, live_sessions.driven_by), "
-            "venue=COALESCE(excluded.venue, live_sessions.venue), process_started_at="
-            "COALESCE(excluded.process_started_at, live_sessions.process_started_at), "
-            "status='live', updated_at=excluded.updated_at "
-            "WHERE live_sessions.status != 'taken-over'",
-            (session_id, session_id, machine, cwd, worktree_id, repo, branch, pid, role,
-             driven_by, venue, process_started_at, now, now, worktree_id, worktree_id),
+        return register_live_session_atomic(
+            self, session_id, machine=machine, cwd=cwd, worktree_id=worktree_id,
+            repo=repo, branch=branch, pid=pid, role=role, now=now, driven_by=driven_by,
+            venue=venue, process_started_at=process_started_at,
         )
-        session_id = self.resolve_live_session_id(session_id)  # the id actually written
-        if cur.rowcount == 1:
-            # Best-effort bookkeeping, never an admission gate: claim a pending CLI-mode reservation (its
-            # trusted venue too), then fold in a same-process predecessor (a resume may rename mid-rejoin).
-            if worktree_id is not None and self.claim_cli_mode_reservation(
-                worktree_id, session_id, now=now
-            ):
-                self.execute_write(
-                    "UPDATE live_sessions SET cli_mode=1, venue=COALESCE("
-                    "(SELECT venue FROM cli_mode_reservations "
-                    " WHERE worktree_id=? AND claimed_by_session_id=?), venue) "
-                    "WHERE session_id=?",
-                    (worktree_id, session_id, session_id),
-                )
-            if worktree_id is not None:
-                inherit_cli_mode_claim_for_session_id_change(self, worktree_id, session_id, now=now)
-            return "live"
-        # Rejected -- derive why for the caller's error (the authoritative
-        # decision was the 0-row write above).
-        existing = self.get_live_session_exact(session_id)
-        if existing is not None and (existing.get("status") or "live") == "taken-over":
-            return "taken-over"
-        return "reserved"
 
     def create_cli_mode_reservation(
         self, worktree_id: str, *, now: float, ttl_seconds: float = 300.0,

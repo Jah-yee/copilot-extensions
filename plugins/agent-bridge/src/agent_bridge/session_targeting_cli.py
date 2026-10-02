@@ -112,6 +112,14 @@ def _hold_protocol_floor(client: Any, floor: int) -> None:
                 if time.monotonic() >= deadline or ("reset" in str(exc) and method not in ("GET", "HEAD")):
                     raise
                 retrying = True
+            except BridgeClientError as exc:
+                # A retiring daemon refused the request outright (it was not
+                # accepted): follow the replacement, re-probing its protocol
+                # first. Any other HTTP error is the answer.
+                if exc.status != 503 or "drain" not in str(exc.detail).lower() \
+                        or time.monotonic() >= deadline:
+                    raise
+                retrying = True
 
     client._request = _floored
 

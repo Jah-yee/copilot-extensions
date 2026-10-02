@@ -790,6 +790,38 @@ def test_restart_fence_still_spares_an_unrelated_process(tmp_db: Database) -> No
     assert tmp_db.get_live_session_exact("stranger")["status"] == "live"
 
 
+def test_a_concurrent_deregister_cannot_split_a_rollover(tmp_db: Database, monkeypatch) -> None:
+    """Another connection's deregistration attempted between the successor's
+    upsert and the predecessor fold-in must wait for the whole rollover: the
+    successor keeps the claim and the old handle still resolves."""
+    import sqlite3
+
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert tmp_db.release_cli_mode_reservation("wt-R") == 1
+    real, raced = tmp_db.resolve_live_session_id, []
+
+    def _race(session_id: str) -> str:
+        if session_id == "resumed" and not raced:
+            other = sqlite3.connect(str(tmp_db.db_path), timeout=0)
+            try:
+                other.execute("DELETE FROM live_sessions WHERE session_id='placeholder'")
+                other.commit()
+                raced.append("deleted")
+            except sqlite3.OperationalError:
+                raced.append("blocked")
+            finally:
+                other.close()
+        return real(session_id)
+
+    monkeypatch.setattr(tmp_db, "resolve_live_session_id", _race)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    monkeypatch.undo()
+    assert raced == ["blocked"]
+    assert tmp_db.get_live_session("resumed")["cli_mode"] == 1
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+
+
 def test_deregister_reports_whether_it_deleted_the_exact_registration(tmp_db: Database) -> None:
     now = time.time()
     _claimed_placeholder(tmp_db, now)

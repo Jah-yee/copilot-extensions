@@ -1014,3 +1014,61 @@ def test_a_token_with_a_non_string_session_is_a_token_error() -> None:
     with pytest.raises(ResultTokenError):
         _decode_token(bad, source="represented", session_id="s", kinds=frozenset({"position"}),
                       retired_ids=frozenset({"old"}))
+
+
+def test_repeated_aliasing_rebinds_every_key_and_never_merges_back() -> None:
+    """B->C then A->C: B must follow C onto A's log, and the registration
+    route's alias loop repeating on every heartbeat must be a no-op."""
+    store = LiveEventStore()
+    a, b, c = (store.get_or_create(k) for k in ("A", "B", "C"))
+    for log, text in ((a, "a"), (b, "b"), (c, "c")):
+        log.append("agent_message", {"text": text})
+    store.alias("B", "C")
+    store.alias("A", "C")
+    assert store.get("A") is a and store.get("B") is a and store.get("C") is a
+    texts = [e.data.get("text") for e in a.get_events(0)]
+    assert texts == ["a", "b", "c"]
+    for _ in range(3):
+        store.alias("B", "C")
+        store.alias("A", "C")
+    assert [e.data.get("text") for e in a.get_events(0)] == texts
+    assert a.merged_into is None and b.merged_into[0] is a
+
+
+def _chain():
+    """Logs merged in two steps: C into B, then B into A."""
+    store = LiveEventStore()
+    a, b, c = (store.get_or_create(k) for k in ("A", "B", "C"))
+    a.append("agent_message", {"text": "a1"})
+    b.append("agent_message", {"text": "b1"})
+    c.append("agent_message", {"text": "c1"})
+    c.append("agent_message", {"text": "c2"})
+    store.alias("B", "C")
+    store.alias("A", "B")
+    return store, a, b, c
+
+
+def test_a_cursor_crosses_a_transitive_merge() -> None:
+    from agent_bridge.live_representation import translate_merged_cursor
+
+    store, a, b, c = _chain()
+    moved = translate_merged_cursor(c, a, c.latest_id)
+    assert moved is not None
+    assert a.get_events(0)[moved - 1].data.get("text") == "c2"
+    assert translate_merged_cursor(a, a, 1) is None  # no merge, no translation
+    x, y = EventLog(session_id="x"), EventLog(session_id="y")
+    x.merged_into, y.merged_into = (y, {}), (x, {})
+    assert translate_merged_cursor(x, EventLog(session_id="z"), 1) is None  # a cycle stops
+
+
+def test_a_token_follows_a_transitive_merge() -> None:
+    from agent_bridge.result_tokens import _decode_token, _encode_token, _position_token, retarget
+
+    store, a, b, c = _chain()
+    token = _position_token("represented", "C", c.continuity_id, c.latest_id)
+    decoded = _decode_token(retarget(token, store.merged_history()), source="represented",
+                            session_id="C", kinds=frozenset({"position"}))
+    assert decoded["continuity"] == a.continuity_id
+    assert a.get_events(0)[decoded["event_id"] - 1].data.get("text") == "c2"
+    cyclic = {"x": ("y", {1: 1}), "y": ("x", {1: 1})}
+    assert retarget(_encode_token({"kind": "position", "continuity": "x", "event_id": 1}), cyclic)

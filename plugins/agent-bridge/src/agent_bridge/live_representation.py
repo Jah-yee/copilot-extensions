@@ -487,27 +487,36 @@ class LiveEventStore:
             new = self._logs.get(new_id)
             if old is None or old is new:
                 return
-            self._logs[new_id] = old
+            # Every key served by the discarded log moves with it (aliasing B->C
+            # and then A->C must not leave B on a merged-away log, or a repeated
+            # alias would merge the logs back into each other): repeating an
+            # alias is then a no-op.
+            rebind = [k for k, v in self._logs.items() if new is not None and v is new] or [new_id]
             merged = new
             seen = self._seen_ids.setdefault(old_id, set())
             order = self._seen_order.setdefault(old_id, deque())
-            for event_id in self._seen_order.get(new_id, ()):
-                if event_id not in seen:
-                    seen.add(event_id)
-                    order.append(event_id)
+            for key in rebind:
+                for event_id in self._seen_order.get(key, ()):
+                    if event_id not in seen:
+                        seen.add(event_id)
+                        order.append(event_id)
             old_sdk = self._sdk_events.setdefault(old_id, {})
+            sdk_maps = {id(m): m for m in (self._sdk_events.get(k) for k in rebind) if m}
             successor_sdk = {
                 eid: (sdk, i)
-                for sdk, eids in self._sdk_events.get(new_id, {}).items()
+                for m in sdk_maps.values()
+                for sdk, eids in m.items()
                 for i, eid in enumerate(eids)
             }
             while len(order) > _SEEN_ID_CAP:
                 dropped = order.popleft()
                 seen.discard(dropped)
                 old_sdk.pop(dropped, None)
-            self._seen_ids[new_id] = seen
-            self._seen_order[new_id] = order
-            self._sdk_events[new_id] = old_sdk
+            for key in rebind:
+                self._logs[key] = old
+                self._seen_ids[key] = seen
+                self._seen_order[key] = order
+                self._sdk_events[key] = old_sdk
         if merged is not None:
             prior = merged.continuity_id
             # Cursor 0 on the successor means "after everything it had", which is
@@ -647,12 +656,17 @@ def merged_cursor(ids: dict[int, int], cursor: int) -> int:
 
 
 def translate_merged_cursor(prev: EventLog, current: EventLog, cursor: int) -> int | None:
-    """If ``prev`` was merged into ``current``, return ``cursor`` in the merged
-    numbering (see :func:`merged_cursor`); else None."""
-    follow = getattr(prev, "merged_into", None)
-    if follow is None or follow[0] is not current:
-        return None
-    return merged_cursor(follow[1], cursor)
+    """If ``prev`` was merged into ``current`` -- directly or through several
+    merges (C->B->A) -- return ``cursor`` in the merged numbering, translated at
+    each step (see :func:`merged_cursor`); else None. A merge cycle stops it."""
+    log, seen = prev, set()
+    while log is not current:
+        follow = getattr(log, "merged_into", None)
+        if follow is None or id(log) in seen:
+            return None
+        seen.add(id(log))
+        log, cursor = follow[0], merged_cursor(follow[1], cursor)
+    return None if log is prev else cursor
 
 
 class MergeFollowingLog:

@@ -285,3 +285,43 @@ def test_a_protocol_floor_is_checked_before_every_attempt_not_only_retries(monke
         _floor_send(monkeypatch, client, by_port)
     assert exc.value.status == 426
     assert not any(u.endswith("/messages") or "resolve" in u for u in calls)
+
+@pytest.mark.parametrize("detail, followed", [
+    ("the bridge daemon is draining; retry against the replacement", True),
+    ("service unavailable", False),  # any other 503 is the answer
+])
+def test_a_protocol_floor_follows_a_draining_daemons_refusal(monkeypatch, detail, followed):
+    """A retiring daemon refuses the POST outright with 503 "draining" (it was
+    never accepted): the send follows the replacement within the grace, after
+    re-probing the replacement's protocol. Other HTTP errors aren't retried."""
+    import time as _time
+
+    from agent_bridge import session_targeting_cli as stc
+    from agent_bridge.client import BridgeClientError
+
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    calls: list[tuple[str, str, str]] = []
+
+    class Client:
+        _base, _connect_grace = "http://old", 30.0
+
+        def _reresolve(self):
+            return "http://new"
+
+        def _request(self, method, path, *a, **k):
+            calls.append((self._base, method, path))
+            if path == "/health":
+                return {"protocol_version": 21}
+            if self._base == "http://old":
+                raise BridgeClientError(503, detail)
+            return {"ok": True}
+
+    client = Client()
+    stc._hold_protocol_floor(client, 21)
+    if not followed:
+        with pytest.raises(BridgeClientError):
+            client._request("POST", "/api/v1/live-sessions/s/messages")
+        assert [c for c in calls if c[2] != "/health"] == [("http://old", "POST", "/api/v1/live-sessions/s/messages")]
+        return
+    assert client._request("POST", "/api/v1/live-sessions/s/messages") == {"ok": True}
+    assert calls[-2:] == [("http://new", "GET", "/health"), ("http://new", "POST", "/api/v1/live-sessions/s/messages")]

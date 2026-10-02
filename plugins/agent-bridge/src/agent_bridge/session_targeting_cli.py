@@ -91,14 +91,21 @@ def _hold_protocol_floor(client: Any, floor: int) -> None:
                 # A reset mid-POST may have been delivered: never resend it.
                 if time.monotonic() >= deadline or ("reset" in str(exc) and method not in ("GET", "HEAD")):
                     raise
-            time.sleep(0.5)
-            base = resolve() if resolve else None
-            if base:
-                client._base = base.rstrip("/")
-            try:
-                version = int((request("GET", "/health") or {}).get("protocol_version") or 0)
-            except (BridgeConnectionError, TypeError, ValueError):
-                continue
+            # Retry only after the daemon that will receive it passed the floor;
+            # an unanswered probe is probed again (within the budget), never skipped.
+            while True:
+                time.sleep(0.5)
+                base = resolve() if resolve else None
+                if base:
+                    client._base = base.rstrip("/")
+                try:
+                    version = int((request("GET", "/health") or {}).get("protocol_version") or 0)
+                    break
+                except (BridgeConnectionError, TypeError, ValueError):
+                    if time.monotonic() >= deadline:
+                        raise BridgeConnectionError(
+                            f"the bridge daemon at {client._base} didn't answer a protocol check in time; "
+                            "the request was not retried") from None
             if version < floor:
                 raise BridgeClientError(426, f"the bridge daemon now at {client._base} predates protocol "
                                              f"{floor}; not retrying the request there")

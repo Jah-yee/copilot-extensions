@@ -702,14 +702,21 @@ def translate_reconnect_cursor(
     store: LiveEventStore, log: EventLog, continuity_id: str | None, after: int,
 ) -> int:
     """``after`` numbered on the log named ``continuity_id``, in ``log``'s numbering
-    when that log was since merged (possibly in steps) into ``log``; otherwise unchanged."""
+    when that log was since merged (possibly in steps) into ``log``. A cursor named
+    for a log this one never absorbed (e.g. one lost in a daemon restart, when the
+    merge map is empty) can't be translated, so the reader replays from 0 rather
+    than skip the new log's events up to the old cursor; no continuity: unchanged."""
+    if not continuity_id or continuity_id == log.continuity_id:
+        return after
     merged = store.merged_history()
     for _ in range(len(merged)):
-        if not continuity_id or continuity_id == log.continuity_id or continuity_id not in merged:
+        if continuity_id not in merged:
             break
         continuity_id, ids = merged[continuity_id]
         after = merged_cursor(ids, after)
-    return after
+        if continuity_id == log.continuity_id:
+            return after
+    return 0
 
 
 async def await_turn_reply(

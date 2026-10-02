@@ -885,6 +885,19 @@ def test_a_duplicate_before_the_predecessors_tail_keeps_exact_refs_and_safe_curs
     assert translate_reconnect_cursor(store, merged, succ_continuity, 1) == 2
 
 
+def test_a_cursor_on_a_log_this_one_never_absorbed_replays_from_the_start() -> None:
+    """After a daemon restart the merge map is empty: a reconnect naming the old
+    continuity must not skip the fresh log's events up to its old cursor."""
+    from agent_bridge.live_representation import LiveEventStore, translate_reconnect_cursor
+
+    store = LiveEventStore()
+    store.ingest("s", [{"type": "assistant.message", "id": "e1", "data": {"content": "x"}}])
+    log = store.get("s")
+    assert translate_reconnect_cursor(store, log, "a-log-from-before-the-restart", 40) == 0
+    assert translate_reconnect_cursor(store, log, log.continuity_id, 40) == 40
+    assert translate_reconnect_cursor(store, log, None, 40) == 40
+
+
 def test_detail_refs_map_exactly_or_are_left_for_validation() -> None:
     """Predecessor A(1), B(2); successor dup A(1), new C(2) -> merged A(1), B(2), C(3).
     An out-of-range event ref, or a span whose members are no longer one

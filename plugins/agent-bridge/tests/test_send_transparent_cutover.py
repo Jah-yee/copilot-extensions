@@ -207,6 +207,30 @@ def test_a_protocol_floor_still_retries_a_restart_that_keeps_the_protocol(monkey
     assert "Delivered to live session sess1" in capsys.readouterr().out
 
 
+def test_an_unanswered_protocol_check_is_retried_never_skipped(monkeypatch):
+    """After the refused POST the replacement's /health refuses too, then it
+    answers protocol 19: the POST must not have been retried in between."""
+    from agent_bridge.client import BridgeClientError
+
+    old_base, new_base = "http://127.0.0.1:57585", "http://127.0.0.1:47000"
+    client = BridgeClient(old_base, "tok", connect_grace=30.0, reresolve=lambda: new_base)
+    posted: list[str] = []
+    inner = _floor_daemon({old_base: [20], new_base: [19]}, posted)
+    probes = {"n": 0}
+
+    def by_port(req, timeout=None):
+        if req.full_url == f"{new_base}/health":
+            probes["n"] += 1
+            if probes["n"] == 1:
+                raise urllib.error.URLError(ConnectionRefusedError("still starting"))
+        return inner(req, timeout)
+
+    with pytest.raises(BridgeClientError) as exc:
+        _floor_send(monkeypatch, client, by_port)
+    assert exc.value.status == 426 and probes["n"] == 2
+    assert posted == [f"{old_base}/api/v1/live-sessions/sess1/messages"]
+
+
 def _expected_session_send(monkeypatch, resolved: dict, expected: str):
     from agent_bridge import session_targeting_cli as stc
 

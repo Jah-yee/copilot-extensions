@@ -17,6 +17,21 @@ class SessionLifecycleError(ValueError):
     """Raised when an asserted session transition names an unknown session."""
 
 
+def yielded_head_session(record: tracking.WorktreeRecord) -> str | None:
+    """The latest head when it yielded to a handoff no successor linked here.
+
+    ``resolved_head_session`` hides it so the next registration can claim head,
+    but until one does (e.g. the handoff was consumed from another checkout) it
+    is still the worktree's resumable session; without it a Resume starts a
+    blank session.
+    """
+    latest = record.replayed_head_transition
+    if latest is None or not latest.session_id:
+        return None
+    entry = record.session_entry(latest.session_id)
+    return latest.session_id if entry is not None and entry.state == "yielded" else None
+
+
 def _next_lifecycle_revision(
     record: tracking.WorktreeRecord,
     *session_ids: str,

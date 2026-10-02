@@ -354,6 +354,22 @@ def test_shell_git_pull_with_ff_only_substring_in_branch_name_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git pull --server-option='foo --ff-only' origin main",
+        "git pull origin main -- --ff-only",
+    ],
+)
+def test_shell_git_pull_with_ff_only_argument_text_denies(
+    tmp_path, anchor, command,
+):
+    gp = anchor[0]["path"]
+    d = guard.decide(_shell(command, gp), env={}, home=tmp_path,
+                     anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 def test_shell_git_commit_with_pull_ff_only_in_message_denies(
     tmp_path, anchor,
 ):

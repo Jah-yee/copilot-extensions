@@ -167,10 +167,6 @@ _GIT_TERMINAL_OPTIONS = frozenset({
 # independent copy of this list (different guard, different repo-delegation
 # reasoning) and is unaffected either way.
 #
-_GIT_FF_ONLY_FLAG = re.compile(
-    r"""(?:^|\s)["']?--ff-only["']?(?=\s|$)""", re.IGNORECASE,
-)
-
 # Leading benign prefixes to strip so a write verb after them is still seen at
 # "command position": env-assignments (``VAR=val``) and wrapper commands
 # (``sudo``, ``env``, ``nohup``, ...). Wrapper *flags* that take a separate arg
@@ -201,7 +197,7 @@ def _unquote_shell_token(token: str) -> str:
 
 def _git_invocation(
     seg: str, cwd: str,
-) -> tuple[str | None, list[tuple[str, str]], bool]:
+) -> tuple[str | None, list[str], list[tuple[str, str]], bool]:
     """Return the Git subcommand and resolved explicit repository targets.
 
     Git accepts global options before the subcommand. Parse only that prefix;
@@ -212,10 +208,10 @@ def _git_invocation(
     """
     tokens = [_unquote_shell_token(token) for token in _GIT_TOKEN.findall(seg)]
     if not tokens:
-        return None, [], False
+        return None, [], [], False
     first = tokens[0].lstrip("\"'")
     if first.lower() != "git":
-        return None, [], False
+        return None, [], [], False
 
     git_cwd = cwd
     targets: list[tuple[str, str]] = []
@@ -228,7 +224,7 @@ def _git_invocation(
             index += 1
             break
         if lower in _GIT_TERMINAL_OPTIONS:
-            return None, targets, has_repo_override
+            return None, [], targets, has_repo_override
         if token == "-C":
             has_repo_override = True
             if index + 1 < len(tokens):
@@ -284,10 +280,24 @@ def _git_invocation(
         if token.startswith("-"):
             index += 1
             continue
-        return lower, targets, has_repo_override
+        return lower, tokens[index + 1:], targets, has_repo_override
     if index < len(tokens):
-        return tokens[index].lower(), targets, has_repo_override
-    return None, targets, has_repo_override
+        return (
+            tokens[index].lower(),
+            tokens[index + 1:],
+            targets,
+            has_repo_override,
+        )
+    return None, [], targets, has_repo_override
+
+
+def _git_has_option(args: list[str], option: str) -> bool:
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg.lower() == option:
+            return True
+    return False
 
 
 # A command-position directory change (``cd``/``pushd``/``Set-Location``). An
@@ -611,8 +621,9 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         eff = _effective_seg(seg)
         at_write_cmd = bool(_WRITE_CMD_START.match(eff))
         is_git = bool(_GIT_START.match(eff))
-        subcmd, git_targets, has_repo_override = (
-            _git_invocation(eff, eff_cwd) if is_git else (None, [], False)
+        subcmd, git_args, git_targets, has_repo_override = (
+            _git_invocation(eff, eff_cwd)
+            if is_git else (None, [], [], False)
         )
         git_write = subcmd in _GIT_WRITE_SUBCOMMANDS
         # A ``pull`` invocation is exempt from ``git_write`` ONLY when its
@@ -621,7 +632,7 @@ def _shell_hit(cmd: str, cwd: str, anchors: list[dict]) -> dict | None:
         # segment also explicitly carries ``--ff-only``. Any other write-sub
         # verb (or a pull lacking that flag) is untouched.
         is_pull = subcmd == "pull"
-        if git_write and is_pull and _GIT_FF_ONLY_FLAG.search(seg):
+        if git_write and is_pull and _git_has_option(git_args, "--ff-only"):
             git_write = False
         for a in anchors:
             gp = a.get("path")

@@ -105,7 +105,7 @@
       "fixtures": [
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/health.json",
-          "sha256": "6daf935d8e4d69bfff5bb23fd2a3d48235eeb06882829bf98d1a391434ccc36d",
+          "sha256": "ee36065a5ecbf94751b995f46b9527b8620d45b5f59e4a06431d01568a79fc66",
           "role": "current health response",
           "generation": 20
         },
@@ -135,7 +135,7 @@
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/session-create-response.json",
-          "sha256": "f1565956b590640ce49c954230cb81ec8c0d44d329480ca7b9a8ca4e6a26a7db",
+          "sha256": "1f996e7e06cc628b7025b738f7891862e05ef1fedc227172a7fe3d719d63b535",
           "role": "current session-create response",
           "generation": 20
         },
@@ -165,7 +165,7 @@
         },
         {
           "path": "plugins/agent-bridge/contract/fixtures/http/current/protocol-constants.json",
-          "sha256": "208b1cb9c7e5cb73f32106d4d1019eea3cec1648da2436e8e8b037bf824ad245",
+          "sha256": "59f99cbda50edda77910652c819a71c45b6b3fabb150e3e583e73914e5ccb3b4",
           "role": "current HTTP range and capability constants",
           "generation": 20
         },
@@ -618,12 +618,28 @@
           "capture_method": "Re-attested for the generation-19 bump -- this file's own content is unchanged."
         },
         {
-          "commit": "200993679a64f1cdb4083cdfa688105369a464e6",
+          "commit": "fdd6ee8c9452297f7d9bdcdf27513d6880ea9d18",
           "plugin_version": "0.4.1-dev3",
           "generation": 20,
           "source_path": "plugins/agent-bridge/src/agent_bridge/routes/health.py",
           "source_git_blob": "366c8900d9b7823a48c1012ea754deeb2492b51d",
-          "capture_method": "Re-attested for HTTP generation 20 after adding the live-session alias forwarding capability; the health route source is unchanged and serializes the current protocol constant."
+          "capture_method": "Re-attested for HTTP generation 20 (live-session alias forwarding capability) from this exact source revision."
+        },
+        {
+          "commit": "fdd6ee8c9452297f7d9bdcdf27513d6880ea9d18",
+          "plugin_version": "0.4.1-dev3",
+          "generation": 20,
+          "source_path": "plugins/agent-bridge/src/agent_bridge/models.py",
+          "source_git_blob": "ca098768745ddfebc4e0cf8b5f0161c99091ac58",
+          "capture_method": "Re-attested for HTTP generation 20 (live-session alias forwarding capability) from this exact source revision."
+        },
+        {
+          "commit": "fdd6ee8c9452297f7d9bdcdf27513d6880ea9d18",
+          "plugin_version": "0.4.1-dev3",
+          "generation": 20,
+          "source_path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
+          "source_git_blob": "103448fec62ac935259e0bf8fdf3271ee373a9ad",
+          "capture_method": "Re-attested for HTTP generation 20 (live-session alias forwarding capability) from this exact source revision."
         }
       ],
       "support_window": "The daemon declares HTTP generations 1 through 19 supported; evidence currently exercises generations 9 through 19 (16 retained only via its own previous-generation health fixture, 17 and 18 likewise, not the current generation).",

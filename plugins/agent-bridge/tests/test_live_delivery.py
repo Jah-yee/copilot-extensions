@@ -683,7 +683,7 @@ def _rollover_client(tmp_db: Database):
     tmp_db.create_cli_mode_reservation("wt-R", now=time.time())
     c = TestClient(app)
     assert c.post("/api/v1/live-sessions", json={
-        "session_id": "placeholder", "worktree_id": "wt-R", "pid": 4242}).status_code == 200
+        "session_id": "placeholder", "worktree_id": "wt-R", "machine": "host-1", "pid": 4242}).status_code == 200
     return c, app.state.live_event_store
 
 
@@ -699,7 +699,7 @@ def test_one_represented_log_spans_a_session_id_change(tmp_db: Database) -> None
     _say(c, "placeholder", "before", "e1")
     waited_on = store.get("placeholder")  # what a waited send / open stream holds
     assert c.post("/api/v1/live-sessions", json={
-        "session_id": "resumed", "worktree_id": "wt-R", "pid": 4242}).status_code == 200
+        "session_id": "resumed", "worktree_id": "wt-R", "machine": "host-1", "pid": 4242}).status_code == 200
     _say(c, "resumed", "reply", "e2")
     _say(c, "placeholder", "late, via the old handle", "e3")
     assert store.get("resumed") is waited_on and store.get("placeholder") is waited_on
@@ -721,7 +721,7 @@ def test_a_mode_change_follows_a_session_id_change_while_waiting(
         if not state["rolled"]:
             state["rolled"] = True
             assert tmp_db.register_live_session(
-                "resumed", machine=None, cwd=None, worktree_id="wt-R", repo=None,
+                "resumed", machine="host-1", cwd=None, worktree_id="wt-R", repo=None,
                 branch=None, pid=4242, role=None, now=time.time()) == "live"
             if applied:
                 tmp_db.claim_live_controls("resumed", time.time(), 3600)

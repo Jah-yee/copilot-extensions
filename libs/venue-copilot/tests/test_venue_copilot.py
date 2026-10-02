@@ -800,6 +800,8 @@ class TestDetachedRunner:
             lambda scope, venue, **kw: {"reservation_id": "r1"},
         )
         monkeypatch.setattr("venue_copilot.detached.release_cli_mode", lambda *a, **k: 1)
+        # A real launch failure: the created session never registers.
+        monkeypatch.setattr("venue_copilot.detached.await_claim", lambda scope, rid, timeout: None)
 
         rc, payload = detached.launch_detached(
             adapter,
@@ -813,7 +815,7 @@ class TestDetachedRunner:
         )
 
         assert rc == 1
-        assert "seed was not submitted" in payload["error"]
+        assert "never registered" in payload["error"]  # the original error, not the keeper's
         assert "could not update the forward keeper" in capsys.readouterr().err
         assert any("tmux kill-session" in command for kind, command in adapter.calls if kind == "run")
 

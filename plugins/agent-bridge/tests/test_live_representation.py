@@ -579,6 +579,28 @@ def test_retarget_leaves_a_malformed_continuity_for_validation() -> None:
         assert retarget(token, merged) == token  # no TypeError -> the route's 4xx path
 
 
+def test_retarget_leaves_unsupported_token_versions_for_validation() -> None:
+    import base64
+    import json
+
+    import pytest
+
+    from agent_bridge.result_tokens import ResultTokenError, _decode_token, _TOKEN_PREFIX, retarget
+
+    merged = {"old-log": ("new-log", {1: 3})}
+    for version in (2, None):
+        payload = {"kind": "position", "source": "represented", "session_id": "s",
+                   "continuity": "old-log", "event_id": 1}
+        if version is not None:
+            payload["v"] = version
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        token = _TOKEN_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        assert retarget(token, merged) == token
+        with pytest.raises(ResultTokenError):
+            _decode_token(retarget(token, merged), source="represented", session_id="s",
+                          kinds=frozenset({"position"}))
+
+
 def test_a_waited_send_on_an_empty_successor_skips_the_predecessors_old_turn() -> None:
     import asyncio
 

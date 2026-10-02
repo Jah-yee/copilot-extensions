@@ -238,8 +238,8 @@ class _LiveSessionsMixin:
         """
         cur = self.execute_write(
             "UPDATE live_sessions SET latest_progress=?, updated_at=? "
-            "WHERE session_id=?",
-            (latest_progress, now, session_id),
+            f"WHERE session_id={_CANON}",  # alias-aware: a beat to a retired id still lands
+            (latest_progress, now, session_id, session_id),
         )
         return cur.rowcount > 0
 
@@ -591,8 +591,8 @@ class _LiveSessionsMixin:
         return [r["alias_session_id"] for r in rows]
 
     def get_live_session(self, session_id: str) -> dict[str, Any] | None:
-        resolved = self.resolve_live_session_id(session_id)
-        return self.get_live_session_exact(resolved)
+        sql = f"SELECT * FROM live_sessions WHERE session_id={_CANON}"  # alias + row: one read
+        return next((dict(r) for r in self.execute_read(sql, (session_id,) * 2)), None)
 
     def get_fresh_live_session(
         self,

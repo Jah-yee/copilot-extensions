@@ -1923,6 +1923,17 @@ def test_a_stale_interrupt_footer_above_a_shell_is_not_ready():
     assert pane_readiness.ready_signature("❯ \npress esc to interrupt\n") == "interrupt-footer"
 
 
+def test_an_attached_powershell_or_cmd_prompt_is_not_ready():
+    from agent_worktrees import pane_readiness
+
+    for prompt in ("PS C:\\repo>", "PS C:\\repo> ", "C:\\repo>", "PS /home/u>"):
+        assert pane_readiness.ready_signature(_BOXED_INPUT + prompt + "\n") is None, prompt
+        assert pane_readiness.ready_signature(
+            "press esc to interrupt\n" + prompt + "\n"
+        ) is None, prompt
+    assert pane_readiness.ready_signature("press esc to interrupt\n") == "interrupt-footer"
+
+
 def test_seed_readiness_never_outlasts_the_hard_cap():
     busy = [f" /work/repo   Session\n ◉ Resuming session... {i}\n" for i in range(500)]
     driver = _SeedDriver(ready_caps=busy, echo_caps=[])

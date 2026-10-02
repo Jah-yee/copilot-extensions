@@ -34,7 +34,11 @@ def is_busy(region: str) -> bool:
     return any(_BUSY_STATUS.match(line) for line in region.splitlines())
 
 
-_SHELL_TAIL = re.compile(r"[❯$#%]\s*$|(?:^|\s)>\s*$|\bexited\b", re.IGNORECASE)
+#: Shell prompts (incl. attached ``PS C:\repo>`` / ``C:\repo>``) and exit lines.
+_SHELL_TAIL = re.compile(
+    r"[❯$#%]\s*$|(?:^|\s)>\s*$|^\s*(?:PS\b[^>]*|[A-Za-z]:\\[^>]*)>\s*$|\bexited\b",
+    re.IGNORECASE,
+)
 #: Lines Copilot draws under its input box (the key-hint footer).
 _MAX_FOOTER_LINES = 2
 

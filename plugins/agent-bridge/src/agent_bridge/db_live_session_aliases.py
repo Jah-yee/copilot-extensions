@@ -11,7 +11,38 @@ CANONICAL_SESSION_SQL = (
     "WHERE alias_session_id = ?), ?)"
 )
 
+import json
 from typing import Any
+
+
+def _newer_turn(predecessor: Any, successor: Any) -> tuple[Any, Any]:
+    """The (turn_state, last_activity_at) pair with the latest activity; the
+    successor's when only it has one, the predecessor's when only it does."""
+    pred_at, succ_at = predecessor["last_activity_at"], successor["last_activity_at"]
+    if succ_at is None or (pred_at is not None and pred_at > succ_at):
+        if pred_at is not None or successor["turn_state"] is None:
+            return predecessor["turn_state"], pred_at
+    return successor["turn_state"], succ_at
+
+
+def _progress_ts(raw: Any) -> float | None:
+    try:
+        ts = json.loads(raw).get("ts") if raw else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return float(ts) if isinstance(ts, (int, float)) else None
+
+
+def _newer_progress(predecessor: Any, successor: Any) -> Any:
+    """The successor's latest_progress unless it has none or the
+    predecessor's is provably newer."""
+    pred, succ = predecessor["latest_progress"], successor["latest_progress"]
+    if succ is None:
+        return pred
+    pred_ts, succ_ts = _progress_ts(pred), _progress_ts(succ)
+    if pred_ts is not None and (succ_ts is None or pred_ts > succ_ts):
+        return pred
+    return succ
 
 
 def inherit_cli_mode_claim_for_session_id_change(
@@ -66,10 +97,13 @@ def inherit_cli_mode_claim_for_session_id_change(
             )
             # Same process, so it keeps its place in the worktree's registration
             # order: a newer process that superseded it stays current.
+            turn_state, last_activity_at = _newer_turn(predecessor, successor)
             conn.execute(
                 "UPDATE live_sessions SET cli_mode=1, venue=?, driven_by=?, "
-                "registered_at=?, updated_at=? WHERE session_id=?",
-                (venue, driven_by, predecessor["registered_at"], now, session_id),
+                "registered_at=?, updated_at=?, turn_state=?, last_activity_at=?, "
+                "latest_progress=? WHERE session_id=?",
+                (venue, driven_by, predecessor["registered_at"], now, turn_state,
+                 last_activity_at, _newer_progress(predecessor, successor), session_id),
             )
             conn.execute(
                 "INSERT INTO live_session_aliases "

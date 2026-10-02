@@ -146,7 +146,9 @@ def retarget(token: str | None, merged: dict[str, tuple[str, dict[int, int]]]) -
         value = json.loads(base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_"))
     except (binascii.Error, ValueError, TypeError, UnicodeDecodeError):
         return token
-    continuity_id = value.get("continuity") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or value.get("v") != 1:
+        return token  # unsupported/missing version: leave it for validation to reject
+    continuity_id = value.get("continuity")
     # Only a string can name a log; anything else (e.g. [] or {}) is left for
     # the routes' own token validation rather than raising TypeError here.
     target = merged.get(continuity_id) if isinstance(continuity_id, str) else None

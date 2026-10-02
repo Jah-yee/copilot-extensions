@@ -206,6 +206,62 @@ class TestClaimOnRegistration:
         assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
 
 
+    def test_idle_rollover_keeps_the_predecessors_observations(self, tmp_db: Database) -> None:
+        import json as _json
+
+        now = time.time()
+        tmp_db.create_cli_mode_reservation("anchor-example@cs-1", now=now)
+        _register(tmp_db, "placeholder", "anchor-example@cs-1", now + 1, pid=4242)
+        tmp_db.update_live_turn_state("placeholder", turn_state="idle", last_activity_at=now + 1.5)
+        progress = _json.dumps({"summary": "DONE", "ts": now + 1.6, "phase": "done"})
+        tmp_db.update_live_progress("placeholder", latest_progress=progress, now=now + 1.6)
+        # Idle predecessor, no later events: nothing will re-populate the successor.
+        _register(tmp_db, "resumed", "anchor-example@cs-1", now + 2, pid=4242)
+
+        row = tmp_db.get_live_session_exact("resumed")
+        assert row["turn_state"] == "idle"
+        assert row["last_activity_at"] == now + 1.5
+        assert row["latest_progress"] == progress
+
+    def test_rollover_keeps_the_successors_newer_observations(self, tmp_db: Database) -> None:
+        import json as _json
+
+        now = time.time()
+        tmp_db.create_cli_mode_reservation("anchor-example@cs-1", now=now)
+        _register(tmp_db, "placeholder", "anchor-example@cs-1", now + 1, pid=4242)
+        tmp_db.update_live_turn_state("placeholder", turn_state="idle", last_activity_at=now + 1.1)
+        old = _json.dumps({"summary": "old", "ts": now + 1.1})
+        tmp_db.update_live_progress("placeholder", latest_progress=old, now=now + 1.1)
+        # Registered before its PID resolved, so the rollover happens later.
+        _register(tmp_db, "resumed", "anchor-example@cs-1", now + 1.2, pid=None)
+        tmp_db.update_live_turn_state("resumed", turn_state="running", last_activity_at=now + 1.5)
+        new = _json.dumps({"summary": "new", "ts": now + 1.5})
+        tmp_db.update_live_progress("resumed", latest_progress=new, now=now + 1.5)
+        _register(tmp_db, "resumed", "anchor-example@cs-1", now + 2, pid=4242)  # PID resolved
+        assert tmp_db.get_live_session_exact("placeholder") is None
+        row = tmp_db.get_live_session_exact("resumed")
+        assert (row["turn_state"], row["last_activity_at"]) == ("running", now + 1.5)
+        assert row["latest_progress"] == new
+
+
+    def test_get_live_session_resolves_alias_and_row_in_one_read(self, tmp_db: Database) -> None:
+        now = time.time()
+        tmp_db.create_cli_mode_reservation("anchor-example@cs-1", now=now)
+        _register(tmp_db, "placeholder", "anchor-example@cs-1", now + 1, pid=4242)
+        _register(tmp_db, "resumed", "anchor-example@cs-1", now + 2, pid=4242)
+        reads = []
+        real = tmp_db.execute_read
+
+        def counting(sql, params=()):
+            reads.append(sql)
+            return real(sql, params)
+
+        tmp_db.execute_read = counting
+        # A rollover can't slip between alias resolution and the row fetch.
+        assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+        assert len(reads) == 1
+
+
 class TestClaimCliModeReservationDirect:
     def test_claim_succeeds_once(self, tmp_db: Database) -> None:
         now = time.time()

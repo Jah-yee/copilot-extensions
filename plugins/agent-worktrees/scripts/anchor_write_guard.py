@@ -144,7 +144,6 @@ _GIT_WRITE_SUBCOMMANDS = frozenset({
     "clean", "rm", "mv", "stash", "merge", "rebase", "pull", "cherry-pick",
     "revert", "init", "__configured-alias__",
 })
-_GIT_TOKEN = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
 _GIT_GLOBAL_LONG_OPTIONS_WITH_VALUE = frozenset({
     "--namespace", "--super-prefix",
 })
@@ -195,6 +194,47 @@ def _unquote_shell_token(token: str) -> str:
     return token
 
 
+def _git_tokens(seg: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    quote = None
+    index = 0
+    while index < len(seg):
+        char = seg[index]
+        if quote:
+            if char == quote:
+                quote = None
+            elif (
+                char == "\\"
+                and quote == '"'
+                and index + 1 < len(seg)
+                and seg[index + 1] in {'"', "\\"}
+            ):
+                current.append(seg[index + 1])
+                index += 1
+            else:
+                current.append(char)
+        elif char in {"'", '"'}:
+            quote = char
+        elif char.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+        elif (
+            char == "\\"
+            and index + 1 < len(seg)
+            and (seg[index + 1].isspace() or seg[index + 1] in {"'", '"', "\\"})
+        ):
+            current.append(seg[index + 1])
+            index += 1
+        else:
+            current.append(char)
+        index += 1
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def _git_config_alias_name(value: str) -> str | None:
     key, separator, _expansion = value.partition("=")
     if not separator or not key.lower().startswith("alias."):
@@ -214,7 +254,7 @@ def _git_invocation(
     value cannot be resolved, preserving the guard's existing fail-open behavior
     for variables.
     """
-    tokens = [_unquote_shell_token(token) for token in _GIT_TOKEN.findall(seg)]
+    tokens = _git_tokens(seg)
     if not tokens:
         return None, [], [], False
     first = tokens[0].lstrip("\"'")
@@ -223,7 +263,7 @@ def _git_invocation(
 
     git_cwd = cwd
     git_cwd_overridden = False
-    targets: list[tuple[str, str]] = []
+    targets: dict[str, str] = {}
     configured_aliases: set[str] = set()
     has_repo_override = False
     index = 1
@@ -234,7 +274,7 @@ def _git_invocation(
             index += 1
             break
         if lower in _GIT_TERMINAL_OPTIONS:
-            return None, [], targets, has_repo_override
+            return None, [], list(targets.items()), has_repo_override
         if token == "-C":
             has_repo_override = True
             if index + 1 < len(tokens):
@@ -270,7 +310,7 @@ def _git_invocation(
             if index + 1 < len(tokens):
                 value = tokens[index + 1]
                 if "$" not in value and "%" not in value:
-                    targets.append((lower[2:], _resolve(value, git_cwd)))
+                    targets[lower[2:]] = _resolve(value, git_cwd)
             index += 2
             continue
         matched_target = False
@@ -279,10 +319,16 @@ def _git_invocation(
                 has_repo_override = has_repo_override or option == "--git-dir"
                 value = _unquote_shell_token(token.split("=", 1)[1])
                 if value and "$" not in value and "%" not in value:
-                    targets.append((option[2:], _resolve(value, git_cwd)))
+                    targets[option[2:]] = _resolve(value, git_cwd)
                 matched_target = True
                 break
         if matched_target:
+            index += 1
+            continue
+        if lower.startswith("--config-env="):
+            alias = _git_config_alias_name(token.split("=", 1)[1])
+            if alias:
+                configured_aliases.add(alias)
             index += 1
             continue
         if lower.startswith("--exec-path="):
@@ -297,23 +343,25 @@ def _git_invocation(
         if token.startswith("-"):
             index += 1
             continue
+        resolved_targets = list(targets.items())
         if git_cwd_overridden:
-            targets.append(("work-tree", git_cwd))
+            resolved_targets.append(("cwd", git_cwd))
         subcommand = "__configured-alias__" if lower in configured_aliases else lower
-        return subcommand, tokens[index + 1:], targets, has_repo_override
+        return subcommand, tokens[index + 1:], resolved_targets, has_repo_override
     if index < len(tokens):
+        resolved_targets = list(targets.items())
         if git_cwd_overridden:
-            targets.append(("work-tree", git_cwd))
+            resolved_targets.append(("cwd", git_cwd))
         subcommand = tokens[index].lower()
         if subcommand in configured_aliases:
             subcommand = "__configured-alias__"
         return (
             subcommand,
             tokens[index + 1:],
-            targets,
+            resolved_targets,
             has_repo_override,
         )
-    return None, [], targets, has_repo_override
+    return None, [], list(targets.items()), has_repo_override
 
 
 def _git_effective_ff_mode(args: list[str]) -> str | None:

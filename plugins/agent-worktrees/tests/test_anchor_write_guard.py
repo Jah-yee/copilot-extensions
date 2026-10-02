@@ -270,6 +270,17 @@ def test_shell_git_command_local_alias_from_anchor_denies(
     assert d and d["permissionDecision"] == "deny"
 
 
+def test_shell_git_config_env_alias_from_anchor_denies(tmp_path, anchor):
+    gp = anchor[0]["path"]
+    command = (
+        "VALUE='commit -m example' "
+        f'git -C "{gp}" --config-env=alias.save=VALUE save'
+    )
+    d = guard.decide(_shell(command, tmp_path), env={},
+                     home=tmp_path, anchors=anchor)
+    assert d and d["permissionDecision"] == "deny"
+
+
 @pytest.mark.parametrize("dash_c", ["-C", "-C{}"])
 def test_shell_git_commit_with_dashC_forms_still_denies(
     tmp_path, anchor, dash_c,
@@ -286,6 +297,17 @@ def test_shell_git_commit_with_attached_quoted_dashC_denies(tmp_path, anchor):
     anchors = [*anchor, {"name": "spaced", "path": str(spaced)}]
     d = guard.decide(
         _shell(f'git -C"{spaced}" commit -m example', tmp_path),
+        env={}, home=tmp_path, anchors=anchors,
+    )
+    assert d and d["permissionDecision"] == "deny"
+
+
+def test_shell_git_commit_with_escaped_space_dashC_denies(tmp_path, anchor):
+    spaced = _main_checkout(tmp_path, "anchor with spaces")
+    escaped = str(spaced).replace(" ", "\\ ")
+    anchors = [*anchor, {"name": "spaced", "path": str(spaced)}]
+    d = guard.decide(
+        _shell(f"git -C {escaped} commit -m example", tmp_path),
         env={}, home=tmp_path, anchors=anchors,
     )
     assert d and d["permissionDecision"] == "deny"
@@ -326,6 +348,43 @@ def test_shell_git_dir_elsewhere_overrides_anchor_cwd(tmp_path, anchor):
         _shell(f'git --git-dir "{other / ".git"}" commit -m example', gp),
         env={}, home=tmp_path, anchors=anchor,
     ) is None
+
+
+@pytest.mark.parametrize("option", ["--git-dir", "--work-tree"])
+def test_shell_repeated_repository_target_uses_final_value(
+    tmp_path, anchor, option,
+):
+    other = _main_checkout(tmp_path, "other-repo")
+    gp = anchor[0]["path"]
+    anchor_target = f"{gp}/.git" if option == "--git-dir" else gp
+    other_target = f"{other}/.git" if option == "--git-dir" else str(other)
+    assert guard.decide(
+        _shell(
+            f'git {option} "{anchor_target}" {option} "{other_target}" '
+            "commit -m example",
+            tmp_path,
+        ),
+        env={}, home=tmp_path, anchors=anchor,
+    ) is None
+
+
+@pytest.mark.parametrize("option", ["--git-dir", "--work-tree"])
+def test_shell_repeated_repository_target_final_anchor_denies(
+    tmp_path, anchor, option,
+):
+    other = _main_checkout(tmp_path, "other-repo")
+    gp = anchor[0]["path"]
+    anchor_target = f"{gp}/.git" if option == "--git-dir" else gp
+    other_target = f"{other}/.git" if option == "--git-dir" else str(other)
+    d = guard.decide(
+        _shell(
+            f'git {option} "{other_target}" {option} "{anchor_target}" '
+            "commit -m example",
+            tmp_path,
+        ),
+        env={}, home=tmp_path, anchors=anchor,
+    )
+    assert d and d["permissionDecision"] == "deny"
 
 
 def test_shell_work_tree_elsewhere_keeps_anchor_repository_target(

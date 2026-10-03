@@ -24,9 +24,10 @@ Usage::
     python tools/run_tests_in_devcontainer.py --all -- -k some_filter
 
 Everything after the recognized flags below (or a literal ``--`` anywhere in
-the remaining arguments) is passed straight through to
-``tools/run-plugin-tests.py`` inside the container, so this wrapper's own
-CLI surface stays intentionally small.
+the remaining arguments) is passed through to ``tools/run-plugin-tests.py``
+inside the container, so this wrapper's own CLI surface stays intentionally
+small -- with one normalization: ``--base`` is rewritten to its resolved
+commit SHA (see `_rewrite_base_to_resolved_sha`).
 """
 
 from __future__ import annotations
@@ -394,18 +395,12 @@ def _canonicalize_flag(name: str) -> str:
     canonical name, honoring argparse's own unambiguous-prefix abbreviation
     support (e.g. ``--bas`` -> ``--base``, since no OTHER known
     `run-plugin-tests.py` flag also starts with ``--bas``) against
-    `_ALL_LONG_FLAGS` -- mirrors that parser's own matching rather than
-    guessing at a different one. Without this, an abbreviated ``--base``
-    (silently accepted by `run-plugin-tests.py`'s own argparse) would go
-    unrecognized here: `_resolve_base_ref` would keep the wrong
-    (`origin/main`) default instead of the ref actually in play, and
-    `_changed_mode_active` would misclassify the abbreviated flag's VALUE
-    token as a positional plugin name -- in combination, silently building
-    a snapshot against the wrong base AND disabling the fail-loud
-    unresolvable-base guard for it. Returns `name` unchanged when it isn't
-    a recognized abbreviation of exactly one known flag (ambiguous, a short
-    flag like ``-k``, or genuinely unknown) -- callers fall through to
-    their own existing unrecognized-flag handling in that case."""
+    `_ALL_LONG_FLAGS` -- mirrors that parser's own matching. Without this,
+    an abbreviated ``--base`` would go unrecognized here: `_resolve_base_ref`
+    would keep the wrong default, and `_changed_mode_active` would
+    misclassify its VALUE token as a positional plugin name. Returns `name`
+    unchanged when it isn't a recognized abbreviation of exactly one known
+    flag (ambiguous, a short flag like ``-k``, or unknown)."""
     if name in _ALL_LONG_FLAGS or not name.startswith("--") or len(name) <= 2:
         return name
     matches = [flag for flag in _ALL_LONG_FLAGS if flag.startswith(name)]
@@ -490,19 +485,35 @@ def _git_rev_parse(ref: str) -> str | None:
 def _rewrite_base_to_resolved_sha(passthrough: list[str]) -> list[str]:
     """Replace any ``--base`` value (bare, ``=value``, or an unambiguous
     abbreviation -- see `_canonicalize_flag`) in ``passthrough`` with its
-    resolved commit SHA, when it resolves on the host.
+    resolved commit SHA, when it resolves on the host -- APPENDING an
+    explicit ``--base <sha>`` instead when ``passthrough`` has no
+    ``--base`` token at all (`tools/run-plugin-tests.py`'s own implicit
+    default, ``origin/main``).
 
-    A REF-RELATIVE expression (e.g. ``origin/dev~1``) resolves fine on the
-    HOST, but ``--symbolic-full-name`` returns nothing useful for it, so a
-    bundle clone never gets the NAMED ref such an expression needs to
-    re-resolve the same way inside the container -- a bare SHA has no such
-    problem, since it resolves against any clone containing its object.
-    Leaves ``passthrough`` unchanged when ``--base`` doesn't resolve
-    locally (a separately-handled problem via `_materialized_git_dir`'s
-    own fail-loud guard) or isn't present."""
+    A bundle clone never preserves a remote-tracking ref
+    (``refs/remotes/...``) as a named ref, whether it's named directly
+    (the implicit default) or via a ref-relative expression (e.g.
+    ``origin/dev~1``) -- EITHER resolves fine on the host but leaves the
+    in-container command with no working named ref to resolve against. A
+    bare SHA has no such problem. Without the append case, the single MOST
+    COMMON invocation (no ``--all``, no plugin names, no explicit
+    ``--base``) would have nothing to rewrite and silently run no suites.
+    Leaves ``passthrough`` unchanged when the resolved base doesn't
+    resolve locally at all (a separately-handled problem via
+    `_materialized_git_dir`'s own fail-loud guard)."""
     resolved_sha = _git_rev_parse(_resolve_base_ref(passthrough))
     if resolved_sha is None:
         return passthrough
+    has_base_flag = any(
+        _canonicalize_flag(arg.partition("=")[0]) == "--base" for arg in passthrough
+    )
+    if not has_base_flag:
+        # Only append when changed-selection is actually active -- an
+        # `--all` run or an explicit plugin name never consults `--base`
+        # at all, so adding it there would be noise with no effect.
+        if not _changed_mode_active(passthrough):
+            return passthrough
+        return [*passthrough, "--base", resolved_sha]
     rewritten: list[str] = []
     skip_next = False
     for arg in passthrough:
@@ -551,27 +562,21 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     --changed`` will actually diff against, then ``git clone --bare`` that
     bundle into a fresh directory -- the clone contains exactly the commits
     reachable from those two tips, nothing else. ``main`` rewrites
-    `--base`'s own passthrough VALUE to this same resolved commit's SHA
+    ``--base``'s own passthrough VALUE to this same resolved commit's SHA
     before the in-container command is assembled (see
-    `_rewrite_base_to_resolved_sha`), so the bundle clone needs no NAMED
-    ref for it at all -- a bare SHA resolves against any clone containing
-    its object, regardless of which (if any) named ref also points at it.
-    The index is then rebuilt from
-    ``HEAD`` itself (``git read-tree HEAD``) rather than copied from the
-    host: the host's real index can reference a staged blob that is
-    genuinely unreachable from both ``HEAD`` and the base ref (a staged-
-    but-uncommitted new/modified file), which the bundle would then be
-    missing entirely -- a copied index pointing at a missing object breaks
-    `git diff`/`status` outright. Rebuilding from `HEAD` instead means
-    staging state isn't preserved as "staged" inside the container, but
-    every modification (staged or not) is still visible as an ordinary
-    working-tree difference, since the modified file's actual CURRENT
-    on-disk content is what `_tracked_paths` copies in regardless. As with
-    every materialized copy, ``config`` is replaced with a fresh,
-    credential-free one (see ``_MINIMAL_GIT_CONFIG``) and ``hooks`` is
-    dropped entirely, since neither is needed for `diff`/`status`/
-    `rev-parse` and either could carry credential-bearing or otherwise
-    sensitive content."""
+    `_rewrite_base_to_resolved_sha`), so the bundle clone needs no named
+    ref for it at all. The index is rebuilt from ``HEAD`` itself (``git
+    read-tree HEAD``) rather than copied from the host: the host's real
+    index can reference a staged blob unreachable from both ``HEAD`` and
+    the base ref (a staged-but-uncommitted change), which the bundle would
+    then be missing entirely -- a copied index pointing at a missing
+    object breaks `git diff`/`status` outright. Rebuilding from `HEAD`
+    means staging state isn't preserved as "staged" inside the container,
+    but every modification is still visible as an ordinary working-tree
+    difference, since `_tracked_paths` copies in the file's actual CURRENT
+    on-disk content regardless. As with every materialized copy, ``config``
+    is replaced with a fresh, credential-free one (``_MINIMAL_GIT_CONFIG``)
+    and ``hooks`` is dropped entirely."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="devcontainer-test-isolation-git-"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
     bundle_file = tmp_dir / "snapshot.bundle"
@@ -694,29 +699,20 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     container's workspace VOLUME (never a host bind -- see
     ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
 
-    A freshly created Docker volume is root-owned, so the non-root
-    ``vscode`` remote user can't write into it yet -- a one-off root
-    ``chmod`` opens up the empty volume's PERMISSION bits first (root
-    remains the OWNER; `chmod` on the directory entry itself below would
-    still fail, since `chmod` needs ownership, not just write access, and
-    `--cap-drop=ALL` means even root can't `chown`). Extraction then runs
-    AS ``vscode``, not root, so the checkout (including ``.git``) ends up
-    natively ``vscode``-owned -- which matters beyond writability: modern
-    Git's "dubious ownership" check inspects the WORKING TREE ROOT's
-    owner, and `CONTAINER_WORKSPACE`'s own directory ENTRY (the volume's
-    mountpoint) stays root-owned regardless for the container's whole
-    lifetime, so `.devcontainer/devcontainer.json`'s own
-    ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_0``/``GIT_CONFIG_VALUE_0``
-    ``containerEnv`` entries carry a `safe.directory` exemption for this
-    exact path -- the sanctioned way around that check without a
-    repo-local (untrusted-input-controllable) config file.
+    A freshly created Docker volume is root-owned, so a one-off root
+    ``chmod`` opens up its empty PERMISSION bits first (root remains the
+    OWNER; `--cap-drop=ALL` means even root can't `chown`). Extraction then
+    runs AS ``vscode``, not root, so the checkout ends up natively
+    ``vscode``-owned -- matters beyond writability, since modern Git's
+    "dubious ownership" check inspects the working-tree ROOT's owner, and
+    `CONTAINER_WORKSPACE`'s own mountpoint stays root-owned regardless for
+    the container's whole lifetime; `.devcontainer/devcontainer.json`'s own
+    `safe.directory` `containerEnv` exemption covers that residual gap.
 
     The final permission-opening pass only targets regular files and
     directories, never a symlink: `chmod` on a symlink PATH dereferences
-    it, so it would either fail outright on an intentionally preserved
-    dangling symlink, or silently chmod whatever a LIVE symlink points at
-    -- possibly outside the workspace volume for an absolute/``..``-
-    escaping target.
+    it, which would either fail on a dangling symlink or chmod whatever a
+    LIVE symlink points at, possibly outside the workspace volume.
     """
     chmod_root = subprocess.run(
         ["docker", "exec", "-u", "root", container_id,
@@ -872,28 +868,40 @@ def _sigterm_deferred():
     """Defer both `_CLEANUP_DEFERRED_SIGNALS` for a cleanup step
     (``_tear_down``/``_cleanup_orphan``): RECORD receipt instead of acting
     immediately, restore the previous handlers once cleanup finishes, then
-    raise `_TerminationRequested` if one was recorded. Plain
-    ``signal.SIG_IGN`` would DISCARD a signal outright rather than defer
-    it -- for the ordinary (non-exceptional) teardown path specifically, a
-    cancellation arriving in that window would be silently swallowed and
-    `main` would return 0, misreporting a cancelled run as successful.
-    Record-and-replay keeps cleanup uninterrupted while never dropping the
-    cancellation itself. Kept under its original ``SIGTERM``-only name for
-    continuity across this PR's own review history."""
+    raise `_TerminationRequested` if one was recorded AND no primary
+    failure is already in flight. Plain ``signal.SIG_IGN`` would DISCARD a
+    signal outright (not defer it) -- for the ordinary (non-exceptional)
+    teardown path, that would let `main` silently return 0 for a cancelled
+    run. Replaying unconditionally has its own failure mode: it could
+    REPLACE a genuine primary failure already propagating (a raised
+    exception the caller is mid-handling, or the startup failure
+    `_cleanup_orphan`'s own caller is about to re-`raise`) -- exactly the
+    masking this wrapper's teardown logic elsewhere exists to prevent.
+    ``sys.exc_info()`` at entry already reflects any such in-flight
+    exception (set by Python for the whole dynamic extent of the handling
+    ``except``/``finally``, including nested calls), so no extra signaling
+    from callers is needed. Kept under its original ``SIGTERM``-only name
+    for continuity across this PR's own review history."""
     received: list[int] = []
     previous = {
         sig: signal.signal(sig, lambda signum, frame: received.append(signum))
         for sig in _CLEANUP_DEFERRED_SIGNALS
     }
+    primary_exception_in_flight = sys.exc_info()[0] is not None
     try:
         yield
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-        if received:
-            raise _TerminationRequested(
-                f"received signal {received[0]} during cleanup"
+        if received and primary_exception_in_flight:
+            print(
+                f"warning: received signal {received[0]} during cleanup, "
+                "but a primary failure is already in flight -- not "
+                "replacing it; the signal itself is not re-raised",
+                file=sys.stderr,
             )
+        elif received:
+            raise _TerminationRequested(f"received signal {received[0]} during cleanup")
 
 
 def main(argv: list[str] | None = None) -> int:

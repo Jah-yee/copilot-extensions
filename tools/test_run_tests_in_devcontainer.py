@@ -255,6 +255,28 @@ def test_rewrite_base_to_resolved_sha_leaves_passthrough_unchanged_when_base_abs
     assert wrapper._rewrite_base_to_resolved_sha(original) == original
 
 
+def test_rewrite_base_to_resolved_sha_appends_base_when_absent_and_changed_mode_active(monkeypatch) -> None:
+    # The exact regression this closes: the single MOST COMMON invocation
+    # (no --all, no plugin names, no explicit --base) has no --base TOKEN
+    # at all to rewrite -- without appending one explicitly, the
+    # in-container command would fall back to run-plugin-tests.py's own
+    # implicit default (origin/main), a remote-tracking ref the bundle
+    # clone does not preserve as a named ref, silently running no suites.
+    monkeypatch.setattr(wrapper, "_git_rev_parse", lambda ref: "deadbeef" * 5)
+    assert wrapper._rewrite_base_to_resolved_sha([]) == ["--base", "deadbeef" * 5]
+    assert wrapper._rewrite_base_to_resolved_sha(["--changed"]) == [
+        "--changed", "--base", "deadbeef" * 5
+    ]
+
+
+def test_rewrite_base_to_resolved_sha_does_not_append_base_when_not_changed_mode(monkeypatch) -> None:
+    # An --all run or an explicit plugin name never consults --base at
+    # all, so appending it there would be pointless noise.
+    monkeypatch.setattr(wrapper, "_git_rev_parse", lambda ref: "deadbeef" * 5)
+    assert wrapper._rewrite_base_to_resolved_sha(["--all"]) == ["--all"]
+    assert wrapper._rewrite_base_to_resolved_sha(["agent-worktrees"]) == ["agent-worktrees"]
+
+
 def test_changed_mode_active_by_default_with_no_args() -> None:
     # Mirrors run-plugin-tests.py's own `else: targets =
     # changed_plugins(args.base)` fallback -- no --all, no plugin names.
@@ -1102,6 +1124,37 @@ def test_sigterm_deferred_replays_a_signal_received_during_cleanup() -> None:
         signal.signal(signal.SIGINT, previous_sigint)
 
 
+def test_sigterm_deferred_does_not_mask_a_primary_exception_already_in_flight(capsys) -> None:
+    # Replaying a deferred signal UNCONDITIONALLY would let it REPLACE a
+    # genuine primary failure already propagating when `_sigterm_deferred`
+    # is entered -- exactly the masking this wrapper's teardown logic
+    # elsewhere exists to prevent. The signal must be reported (not
+    # silently dropped), but the ORIGINAL exception must win.
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    try:
+        try:
+            raise ValueError("original primary failure")
+        except ValueError:
+            with wrapper._sigterm_deferred():
+                # Simulate a signal arriving mid-cleanup while an
+                # exception is already being handled.
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            raise  # re-raise the original ValueError, as main() itself does
+    except ValueError as exc:
+        assert str(exc) == "original primary failure"
+    except wrapper._TerminationRequested:
+        raise AssertionError(
+            "the deferred signal must not replace the original exception"
+        )
+    else:
+        raise AssertionError("expected the original ValueError to propagate")
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    assert "signal" in capsys.readouterr().err.lower()
+
+
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:
     calls: list[list[str]] = []
 
@@ -1114,6 +1167,9 @@ def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) 
                          lambda container_id, config_path, passthrough: calls.append(passthrough) or 0)
     monkeypatch.setattr(wrapper, "_tear_down", lambda container_id, volume_name: None)
     monkeypatch.setattr(wrapper.shutil, "rmtree", lambda path, ignore_errors=False: None)
+    # This test is about `--` stripping specifically -- base-rewriting has
+    # its own dedicated tests, so keep it a no-op here.
+    monkeypatch.setattr(wrapper, "_rewrite_base_to_resolved_sha", lambda passthrough: passthrough)
 
     rc = wrapper.main(["--", "--changed"])
     assert rc == 0

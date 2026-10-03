@@ -333,7 +333,10 @@ verbatim ask.
       brings the container up, populates its workspace volume, then
       invokes `tools/run-plugin-tests.py` *inside* the container via
       `devcontainer exec` and passes through every one of that runner's own
-      flags unmodified (`--changed`, `--all`, `-k`, etc.) -- so the
+      flags (`--changed`, `--all`, `-k`, etc.) semantically unchanged --
+      with one deliberate normalization, a resolvable `--base` is rewritten
+      to its resolved commit SHA before the in-container invocation is
+      assembled (see `TESTING.md` for why) -- so the
       container adds a real OS-level boundary strictly on top of (never
       instead of, never duplicating) the turn-key runner's existing
       process-level containment. Validated end-to-end against a real
@@ -1261,3 +1264,53 @@ docs-only-in-effect edit) still passes; a fresh Docker-backed end-to-end
 run (`ai-attribution`, 98 passed / 6 skipped) confirms the common case
 still works; Docker cleanup and host `git status --short` reconfirmed
 clean.
+
+### 2026-10-03 — Review round 15 (final iteration): 2 findings addressed (append base for the default invocation, prevent signal from masking a primary failure)
+A ninth review pass of the same round confirmed the module-size fix
+resolved, and raised two more. HIGH: when changed-selection relies on
+`run-plugin-tests.py`'s own IMPLICIT default (`origin/main` -- no
+`--all`, no plugin names, no explicit `--base`), there is no `--base`
+TOKEN in `passthrough` at all for `_rewrite_base_to_resolved_sha` to
+rewrite -- so the single MOST COMMON invocation
+(`python tools/run_tests_in_devcontainer.py` with no arguments) still
+asked the in-container command for the bare `origin/main`, a remote-
+tracking ref the bundle clone does not preserve as a named ref (the same
+fact the ref-relative-expression fix earlier in this round relies on),
+silently running no suites. Fixed by APPENDING an explicit resolved
+`--base <sha>` when changed-selection is active and the caller omitted
+the flag entirely (gated on `_changed_mode_active` so an `--all` run or
+an explicit plugin name, which never consult `--base`, aren't given
+pointless noise). MEDIUM (previously missed, against code from the prior
+iteration): `_sigterm_deferred` replayed a recorded signal
+UNCONDITIONALLY, which could REPLACE a genuine primary failure already
+propagating when the context is entered -- e.g. a real `_tear_down`
+exception, or the startup-failure branch's pending `raise` after
+`_cleanup_orphan` -- exactly the masking this wrapper's own teardown
+logic elsewhere exists to prevent. Fixed by checking
+`sys.exc_info()` at entry (which already reflects any in-flight
+exception for the whole dynamic extent of its handling `except`/
+`finally`) and only replaying when nothing is in flight; when something
+is, the signal is reported via a stderr warning instead of silently
+dropped, but the original failure wins. Also fixed four LOW doc findings
+(`CLI` description, effort README plan item, `TESTING.md`) that
+described `--base` passthrough as unmodified, when it's deliberately
+rewritten.
+
+CI's `guards + lint` job also hit the SAME module-size cap this round's
+additional docstrings had grown past again (1033 lines) -- condensed
+several docstrings a second time (`_sigterm_deferred`,
+`_rewrite_base_to_resolved_sha`, `_materialized_git_dir`,
+`_populate_workspace`, `_canonicalize_flag`, the module's own usage
+docstring) down to 990 lines, comfortable margin under the cap.
+
+Re-validated end-to-end: the full unit test suite (78 tests, including 3
+new `_rewrite_base_to_resolved_sha` append-case tests and a new
+`_sigterm_deferred` masking-prevention test, plus one existing `main`
+test updated to mock out base-rewriting since it's about `--` stripping
+specifically) passes; `check-module-size.py --changed-since origin/dev`
+passes; a fresh Docker-backed end-to-end run (`ai-attribution`, 98
+passed / 6 skipped) confirms the common case still works; and a direct
+check confirmed a genuinely bare invocation (`_rewrite_base_to_resolved_sha([])`)
+now appends an explicit resolved `--base <sha>` rather than leaving no
+base token at all. Docker cleanup and host `git status --short`
+reconfirmed clean of anything beyond this round's own diff.

@@ -303,10 +303,11 @@ changefiles and auto-bumps."
    The existing mutable `dev`-slot editable-install path is explicitly
    **excluded** and keeps installing straight from the worktree exactly as
    today. Every numbered runtime slot stays immutable: a numbered-install
-   preview build mints a content-distinct identity (a hash-derived build
-   suffix on the computed version), so two builds with different content
-   never collide on one slot even if their computed base version matches —
-   only a byte-identical rebuild may reuse its own slot.
+   preview build mints a content-distinct identity, so two builds with
+   different content never collide on one slot even if their computed base
+   version matches — only a byte-identical rebuild may reuse its own slot.
+   The exact identity scheme is deferred to implementation (see the Plan
+   item above and the precedence-safety requirement it carries).
 
 ## Validation Plan
 
@@ -366,14 +367,17 @@ changefiles and auto-bumps."
 - [ ] The install contract's recorded source identity (commit/branch/
       dirty-state provenance) after a preview-routed numbered install still
       reflects the originating checkout, not `preview_release.py`'s scratch
-      tree path — and the persisted `source.path`/payload-dir the install
-      contract actually points at is itself the originating checkout's
-      durable location, not the preview's temporary directory, since those
-      paths are later dereferenced for runtime operations and
-      self-provisioning (e.g. `loop_governance.py:69-78`,
-      `agent-bridge/scripts/install.sh:1307-1319`). Validate the persisted
-      payload location directly, not just the recorded commit/branch/dirty
-      fields.
+      tree path. The two are deliberately NOT the same field: `source.path`/
+      provenance records the originating checkout for traceability, while
+      `payload-dir` — what the self-provisioning binstub actually
+      dereferences and installs from (e.g. `loop_governance.py:69-78`,
+      `agent-bridge/scripts/install.sh:1307-1319`) — must point at a
+      **durable, persisted copy of the generated preview snapshot** (not a
+      scratch/temp directory that may be cleaned up, and never back at the
+      raw originating checkout, which would rerun the unrewritten `"0.0.0"`
+      installer and silently bypass the preview's materialized content).
+      Validate both: provenance names the originating checkout, and
+      `payload-dir` resolves to the persisted preview snapshot.
 - [ ] Two numbered-install preview builds with the SAME computed base
       version but DIFFERENT content (e.g. two dirty checkouts sharing a
       pending changefile set) mint two distinct numbered slots, never

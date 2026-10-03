@@ -5526,6 +5526,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_cli.add_parsers(sub)
     services_cli.add_parsers(sub)
     repos_cli.add_parsers(sub)
+    identifier_blocklist_cli.add_parsers(sub)
     copilot_identity_cli.add_parsers(sub)
     related_cli.add_parsers(sub)
     git_cli.add_parsers(sub)
@@ -5818,7 +5819,7 @@ _ALL_KNOWN_VERBS: frozenset[str] = frozenset(_LAZY_DISPATCH_TABLE.keys()) | froz
     "coordination-readiness", "config-root", "knowledge", "git",
     "pr-watch", "pr-merge", "pr-research", "pr",
     "activity", "activity-log", "register-launch", "stage-update", "reconcile-marketplaces",
-    "execution-leg", "copilot", "resolve", "handoff-trace",
+    "execution-leg", "copilot", "resolve", "handoff-trace", "identifiers",
 })
 
 
@@ -5974,7 +5975,7 @@ def _load_full_command_surface() -> None:
     global _restart_status_monitor, _restore_before_resume, _revalidate_cleanup_safety, _run_backfill, _run_machine_menu, _run_new_picker, _run_picker_housekeeping, _run_reciprocal_backfill
     global _run_system_menu, _runtime_superseded, _self_entry_present, _session_role, _slot_superseded, _slugify, _spawn_detached, _spawn_status_updater
     global _start_picker_monitor_root, _status_monitor_enabled, _status_segment_json, _succession_header, _sweep_orphans_on_exit, _sync_one_record, _system_cleanup, _system_pause
-    global _system_status, _system_update, _system_worktrees_browse, _tracked_pr_head_evidence, _try_machine_handoff, _uninstall_one_plugin_payload, _update_flags
+    global _system_status, _system_update, _system_worktrees_browse, _tracked_pr_head_evidence, _tracked_pr_pushed_head, _try_machine_handoff, _uninstall_one_plugin_payload, _update_flags
     global _update_modules, _update_one_plugin_payload, _update_registered_plugins, _valid_monitor_session, _validate_machine_registry, _validate_profile_assignment_config, _warm_list_cache_for_active_project, _windowless_python
     global auto_clean_enabled, claims_cli, cleanup_gc_cli, cmd_accounts_dispatch, cmd_anchor_check, cmd_attribution_audit, cmd_backfill_sessions, cmd_bind_nudge
     global cmd_bind_session, cmd_claimant_liveness, cmd_claims, cmd_cleanup, cmd_codename_lookup, cmd_conclude_disposable, cmd_conclude_session, cmd_config_migrate
@@ -5993,6 +5994,7 @@ def _load_full_command_surface() -> None:
     global cmd_worktree_lineage, cmd_worktree_status_bundle, context_cli, copilot_cli, copilot_identity_cli, finalize_cli, finalize_one, follow_ups_cli, front_door_cli, git_cli
     global handoff_cli, handoff_diagnostics, handoff_successor_repair_cli, installation_cli, list_cli, maintenance_cli, doctor_render, picker_profiles_cli, plan_pre_launch, pr_cli
     global pr_state_cli, reap_cli, reap_orphan_launcher_shells, reclaim_cli, reclaim_one, related_cli, repos_cli, resolve_cli
+    global identifier_blocklist_cli
     global resolve_launch_cli, resolve_machine_cli, resolve_picker_cli, resolve_system_cli, services_cli, session_binding_cli, session_inspection_cli, session_metadata_cli
     global session_tracking_cli, status_bar_cli, status_cli, status_monitor_cli, status_monitor_runtime, status_updater_cli, sweep_finished_session_worktrees
     global sweep_managed_worktrees
@@ -6028,6 +6030,7 @@ def _load_full_command_surface() -> None:
         resolve_picker_cli,
         resolve_system_cli,
         repos_cli,
+        identifier_blocklist_cli,
         session_binding_cli,
         session_inspection_cli,
         services_cli,
@@ -6047,6 +6050,7 @@ def _load_full_command_surface() -> None:
     _pr_watch_usage = pr_cli._pr_watch_usage
     _pr_parse_repo = pr_cli._pr_parse_repo
     _tracked_pr_head_evidence = pr_cli._tracked_pr_head_evidence
+    _tracked_pr_pushed_head = pr_cli._tracked_pr_pushed_head
     _classify_pr_operands = pr_cli._classify_pr_operands
     _pr_watch_review_blocking = pr_cli._pr_watch_review_blocking
     cmd_pr_watch_dispatch = pr_cli.cmd_pr_watch_dispatch
@@ -6819,6 +6823,16 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             return repos_cli.cmd_repos_dispatch(args_list[1:])
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 130
+
+    # Identifiers (cross-repo identifier-blocklist sweep) -- manual dispatch.
+    if args_list[0] == "identifiers":
+        from . import identifier_blocklist_cli
+
+        try:
+            return identifier_blocklist_cli.cmd_identifiers_dispatch(args_list[1:])
         except KeyboardInterrupt:
             print("\nCancelled.")
             return 130

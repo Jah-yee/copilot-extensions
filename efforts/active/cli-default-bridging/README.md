@@ -204,12 +204,39 @@ and ordering before Phase 0 work begins.)_
 
 ### Phase 1 — User-global remote-driver extension
 
-- [ ] Design a standalone, marketplace-installable extension distinct from
+- [x] Design a standalone, marketplace-installable extension distinct from
       `extensions/agent-bridge/extension.mjs` — installed once per
       machine/image, not per-repo/per-worktree, giving baseline drivability
       (attach to the live event stream, send/steer, abort) to any `copilot`
       process that launches with it present, independent of whether
       agent-bridge itself is installed.
+      **Done** — `plugins/agent-remote-driver/` (`defaultEnabled: false`
+      pending validation). Design: the extension is entirely self-contained
+      — no dependency on an agent-bridge daemon, registry, or protocol. On
+      join it starts its own loopback-only, bearer-token-authenticated HTTP
+      server (`driver-server.mjs`: `GET /health`, `GET /events` as SSE,
+      `POST /send`, `POST /steer`, `POST /abort`) and writes a per-session
+      discovery descriptor to `~/.copilot/remote-driver/sessions/<id>.json`
+      (`discovery.mjs`) that any external process — agent-bridge, a bare
+      script, a human's curl — can read to find and drive it. Event
+      forwarding follows the same hot-potato discipline as agent-bridge's
+      own extension (bounded in-memory queue, decoupled flush timer) but
+      forwards the full event stream rather than a curated whitelist, since
+      a driving consumer needs more than a representation subset. For
+      **launch-time presence** (the vision's load-bearing requirement): a
+      local machine/Dev Box enables it in the **user-global**
+      `~/.copilot/settings.json`; a CodeSpace/container gets it via the
+      already-existing `codespacePlugins`/venue-injection seam documented in
+      `docs/patterns/codespace-repo-provenance.md` — no new install
+      mechanism was invented, this effort reuses what `agent-codespaces`
+      already provides. `driver-server.mjs` and `discovery.mjs` are
+      deliberately decoupled from `@github/copilot-sdk` so they are directly
+      unit-testable (16 passing `node --test` cases) without the real SDK;
+      `extension.mjs` is the thin SDK-coupled glue. Explicitly out of scope
+      here (named, not silently absent): driver-exclusivity arbitration
+      (Phase 2) and the blocked-interaction escalation ladder (Phase 3) — the
+      README documents both gaps rather than implying this extension closes
+      them.
 - [ ] Scaffold and install it on at least one local machine, one CodeSpace,
       and one container, proving launch-time presence without an
       agent-worktrees or agent-bridge install in the venue itself.
@@ -218,6 +245,33 @@ and ordering before Phase 0 work begins.)_
       machine is a now-reachable fifth venue candidate alongside the four
       named validation tracks; fold it into "a local machine" or add it
       explicitly when scoping this item.)
+      **Container done** (clean-room, this session):
+      `tools/clean-room/scenarios/agent-remote-driver-solo/` drives a real
+      live `copilot` session end-to-end in a disposable, fresh-machine
+      container with ONLY this plugin installed (no agent-worktrees/
+      agent-bridge) — **10/10 PASS** (final, post-review-fix result;
+      genuinely Tier P, zero AI credits — see Journal): discovery
+      descriptor written, `/health`, `/events` (SSE, verified via the
+      server's own initial `: connected` marker), and `/send` all answer
+      over loopback with the descriptor's bearer token (never persisted
+      unredacted), `bin/list-sessions.mjs --json` lists the live session,
+      and a SIGTERM to the extension's own process cleanly removes the
+      descriptor (`installSignalCleanup`). A real pre-promotion gap
+      surfaced and was fixed by this validation (not papered over): the CLI
+      silently never launches ANY SDK extension
+      without `"experimental": true` in `~/.copilot/settings.json` (an
+      ambient, suite-wide requirement already documented for other
+      extension-bearing plugins, e.g. `agent-worktrees`' own
+      `copilot-extensions-setup` skill) — this plugin's own README never
+      said so. Fixed in `plugins/agent-remote-driver/README.md`'s *Install*
+      and troubleshooting sections. **Still open: local machine (bare host,
+      non-container) and a CodeSpace venue.** The container run is a
+      genuine, harder-than-average proof of the plugin's own standalone
+      claim, but it is not itself a substitute for the other two named
+      venues — a disposable Docker container is not "a local machine," and
+      `agent-codespaces`' `codespacePlugins` injection seam is untested
+      here. Left as the remaining items before this checklist entry fully
+      closes.
 
 ### Phase 2 — Driver exclusivity arbitration for mux-hosted sessions
 
@@ -338,3 +392,340 @@ Before binding effort-focus and starting Phase 1 execution, the
 `## Participants`/`## Coordination` tables still need a real participant and
 host named (not a placeholder) — `effort-focus bind` refuses while they're
 unfilled. Flagged to the operator rather than invented.
+
+### 2026-10-02 — Phase 1 (design + initial implementation)
+
+Landed the Phase 1 design decision as working code rather than a prose-only
+design doc: `plugins/agent-remote-driver/`, a new, standalone, payload-only
+plugin (`defaultEnabled: false` — unvalidated, per `default-promotion-requires-proof`).
+Key design choice: no shared daemon or registry dependency at all — the
+extension is entirely self-contained (its own loopback HTTP server + a
+per-session discovery-file convention), so "independent of whether
+agent-bridge itself is installed" is true by construction, not by
+convention. Launch-time presence reuses `agent-codespaces`' existing
+`codespacePlugins`/venue-injection seam and the ordinary user-global
+`~/.copilot/settings.json` — no new install mechanism invented for this.
+
+16 `node --test` cases pass (`tests/discovery.test.mjs`,
+`tests/driver-server.test.mjs`), exercising the HTTP surface against a real
+`http.Server` with a fake driver (no SDK dependency needed for that layer).
+Updated `README.md` and `docs/architecture.md` plugin counts/tables and
+`.github/plugin/marketplace.json` (new entry + `metadata.version` bump);
+added a changefile.
+
+**Not yet done, left as this effort's next slice:** an actual live `copilot`
+session with the extension enabled end-to-end, plus CodeSpace and container
+installs — Validation Plan item (a) needs all of local + CodeSpace +
+container + Dev Box, and only the local-machine design/unit-test layer is
+covered so far. Phase 2 (driver-exclusivity) and Phase 3 (escalation ladder)
+remain explicitly open and are named as such in the plugin's own README
+rather than silently assumed solved.
+
+### 2026-10-02 (cont'd) — Fleet-hygiene hardening (operator-requested)
+
+Operator flagged a real gap before this lands further: the design so far
+proved correctness for *one* session, not for a **fleet** of parallel
+sessions on the same machine (agent-dispatch workers, several worktrees,
+several CodeSpaces/containers). Added `extensions/agent-remote-driver/registry.mjs`
+and `bin/list-sessions.mjs`:
+
+- Collisions were already structurally impossible (session-id-named
+  descriptors, OS-assigned ephemeral ports) — the real risk was
+  **accumulation**: a crashed session never runs its own cleanup, orphaning
+  its descriptor. Fixed with self-healing reaping: every new session sweeps
+  the shared discovery directory at its own startup — no dedicated reaper
+  daemon.
+- Bare pid-liveness isn't trustworthy alone (pid reuse after a crash) — added
+  a heartbeat (`updatedAt`, refreshed every 30s). `isStale` reaps on EITHER
+  signal alone (a dead pid, OR a live pid whose heartbeat has gone stale) —
+  not "both required," which would under-reap a hung process with a dead
+  heartbeat. A true cross-platform birth-time check (mirroring
+  `agent-codespaces`' Connection Owner `owner_identity` pattern) is named as
+  a follow-up, not yet built.
+- A snapshot-then-act TOCTOU (the owning session can refresh its heartbeat
+  between a sweep's staleness snapshot and its delete) is closed by
+  `reapIfStillStale`: re-read and re-validate staleness immediately before
+  unlinking, never act on the original snapshot alone. Similarly, the
+  heartbeat's own on-disk rewrite is now atomic (temp file + rename, see
+  `discovery.mjs`'s `writeDescriptorAtomic`) so a concurrent reader never
+  observes a half-written descriptor mid-heartbeat. Caught in PR #5036's own
+  review round, fixed in the same PR.
+- A `SIGINT`/`SIGTERM` handler that only unlinks and returns leaves Node's
+  default termination suppressed (a registered listener disables it) — the
+  process stays alive with the heartbeat timer still armed, which would
+  simply recreate the descriptor the handler just removed. Fixed to match
+  `context-handoff`'s established pattern: remove the listener, then
+  re-raise the identical signal so the OS's default disposition actually
+  terminates the process. Also caught in PR #5036's review.
+- `bin/list-sessions.mjs` is the one aggregation entry point: sweep + list +
+  bounded-concurrency (max 8 in-flight) `/health` confirmation in a single
+  pass, so a fleet controller never re-implements its own per-session
+  scan/probe loop (the actual "process-bombing"/connection-storm risk at
+  fleet scale).
+- `driver-server.mjs` now caps concurrent `/events` subscribers
+  (`MAX_SSE_CLIENTS = 16`, `503` past the cap) and `extension.mjs`'s own
+  `listen()` is retried a bounded 3 times on a bind race before degrading
+  silently — never an unbounded retry loop. A crash
+  (`uncaughtException`/`unhandledRejection`) now runs descriptor cleanup
+  before exiting.
+
+20 new `node --test` cases (36 total for the plugin, all passing), covering
+real spawned-and-exited child processes for pid-liveness, a real
+`http.Server` for the SSE connection cap, and filesystem-backed sweep/reap
+scenarios including a 25-session synthetic fleet. README's *Fleet hygiene*
+section documents the design and the explicit limitation (pid-reuse edge
+case) rather than claiming it fully closed.
+
+### 2026-10-03 — Second review round: closing the TOCTOU for real, plus three more fixes
+
+PR #5036's Copilot review round caught that the first-pass TOCTOU fix
+(re-read-then-unlink) still had its own narrower race: the owner's heartbeat
+rename could land between the re-read and the unlink. Closed properly with
+an atomic claim: `reapIfStillStale` now does `renameSync(path, claimPath)`
+first (atomic on both POSIX and Windows — whichever write wins the instant
+wins outright, with no window where a concurrent writer and the reaper can
+act on the same path), revalidates staleness against the claimed copy
+(immune to further races since nothing else references `claimPath`), and
+either deletes it or renames it back if the owner's write actually won.
+
+Three more real findings, all fixed:
+- `writeDescriptorAtomic` leaked its temp file (which carries the bearer
+  token) on a failed rename — now cleaned up in all cases, with the
+  original error still surfaced.
+- A legacy-descriptor compatibility gap: a future rolling update where an
+  already-running OLDER session was never taught to write `updatedAt` would
+  have its still-alive descriptor reaped purely for predating a protocol
+  change. `isStale` now treats a descriptor with NO `updatedAt` key at all
+  (not just one present-but-garbage) as pid-liveness-only. Cannot occur
+  today (every descriptor this version writes always carries the field) —
+  pure forward compatibility, not a current bug.
+- `reapIfStillStale`'s unlink-failure reporting was wrong: any unlink error
+  (including a genuine permission/I/O failure) was reported as
+  `removed: true`. Now only ENOENT (already gone) counts as a successful
+  reap; other failures are reported honestly.
+
+Also extracted the SDK-free process lifecycle (bounded listen-retry,
+signal-cleanup-then-reraise, the heartbeat/flush interval timer) out of the
+SDK-coupled `extension.mjs` into `lifecycle.mjs` — the review's direct ask
+("add coverage... extracting this lifecycle would allow deterministic
+tests without loading joinSession()"). 13 new tests exercise it with fully
+injected dependencies (a fake process-like object for signals, a fake
+timer scheduler) — no real OS signals or real waiting required.
+
+Running test count, for the record (the PR's own description previously
+mis-stated this round's delta — corrected there too): 36 after the initial
+fleet-hygiene commit → 48 after the first review-fix commit (atomic write +
+TOCTOU-v1 + signal fix + their tests, +12) → 61 after this round (+13,
+TOCTOU-v2 via atomic-claim, legacy-descriptor compatibility, unlink-failure
+reporting, the `lifecycle.mjs` extraction and its tests). Comments that
+referenced "PR #5036" directly were reworded to stay timeless per review
+feedback; the PR's own description now carries the required Documentation
+impact statement.
+
+### 2026-10-03 (cont'd) — Third review round: backpressure bound + two more hardening fixes
+
+- **SSE backpressure.** `MAX_SSE_CLIENTS` bounds client *count* but not
+  memory on its own — a single slow/non-reading client still lets Node
+  queue every forwarded event in its response buffer indefinitely. Added
+  `MAX_SSE_BUFFERED_BYTES` (2MB): a client whose buffered backlog exceeds it
+  is disconnected outright rather than allowed to keep growing.
+- **`writeDescriptorAtomic` write-failure cleanup.** The prior fix only
+  cleaned up the temp file when the *rename* failed; `writeFileSync` itself
+  can fail (ENOSPC/EIO) after already creating or partially writing the
+  file. Both paths now share one cleanup-then-rethrow block.
+- **`listDescriptorFiles` silently treated any `readdirSync` failure as an
+  empty fleet** — including EACCES/EIO, a genuine "the registry is
+  inaccessible" failure distinct from ENOENT's "no fleet yet." Now
+  propagates anything other than ENOENT; `bin/list-sessions.mjs` catches
+  that specifically and exits 1 with a clear message instead of falsely
+  reporting zero sessions.
+
+3 new `node --test` cases this round (64 total for the plugin, all
+passing).
+
+### 2026-10-03 (cont'd) — Fourth review round: a real "failed reap exposes stale as live" bug, plus sidecar sweeping
+
+Two more findings, both genuine:
+
+- **`reapIfStillStale` exposed a known-stale descriptor as live on a failed
+  claim.** When the atomic claim-rename itself failed for a reason other
+  than ENOENT (a permission/I/O error), the code fell back to returning the
+  original pre-claim snapshot — which had already been judged stale. That
+  snapshot then flowed into `sweepStale`'s `kept` list, so `listLive()` and
+  `bin/list-sessions.mjs` would report (and probe) a definitely-dead
+  endpoint as if it were real. Fixed: a failed claim (other than ENOENT) now
+  returns `descriptor: null` — reported nowhere, neither removed nor live,
+  an honest "could not act on this entry" rather than a false positive.
+- **Orphaned write/claim sidecars were never swept at all.** Neither a
+  `.tmp` file (an interrupted `writeDescriptorAtomic`) nor a `.reap-claim.*`
+  file (an interrupted `reapIfStillStale`) is a bare `.json` descriptor, so
+  the main sweep loop never looked at them — a crash at exactly the wrong
+  instant would leave one of these credential-bearing files on disk
+  forever. Added `sweepOrphanedSidecars`, now folded into every `sweepStale`
+  call: removes a sidecar once its owning pid is confirmed dead, leaves it
+  alone while the owner is still alive (may genuinely be mid-operation).
+
+7 new `node --test` cases this round (71 total for the plugin, all
+passing), including making `reapIfStillStale`'s rename function injectable
+specifically so the failed-claim branch is deterministically testable
+cross-platform, without relying on inconsistent POSIX/Windows permission
+APIs.
+
+**Explicitly accepted, not chased further:** the review's repeated
+"heartbeat lifecycle lacks automated test coverage" finding. The *generic*
+retry/signal/timer mechanics are now fully tested in `lifecycle.mjs`
+(round 2's extraction) — what remains untested is the specific wiring
+inside `extension.mjs` itself (e.g., "does the heartbeat tick actually call
+`writeDescriptor` with the current port/token"), which is entangled with
+that module's top-level `await joinSession(...)` side effect on import.
+Fully isolating it would mean restructuring `extension.mjs` into an
+importable `main()` that doesn't execute on module load — a larger change
+than this PR's scope, and not proportionate for a plugin that is
+`defaultEnabled: false` and has not yet been run against a single real
+`copilot` session (that gap is already named, separately, as this effort's
+next slice). Tracked here rather than re-attempted a fourth time.
+
+### 2026-10-03 (cont'd) — Fifth review round: sidecar reaping used the wrong PID
+
+A genuine bug in round 4's own fix: `sweepOrphanedSidecars` checked the
+sidecar's JSON **content** pid for liveness, but a `.reap-claim.*` sidecar's
+content is the CLAIMED (already-judged-stale) target session's own
+descriptor — its pid is *expected* to be dead. Checking that content pid
+made every live, currently-reaping claimant's own in-flight claim file look
+"owned by a dead pid" and get deleted out from under it mid-operation.
+Separately, a genuinely mid-write `.tmp` file (unparseable content) was
+being treated identically to an orphan regardless of whether its writer was
+alive. Fixed: `sweepOrphanedSidecars` now parses the OWNER pid directly from
+the filename (`SIDECAR_RE`'s capture groups) for both sidecar shapes, never
+from content — a `.tmp`'s filename pid already happened to match its writer
+by construction, but a `.reap-claim.*`'s filename pid (the claimant) and
+content pid (the claimed target) are deliberately different, and only the
+filename one is the correct liveness signal either way.
+
+Also fixed in this round: the SSE-backlog regression test's read loop had
+no bound of its own — a real regression (server stops disconnecting
+over-backlogged clients) would have hung the test process instead of
+failing it; raced each read against a 2s deadline. Removed "(Nth review
+round)" wording from changefile comments (durable release metadata should
+describe the technical change, not the review process). Clarified the
+README's dead-entry-persistence wording: a dead entry's physical removal
+genuinely waits for a sweep to run; seeing one persist with no sweep
+triggered in between is expected, not evidence of a bug on its own.
+
+5 new `node --test` cases this round (73 total for the plugin, all
+passing), explicitly covering the filename-vs-content pid mismatch for both
+sidecar shapes.
+
+### 2026-10-03 (cont'd) — Sixth review round: the same failed-reap bug, one step later
+
+One more real instance of the class of bug fixed in round 4: that fix
+covered a failed CLAIM (the rename to `claimPath`), but the subsequent
+DELETE of the claimed file could also fail (permission/I/O) while still
+returning the already-confirmed-stale `claimed` descriptor — exposing it as
+live for the exact same reason, just one step later in the same function.
+Fixed identically: a failed unlink (anything but ENOENT) now returns
+`descriptor: null`, never the stale descriptor. Made `unlinkFn` injectable
+(alongside the existing `renameFn`) so this branch is deterministically
+testable too.
+
+1 new `node --test` case this round (74 total for the plugin, all passing).
+
+**Status at this point:** six review rounds, every genuinely new and
+actionable finding fixed with real code + tests; remaining open threads are
+either the explicitly-accepted `extension.mjs`-wiring test-coverage gap
+(documented above) or stale thread-tracking against already-updated
+PR-description/doc-impact/test-count content. Proceeding to merge.
+
+### 2026-10-03 (cont'd) — Phase 1 live-session validation via clean-room
+
+PR #5022 and #5036 were merged to `dev` but not yet promoted to `main`
+(the marketplace repo's default branch), so a normal `copilot plugin
+install agent-remote-driver@copilot-extensions` against the public
+marketplace 404s — expected, not a regression. Rather than improvise a
+workaround on this operator's own machine (user-global settings edits,
+manual `copilot -p`/`-i` probing), used the dedicated
+`validating-in-clean-room` mechanism: authored
+`tools/clean-room/scenarios/agent-remote-driver-solo/` (Tier-P/F1), run
+against a disposable fresh-machine container with the uncommitted worktree
+mounted read-only (`-HarnessMount` + `-MarketplaceRepo /harness`, the
+documented seam for validating a plugin not yet on the marketplace repo's
+default branch).
+
+First run surfaced two real, fixable gaps (not scenario bugs):
+
+1. A directory-source marketplace install is **loaded live** from its
+   source path — nothing is copied into `~/.copilot/installed-plugins/`.
+   The scenario originally assumed the registry-install layout; fixed it to
+   parse the CLI's own "loaded live from …" message and point every
+   subsequent check (the session's `--plugin-dir`, `bin/list-sessions.mjs`)
+   at the right path.
+2. **The real finding:** the CLI silently never launches ANY SDK extension
+   without `"experimental": true` in `~/.copilot/settings.json` — no error,
+   no descriptor, nothing. This is an ambient, suite-wide prerequisite
+   already documented elsewhere (`agent-worktrees`' `copilot-extensions-setup`
+   skill, its `install.sh`/`install.ps1`), but this brand-new plugin's own
+   README never said so — a real operator following only this plugin's
+   install instructions would hit the identical silent no-op. Fixed in
+   `plugins/agent-remote-driver/README.md` (*Install* prerequisite +
+   troubleshooting entry), not just worked around in the scenario.
+
+With both fixed, the scenario is **9/9 PASS**: clean-slate environment,
+solo install (no agent-worktrees/agent-bridge), a real live `copilot -p`
+session writes its discovery descriptor within the polling window, the
+HTTP surface answers over loopback with the descriptor's own bearer token
+(`/health` echoes the descriptor's pid; `/events` SSE connects and the
+scenario verifies the server's own initial `: connected` marker rather than
+just a non-empty log; `/send` is accepted mid-turn), `bin/list-sessions.mjs
+--json` lists the live session, and the descriptor is removed again once
+the session exits normally. This closes the **"container"** leg of the
+Phase 1 checklist item's launch-time-presence proof — a strictly harder bar
+than an ordinary already-provisioned machine, since nothing else is
+installed in the venue — but it is NOT itself a substitute for "a local
+machine" (a bare, non-container host) or a CodeSpace
+(`agent-codespaces`' own `codespacePlugins` injection seam). Both remain
+open, left as this checklist item's explicit remainder rather than claimed
+done.
+
+**Copilot review on PR #5077** caught two real scenario bugs on top of the
+above (both fixed before merge): `curl` was used for every HTTP assertion
+but never declared in `manifest.json`'s `prereqs.present`; and the `/events`
+check accepted a bare non-empty log file as proof of a connected SSE stream
+— but `capture()` always tees the invoked command line into the log before
+running it, so that check was vacuously true even on a connect failure. Now
+verifies the driver server's own initial `: connected` SSE marker instead.
+It also caught this Journal/checklist entry's own overclaim (the "local
+machine" leg was never actually exercised outside the container) —
+corrected above rather than left standing.
+
+A second review round on the same PR, after the fixes above were pushed,
+caught four more real issues (all fixed before merge): (1) the scenario was
+classified Tier P but actually submitted a real model turn (the `-p "sleep
+40... reply done"` design) — credit-consuming and dependent on the model
+choosing to run the shell command, contrary to Tier P's "no model in the
+loop" contract. Fixed by discovering (and proving, with a throwaway
+container) that a bare interactive `copilot` process kept alive under a pty
+via `script` — with NO prompt ever submitted — still joins, gets a session
+id, and the extension still writes its descriptor: genuinely Tier P, zero
+AI credits. (2) The live bearer token was leaking into persisted run
+artifacts two ways: `capture()`'s own command-line echo includes the
+Authorization header argv, and the raw descriptor was copied verbatim into
+`cr-logs/`. Fixed with a `_http_capture` wrapper that logs a redacted static
+description instead of real argv, and a redacted copy of the descriptor
+(token replaced) for diagnostics. (3) Cleanup wasn't registered until phase
+5, so a `-Until 2/3/4` run (or an interruption) would leave the live
+session and its descriptor orphaned in the persistent container — fixed
+with an `EXIT` trap registered immediately after the session starts. (4) A
+session that failed to exit after the old 60s wait was still reported as a
+clean PASS once force-killed — fixed so a forced SIGKILL is a genuine jam,
+not silently equivalent to a graceful exit. Fixing (1) also surfaced a
+second, more specific fix for the signal-cleanup check itself: SIGTERM-ing
+the outer `script`/`copilot` wrapper process let the wrapper exit cleanly
+while orphaning the extension's own child process (and its descriptor) —
+`installSignalCleanup` registers its handlers on the **extension's own**
+process (a separate child, confirmed via the CLI's `extension-bootstrap`
+debug log), so phase 5 now signals that pid (from the descriptor) directly.
+10/10 PASS after all of the above, confirmed with no orphaned process left
+in the container.
+
+Phase 2 (driver-exclusivity arbitration) has not been started; `effort-focus`
+should be re-bound to its exact heading before that work begins.

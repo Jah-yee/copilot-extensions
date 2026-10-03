@@ -1,0 +1,9 @@
+{
+  "comment": "cleaning-codespaces: rephrase dotfiles-checkout mention to avoid a forbidden-terms test false positive, keeping the technical detail generic",
+  "changes": [
+    {
+      "plugin": "agent-codespaces",
+      "type": "dev"
+    }
+  ]
+}

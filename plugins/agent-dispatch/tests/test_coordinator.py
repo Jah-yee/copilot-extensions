@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import sys
 import threading
@@ -859,6 +860,74 @@ def test_event_note_wakes_and_supersedes_active_run_waiter(api, monkeypatch):
     assert len(wakes) == 1
     assert wakes[0].resume_worktree == "m/wt-1"
     assert wakes[0].status == "pending"
+
+
+def test_reviewer_deadline_recovery_wakes_a_suspended_task_without_a_verdict(api):
+    api.app.state.queue.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {"rules": []},
+            "reviewer_loop": {"stale_after_days": 7},
+        },
+        machine=_registration_machine(),
+    )
+    last_commit_at = 1_000_000.0
+    tid = api.post(
+        "/tasks",
+        json={
+            "title": "review PR 42",
+            "repo": TEST_REPO,
+            "origin_ref": "review-emitter",
+            "require_verification": True,
+            "evaluator_ref": "review-loop",
+            "payload_inline": json.dumps(
+                {"reviewer_loop": {"last_commit_at": last_commit_at}}
+            ),
+        },
+    ).json()["id"]
+    api.post("/claim", json={"worker_id": "w1", "repo": TEST_REPO})
+    api.post(
+        f"/tasks/{tid}/start",
+        json={"worker_id": "w1", "owner_session_id": "session-1"},
+    )
+    api.post(
+        f"/tasks/{tid}/suspend",
+        json={"worker_id": "w1", "reason": "waiting for the next review round"},
+    )
+    prepared = api.post(
+        f"/tasks/{tid}/run-waiter/register",
+        json={
+            "worker_id": "w1",
+            "host": "test-host",
+            "reason": "hibernating: sleep 1",
+            "resume_worktree": "m/wt-1",
+            "command": ["sleep", "1"],
+        },
+    )
+    assert prepared.status_code == 200
+    armed = api.post(
+        f"/tasks/{tid}/run-waiter/arm",
+        json={
+            "generation": prepared.json()["generation"],
+            "pid": 101,
+            "host": "test-host",
+            "start_token": "token-101",
+        },
+    )
+    assert armed.status_code == 200
+
+    resumed = api.app.state.queue.reconcile_reviewer_deadlines(
+        now=last_commit_at + (8 * 86400.0)
+    )
+
+    assert resumed == 1
+    wakes = api.app.state.queue.list_run_waiter_wakes(tid)
+    assert len(wakes) == 1
+    assert wakes[0].status == "pending"
+    assert api.app.state.queue.get_active_run_waiter(tid) is None
+    assert api.app.state.queue.list_verification_requests(tid) == []
 
 
 def test_event_note_wakes_and_supersedes_preparing_run_waiter(api):

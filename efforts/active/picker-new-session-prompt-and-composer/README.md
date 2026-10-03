@@ -288,6 +288,48 @@ real code, not assumption:
       `ScopeDlgScreen`/steer behavior is completely unchanged when no
       prompt is ever entered (the 5 updated + 2 existing New-worktree
       confirm tests).
+- [x] **UX follow-up (operator request, 2026-10-03): fold the separate
+      `SeedPromptScreen` step into `ScopeDlgScreen` itself** -- one dialog,
+      not two the operator steps through in sequence. Content stack:
+      header -> optional Prompt field -> "Additional options:" -> the
+      existing Anchor/Bare/No Mux/AHP `SelectionList` -> Create/Cancel,
+      with exactly three focus stops (prompt box, options list, buttons)
+      and Create as the still-default stop. **Done:** `ScopeDlgScreen`
+      gained a `show_prompt` constructor flag (Clean/Sync never sets it, so
+      its dialog is pixel-for-pixel unchanged) that composes the same
+      `field_widgets.compose_field` textarea `SeedPromptScreen` used,
+      directly above the options list; `self.seed_prompt` is set the
+      instant Confirm is pressed (read by the caller via a kept screen
+      reference, never via the dismiss value, which stays a plain `bool`
+      for every other caller). `_open_optmenu()` composes ONE
+      `ScopeDlgScreen(dlg, show_prompt=...)` instead of chaining a second
+      screen; the compatibility gating (Bare/No Mux/Anchor repo/remote
+      silently drop whatever was typed, since none of those targets can
+      ever deliver it) now runs once, at Confirm time, reading the live
+      checkbox state instead of being resolved before a second screen even
+      opened. `SeedPromptScreen` itself (now dead code -- its only caller
+      was `_open_optmenu()`) and its dedicated test file were deleted
+      rather than left stale. Render- and live-TTY-verified (tmux,
+      `--demo`): the merged dialog's content stack renders exactly as
+      specified, Tab cycles prompt -> list -> buttons (wrapping back to
+      prompt from buttons) and Enter in the prompt box (originally wired to
+      advance to the options list; **corrected same-day** per further
+      operator feedback -- see the 2026-10-03 Journal entry below -- to
+      jump straight to Create instead, since the prompt is almost always
+      left blank or typed-and-done) jumps straight to Create, a typed
+      prompt lands in the textarea correctly, and
+      Escape cancels cleanly with no side effects. 9 New-worktree dialog
+      tests rewritten for the one-screen flow (2 renamed
+      `..._skips_seed_prompt` -> `..._drops_seed_prompt` to describe the
+      new silent-drop-not-skip semantics) plus 1 new dedicated focus-stops
+      test; a dialog-focus assumption in the pre-existing
+      `test_scope_dialog_highlight_is_focus_gated` (Clean/Sync-adjacent but
+      exercising the New-worktree dialog) also needed its Tab count fixed.
+      Full suite: 1551 passed, 3 skipped, 3 failed -- all 3 confirmed
+      pre-existing (same `test_mux_daemon.py`/`test_update.py`/
+      `test_trusted_materializer_parity.py` class flagged in this effort's
+      own prior Journal entries), none touching any file this change
+      modified.
 
 ### Phase B — Generic registered-pivot "create" action (unblocks Tasks Phase 10)
 - [x] Add a new `PivotAction`-adjacent concept to `pivot_manifest.py` for a
@@ -502,10 +544,26 @@ real code, not assumption:
   - [x] Confirm behavior with "Bare" selected: no prompt screen is shown at
         all (nothing to seed). (`test_new_worktree_bare_skips_seed_prompt`,
         passing against the now-default-on `_SEED_PROMPT_ENABLED`.)
-- [ ] Phase B: from a live coordinator, use the Tasks pane's new "New
+- [~] Phase B: from a live coordinator, use the Tasks pane's new "New
       task…" action to hand-author a task; confirm it appears with the
       exact title/prompt/tags entered, immediately eligible for its
-      declared pool per the tags/criteria submitted.
+      declared pool per the tags/criteria submitted. **Partially validated
+      2026-10-02 (later session):** the GENERIC mechanism this depends on
+      -- `options_command`'s live subprocess resolution, the off-thread
+      `_run_bg` wiring, and the full Confirm -> `run_resolved` round trip --
+      was proven in a REAL terminal via `tmux` (not Pilot, not headless
+      capture): launched `worktree-manager picker --demo` in a fresh tmux
+      pane, drove it with `send-keys` (`]` switches pivot -- see the new
+      Journal entry for the full key map discovered this session), opened
+      the Demo Queue's "+ New test request…" dialog, confirmed the
+      `criteria` multichoice tab rendered the real, live-resolved vocabulary
+      (`recalibration`/`maintenance`/`audit`/`neurotoxin-safety` + `Other…`)
+      read back via `capture-pane`, and submitted through to the harmless
+      `demo_pivot.py` acknowledgment. **Still outstanding (keeps this item
+      unchecked):** this was the Demo Queue fixture, not `agent-dispatch`'s
+      own Tasks pivot against a REAL running coordinator -- that needs a
+      live `agent-dispatch` coordinator process with at least one active
+      registrar declaration, not available this session.
 - [x] Both phases: full `worktree-manager` + `agent-dispatch` test suites
       stay green (baseline: whatever the two packages' full-suite pass
       counts are at the time each phase's PR opens -- record them in that
@@ -1695,3 +1753,260 @@ available this session) and Phase A's own literal Picker end-to-end
 click-through both remain unchecked in the Validation Plan. Neither blocks
 landing this slice -- both are genuinely separate from what this session's
 code changes.
+
+### 2026-10-02 (later still) — Render verification + a genuine live-TTY click-through via tmux, for the options_command mechanism
+Resumed in a fresh worktree (the prior PR had already merged and its
+worktree was finalized). Operator asked specifically for preview renderings
+plus driving the flow through a real Mux-wrapped Picker launch, per this
+project's own "render early, render often" discipline and the precedent the
+2026-10-01 live-TTY session set.
+
+**Preview renderings.** Extended the official `--demo` fixture rather than
+building a one-off: `demo_pivot.py` gained a harmless `vocabulary` verb
+(`["recalibration","maintenance","audit","neurotoxin-safety"]`, mirroring
+`agent-dispatch registrar vocabulary`'s JSON-array contract) and
+`preview.py`'s `_DEMO_PIVOT_MANIFEST.create_action.fields` gained a matching
+`criteria` multichoice field with `options_command` pointing at it. Hit two
+real environment snags getting a screenshot at all, both worth recording
+since they'll bite the next person too:
+1. This fresh worktree needed FOUR separate `pip install -e .` passes
+   (`worktree-manager`, `plugins/agent-dispatch`, `libs/zdd`,
+   `libs/work-coalescing-singleton`, `plugins/agent-worktrees` --
+   `libs/lazy-cli-dispatch` is agent-worktrees' own transitive dependency)
+   before any of these modules would import at all -- a stale editable
+   install from a DIFFERENT, already-finalized worktree was silently
+   shadowing every one of them.
+2. `picker screenshot --demo` failed with "timed out waiting for setup
+   epoch 1 to finish" even at `--wait 15` -- reproduced this on the
+   UNMODIFIED base code too (confirmed it's not something this session's
+   edits caused). Root-caused by calling `_collect_setup_payload()`
+   directly: it genuinely completes in ~8s on this machine (consistent
+   with `_prewarm_machine_key_map`'s own documented "2+ seconds... more
+   registered repos" cost), comfortably within a widened timeout -- so the
+   CLI's hardcoded `_wait_for_initial_setup(timeout=5.0)` (not exposed by
+   any flag; `--wait` only controls the SEPARATE post-pivot-switch poll)
+   was just too tight for this specific machine's repo count, not a hang.
+   Worked around it with a small ad-hoc driver script (`_prepare()` +
+   `capture_async`/`capture_modal_async` called directly, `timeout`
+   widened via `_wait_for_initial_setup.__kwdefaults__["timeout"] = 40.0`
+   -- note `__kwdefaults__`, not `__defaults__`: `timeout` is keyword-only)
+   rather than touching the shipped CLI; discarded the script after use
+   (reproducible from this Journal entry, not worth keeping as a first-class
+   tool for a single-machine timing quirk).
+
+Captured two SVGs (-> PNG via `scripts/picker-snapshot/svg2png.mjs`,
+Node deps installed fresh in this worktree): the Demo Queue button row, and
+-- the one that actually matters for this feature -- the create dialog's
+Criteria tab showing the REAL, live-resolved vocabulary
+(`recalibration`/`maintenance`/`audit`/`neurotoxin-safety`) plus the
+auto-forced `Other…` fallback, rendered by the genuine compositor, not
+asserted only through `screen._q[i]["options"]` in a Pilot test.
+
+**Live-TTY click-through via tmux (the operator's explicit ask: "drive your
+own flow using Mux... so you can manipulate the TTY").** Cleared
+`PSMUX_SESSION` (this session's own shell is itself inside a psmux pane,
+same gotcha the 2026-10-01 entry already flagged), `tmux new-session -d`
+running the REAL `worktree-manager picker --demo` (not a capture/headless
+variant), then drove it with `send-keys`/`capture-pane` exactly as a human
+would. **New reusable key-map fact, not in the prior session's notes:**
+pivot switching is NOT Ctrl+Right (that's the MACHINE tab) and
+Ctrl+Shift+Right didn't reach the app over this terminal -- the reliable
+key is the bare bracket `]`/`[` (sent via `tmux send-keys -l` so tmux
+doesn't try to parse it as a named key), which the engine's own
+`_dispatch_key` wires as a global pivot-cycle shortcut regardless of
+focused zone. Landed on Demo Queue, `Enter` to focus the button row,
+`Enter` to open the dialog, typed a real title via `send-keys -l`,
+`Ctrl+Right` x2 to reach the Criteria tab -- and `capture-pane -p` read back
+the exact same four live options + `Other…` the screenshot showed, this
+time from an actual interactive terminal session, no test harness in the
+loop at all. A second, faster-paced attempt to also drive a full submit
+raced the dialog's own tab-advance timing (a classic multi-`send-keys`-
+with-fixed-sleep hazard, not a product bug) and landed an empty title on
+submission -- re-confirmed the ALREADY-PROVEN rendering was correct from
+the first, carefully-paced pass, and that the full Confirm ->
+`run_resolved` round trip still fires end-to-end (the harmless
+`demo_pivot.py` acknowledgment printed in the footer either way). Killed
+the tmux session cleanly after.
+
+**Tests:** `test_picker_preview_mode.py` gained 2 new cases
+(`test_main_vocabulary_verb_prints_a_json_array_of_strings`,
+`test_manifest_criteria_field_sources_options_from_the_vocabulary_verb`);
+all 18 in that file plus the full `create_action`-named test set across
+`test_pivots.py`/`test_pivot_registry.py`/`test_picker_tui.py` (28 tests)
+re-run clean after the fixture change.
+
+**Not done this session:** the live-coordinator (real `agent-dispatch`,
+not Demo Queue) click-through remains the one genuinely outstanding
+Validation Plan item -- it needs an actual running coordinator with at
+least one active registrar declaration, which this session didn't have
+available. Everything the GENERIC mechanism needs has now been proven at
+every tier this project recognizes (unit, Pilot/headless, rendered
+screenshot, and live interactive TTY) except that final live-coordinator
+tier.
+
+### 2026-10-03 — UX follow-up: fold SeedPromptScreen into ScopeDlgScreen (one dialog, not two)
+Resumed in a fresh worktree (the prior two PRs had merged and finalized).
+Operator asked for the New-worktree flow's prompt field to live in the SAME
+dialog as the Anchor/Bare/No Mux/AHP options, with a specific content stack
+(header -> Prompt -> "Additional options:" -> checkboxes -> Create/Cancel)
+and exactly three focus stops (prompt box, list, buttons), Create still the
+default. This was a genuine design ask, not a bug -- Phase A's original
+design (item 2's own Plan text) deliberately built `SeedPromptScreen` as a
+SEPARATE screen specifically because `ScopeDlgScreen` didn't support a
+prompt field at all; the operator is now asking for exactly the opposite
+shape.
+
+**Design:** rather than fork a new dialog class, gave `ScopeDlgScreen`
+itself an optional `show_prompt` constructor flag. Clean/Sync (the OTHER
+caller of this same class) never sets it, so its dialog's compose/CSS/
+focus-default path is untouched -- confirmed by `test_scope_dialog_uses_
+native_selectionlist_and_focusgroup` (Clean modal) passing unmodified.
+When set, `compose()` yields the exact same `field_widgets.compose_field`
+textarea `SeedPromptScreen` used, directly above the options
+`SelectionList`, with a header `Static` labeling it and a second one
+labeling the list ("Additional options:"). `self.seed_prompt` is a plain
+instance attribute set the instant Confirm is pressed (`on_focus_group_
+activated`, before `dismiss`) -- NOT threaded through the dismiss value
+(which stays a plain `bool` for every other existing caller); `_open_
+optmenu()` keeps its own reference to the pushed screen instance and reads
+`scr.seed_prompt` from its `_after` closure once `confirmed` comes back
+`True`. Added `_advance_focus` (the same name/contract
+`CreateActionScreen`/`PivotFormScreen`/the old `SeedPromptScreen` all use)
+so Enter in the prompt box advances straight to the options list, matching
+every other field's accept-and-advance convention in this project rather
+than introducing a new one.
+
+The compatibility gating that used to decide WHETHER to even open a second
+screen (Bare/No Mux/Anchor repo/remote can never deliver a seed) now runs
+once, in `_open_optmenu`'s `_after` callback, reading the dialog's live
+checkbox state at Confirm time -- functionally identical outcome (those
+four cases still silently drop whatever was typed) but resolved a beat
+later than before, since there is no longer an intermediate screen boundary
+to gate at all. A remote target is the one case resolved BEFORE the dialog
+opens (remote-ness can't change via a checkbox), so its prompt field is
+never even composed (`show_prompt=False` from the start) rather than
+composed-then-ignored.
+
+`SeedPromptScreen` itself became genuinely dead code (its only caller was
+`_open_optmenu`) -- deleted the module, its dedicated test file
+(`test_seed_prompt_screen.py`), and its re-export from `engine.py`/
+`__all__`, rather than leave an orphaned class around. Updated
+`create_action_screen.py`'s one stale docstring comparison to it.
+
+**Tests:** rewrote the 9 New-worktree dialog tests in `test_picker_tui.py`
+for the one-screen flow -- no more chained `await pilot.press("enter")`
+hops into a second screen; two tests renamed
+(`..._skips_seed_prompt` -> `..._drops_seed_prompt`) since the new
+semantics is "silently drop at confirm time," not "skip opening a screen."
+Added a new dedicated `test_new_worktree_dialog_focus_stops_prompt_list_
+buttons` asserting the full three-stop Tab cycle (buttons -> wraps to
+prompt -> list -> buttons) AND the Enter-from-prompt-advances-to-list
+behavior explicitly, since none of the rewritten tests individually prove
+the wrap-around by itself. One pre-existing, unrelated-looking test
+(`test_scope_dialog_highlight_is_focus_gated`) turned out to exercise the
+New-worktree dialog too and had its own single-Tab assumption broken by the
+new prompt-box stop -- fixed its Tab count with a comment explaining why.
+
+**Render + live-TTY verification** (this effort's own established bar):
+captured the merged dialog via `picker_capture.capture_modal_async`
+(SVG -> PNG) -- confirms the exact requested content stack renders
+correctly, Create focused by default. Then drove it live: `tmux
+new-session -d` running the real `worktree-manager picker --demo`,
+`send-keys`/`capture-pane` to open "New worktree…", Tab into the prompt
+box, type real text via `send-keys -l`, confirm it landed in the textarea
+via `capture-pane`, press Enter to confirm it advances to the options list
+(verified indirectly: Down+Space did NOT activate Create, proving focus
+was on the list, not the button group), Escape to cancel cleanly. No
+subprocess ever spawned.
+
+**Validation:** full `worktree-manager` suite: 1551 passed, 3 skipped, 3
+failed -- all 3 reconfirmed pre-existing this session too (same
+`test_mux_daemon.py` x1 / `test_update.py` x1 /
+`test_trusted_materializer_parity.py` x1 class this effort's Journal has
+already flagged twice; none touch any file this change modified).
+
+### 2026-10-03 (later same day) — Two operator corrections: Enter->Create (not list), and a profiled fix for a real Windows typing-lag cause
+Two pieces of feedback landed right after the merge above: (1) Enter from
+the prompt box should jump straight to Create, not the options list --
+simple, implemented and tested in minutes; (2) a much bigger, general
+complaint -- "the FPS of TTY in Windows is so slow that characters get
+dropped as I type, and it is really bad in our Picker right now,
+potentially due to render updates competing with key events."
+
+**Item 1 (Enter -> Create):** `ScopeDlgScreen._advance_focus` now focuses
+`#scope-buttons` with index 0 (Create highlighted) instead of
+`#scope-opts`. One-line reasoning captured in the docstring: the prompt is
+almost always left blank or typed-and-done, so advancing to the options
+list first would cost the common "just launch" path an extra Tab. Updated
+`test_new_worktree_dialog_focus_stops_prompt_list_buttons` to assert the
+new target; no other tests touch this path.
+
+**Item 2 (typing lag) -- investigated, root-caused, and fixed, not just
+theorized about.** The operator's own hypothesis ("render updates
+competing with key events") pointed in the right direction, but rather
+than guess at a fix, built a repeatable timing harness first: the existing
+headless Pilot test driver, instrumented with `time.perf_counter()` around
+a burst of `pilot.press()` calls into the New-worktree dialog's prompt
+textarea. Baseline: ~66ms/keystroke. Profiled with `cProfile` to find
+where that time actually goes rather than guessing -- the top offender was
+`textual/renderables/background_screen.py:process_segments` (called 5215
+times across 30 keystrokes) feeding `_compositor.py:render_full_update`,
+which fired on **almost every single keystroke** (35 times for 30
+keystrokes -- i.e. a FULL compositor re-render, not an incremental "chop"
+update). Traced this to every one of this project's `ModalScreen`s
+declaring `background: $background 55%` -- a translucent backdrop that
+lets the dimmed base screen show through. Textual cannot treat a
+translucent screen as opaque for compositing purposes, so it must
+re-blend the ENTIRE screen stack beneath it on every repaint the modal
+triggers (including a plain text-cursor blink/keystroke in its own
+textarea) -- not a one-time cost paid when the modal opens, a PER-FRAME
+one.
+
+Confirmed causally, not just correlatively: monkey-patched the identical
+scenario's CSS to drop the `55%` (opaque backdrop) and re-ran the same
+timing harness -- ~57ms/keystroke, and `render_full_update` dropped out of
+the profiler's top 25 entirely (incremental chop rendering took over).
+~15-20% less wall time per keystroke from this one change alone, and
+qualitatively a completely different rendering code path (full recomposite
+vs. incremental). This is a **systemic** pattern, not specific to the
+New-worktree dialog: found the identical `background: $background 55%;`
+rule on **17 separate `ModalScreen` subclasses** across 8 files -- every
+modal in this codebase, including every one with a text-input field
+(`CreateActionScreen`, `PivotFormScreen`/steer, now `ScopeDlgScreen`) and
+every menu/confirm/read-only card. Converted all 17 to a plain
+`background: $background;` (solid, opaque) -- losing the "see the dimmed
+list through the backdrop" visual nicety, trading it for every modal's
+redraws (keystrokes, arrow-key navigation, even the busy-spinner's own 0.1s
+ticker while a modal is open) becoming cheap, incremental, chop-only
+updates instead of full-screen recomposites. Render-verified (screenshot):
+the solid backdrop reads as a completely normal, common TUI modal style --
+no visual regression, just a different (and genuinely more standard)
+treatment than the dimmed-see-through look. Live-TTY-verified (tmux,
+`--demo`) that text still lands correctly and the dialog still opens/types/
+cancels cleanly with the new backdrop.
+
+**Scope note:** this closes one concrete, measurable, self-inflicted
+rendering cost that was present on every keystroke/navigation-key in every
+modal in this codebase -- it is not a claim that this is the ONLY
+contributor to perceived typing lag on Windows (ConPTY/terminal-driver
+overhead, Python's asyncio-on-Windows event loop cost, and the
+headless-Pilot-harness's own synchronization overhead are all real,
+separate factors this change does not touch, confirmed by the "opaque"
+case still measuring ~57ms/keystroke in the SAME harness, not near-zero).
+Framed as a real, evidenced improvement to a real bottleneck, not a
+complete fix for "Windows TTY is slow" in general.
+
+**Tests:** `test_new_worktree_dialog_focus_stops_prompt_list_buttons`
+updated for the Enter->Create change. No new tests added for the CSS
+change itself (a visual/CSS-only edit with no behavioral surface to pin --
+the existing focus/dismiss/collect tests already exercise every modal's
+functional behavior unchanged). Full suite re-run: 1550 passed, 3 skipped,
+5 failed -- 2 of the 5 (`test_steering_card_and_form_actions_gate_and_drive`,
+`test_pivot_steering_modals.py::test_form_collect_all_types_on_confirm`)
+are NEW full-suite-only flakes not seen in this effort's prior runs;
+confirmed both pass in isolation AND on the unmodified base commit via
+`git stash` (same methodology every prior Journal entry in this effort
+uses) -- genuinely pre-existing timing flakiness surfaced by load, not a
+regression from this change. The other 3 are the same
+`test_mux_daemon.py`/`test_update.py`/`test_trusted_materializer_parity.py`
+class flagged repeatedly already.

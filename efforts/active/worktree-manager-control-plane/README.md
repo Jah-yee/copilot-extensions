@@ -846,9 +846,66 @@ worktree-manager.
       smaller opt-out-toggle cleanup this supersedes).
 
 ### Phase 7 — Health, updating & presets (Ongoing)
-- [ ] `doctor`/validation breadth, plugin updating & alignment, and
-      git-referenced presets. Closes installer §`health-doctoring-and-validation`,
-      §`plugin-updating-and-alignment`, §`git-referenced-presets`.
+- [x] **Stranded cutover passive blocking a bare `self-install`.** A passive
+      mux-daemon left behind by a crashed/interrupted `self_update()`
+      (`spawn_passive` pins its `cwd` inside the version slot being cut
+      over to) could collide with a later `self-install --apply` targeting
+      the same slot, raising a Windows `PermissionError`. `self_install()`
+      now reaps the stranded passive via the existing breadcrumb-driven
+      recovery, holding the shared cutover lease across the whole
+      reap-plus-slot-mutation and re-checking install need under that
+      lease (a concurrent install can complete while waiting for it).
+      Closes [#4999](https://github.com/ThomasMichon/copilot-extensions/issues/4999)
+      via [#5000](https://github.com/ThomasMichon/copilot-extensions/pull/5000).
+- [ ] **PID-reuse-safe mux-daemon termination.** `_terminate_mux_daemon_pid`
+      identifies its target by command-line/root match, then signals by
+      bare PID — a reused PID between the check and the signal could kill
+      an unrelated process. Needs a breadcrumb schema change (recording
+      `process_start_time` alongside `new_pid`) threaded through
+      `zdd.cutover.CutoverOrchestrator`'s `spawn_passive` bookkeeping, a
+      shared-library change affecting every `zdd` consumer (agent-bridge,
+      agent-dispatch, agent-worktrees, worktree-manager), so it's scoped as
+      its own PR rather than folded into the fix above. Tracked as
+      [#5006](https://github.com/ThomasMichon/copilot-extensions/issues/5006).
+- [ ] **Background daemon rotation.** Resident per-version mux-daemons
+      accumulate indefinitely: `activate_after_update()`'s cutover is only
+      attempted opportunistically (at whichever session's `self_update()`
+      call happens to run next) and a daemon with even one long-lived
+      client can block its own retirement forever with no retry. Proposed
+      5-phase plan (observability → retire-idle-daemon → client-side
+      re-resolution at idle boundaries → periodic sweep → validation),
+      modeled on `agent-bridge`/`agent-dispatch`'s own drain/cutover
+      conduct and `agent-worktrees`' existing cooldown-throttled resident
+      reaper. Not yet started. Phase 1 (observability) is self-contained
+      and may land independently; only Phases 2-4 need Phase 3's
+      client-side re-resolution piece scoped in `agent-worktrees` first.
+      Tracked as
+      [#5001](https://github.com/ThomasMichon/copilot-extensions/issues/5001).
+- [ ] `doctor`/validation breadth: plugin-catalog alignment (coverage)
+      reporting landed (PR #4986), covering unmet-plugin-prerequisite/
+      cross-plugin-drift detection. The governing vision
+      (installer §`health-doctoring-and-validation`) also covers missing
+      prerequisites, stale/broken binstubs, and mis-registered repos — doctor
+      already reports the prereq/core-install/binstub pieces from earlier
+      phases, but a dedicated mis-registered-repos check remains open, so
+      this item stays unchecked.
+- [ ] Plugin updating & alignment: largely covered already (`worktree-manager
+      update` + `agent-worktrees update`/`reconcile-plugins`); remains open
+      only for whatever further cross-plugin alignment surfacing doctor/
+      configurator work turns up. Closes installer
+      §`plugin-updating-and-alignment`.
+- [ ] **Harness-plugin onboard presets.** Closes installer
+      §`harness-plugin-onboard-presets` (revised in place from the earlier
+      §`git-referenced-presets`, see the 2026-10-03 Journal entry for the
+      supersession history): a `<repo>-harness` plugin ships its own onboard
+      config (related-repo declarations, CodeSpace/venue settings) as part
+      of its payload, discovered/merged the same way `agent-codespaces`'
+      `load_merged_config()` already layers per-repo
+      `.copilot-extensions/agent-codespaces/config.yaml` across adopted
+      repos, with Worktree
+      Manager eventually folding that merged result into its own
+      `harness_state`/`doctor` surface. No design doc exists yet — that is
+      the next real open item if this phase is picked up again.
 
 ### Phase 8 — Reconcile deferred backlog
 
@@ -931,6 +988,152 @@ overlapping work before it diverges, rather than relying on issue-comment
 claiming discipline alone.
 
 ## Journal
+
+- **2026-10-03** — Claimed and landed a bounded Phase 7 slice: fixed a
+  stranded-cutover-passive bug in `self_install()` (a crashed
+  `self_update()` could leave a passive mux-daemon's `cwd` pinned inside a
+  version slot, colliding with a later bare `self-install --apply` on the
+  same slot and raising a Windows `PermissionError`). Diagnosed live on an
+  operator machine via `psutil`-based process/cwd correlation (four
+  resident per-version mux-daemons, each a legitimately live pinned
+  worktree session — not orphans — plus one genuine stray child process
+  pinned into the newest staged slot). Filed
+  [#4999](https://github.com/ThomasMichon/copilot-extensions/issues/4999),
+  landed the fix as
+  [#5000](https://github.com/ThomasMichon/copilot-extensions/pull/5000)
+  after four Copilot review rounds. Findings and disposition: (1) first
+  round — hold the cutover lease through the whole reap-plus-slot-mutation
+  and defer rather than mutate unprotected on a busy lock (fixed); don't
+  unconditionally clear the recovery breadcrumb on a failed termination,
+  since the same breadcrumb's `old` endpoint may still need
+  `recover_stale_cutover()`'s undrain (fixed — breadcrumb now left
+  untouched, a later reap simply finds the pid already dead); (2) second
+  round caught a dead duplicate function definition left by an earlier
+  edit, and asked to fail CLOSED (defer) when the cutover machinery itself
+  isn't importable rather than silently proceeding unprotected (both
+  fixed); it also flagged a genuine PID-reuse gap in the PRE-EXISTING
+  `_terminate_mux_daemon_pid` (identity checked by cmdline/root, but the
+  kill signal is issued separately by bare PID) — scoped out rather than
+  rushed in, since closing it properly needs a breadcrumb schema change
+  (`process_start_time` alongside `new_pid`) in the shared
+  `zdd.cutover.CutoverOrchestrator` affecting every `zdd` consumer, not a
+  `worktree-manager`-local fix; tracked instead as
+  [#5006](https://github.com/ThomasMichon/copilot-extensions/issues/5006),
+  cross-referenced from `_terminate_mux_daemon_pid`'s own docstring; (3)
+  third round caught the real remaining race — `needs_install()` was
+  checked once before acquiring the lease but never re-checked after, so a
+  concurrent self_install()/self_update() finishing while this call waited
+  for the lease could have its just-activated slot blindly rmtree'd and
+  recopied — fixed by re-checking under the lease and short-circuiting to
+  `already-current`; (4) fourth round approved clean after confirming (via
+  direct review-thread replies) that the identity-test, changefile, and
+  documentation/cutover-impact findings from earlier rounds were already
+  addressed in intervening commits. Also filed, as separate properly-scoped
+  follow-ups rather than folding into this bug fix: #5006 above, and
+  [#5001](https://github.com/ThomasMichon/copilot-extensions/issues/5001) —
+  a 5-phase design for a background daemon-rotation sweep (resident
+  per-version mux-daemons otherwise accumulate indefinitely, since
+  `activate_after_update()`'s cutover is only attempted opportunistically
+  and a daemon with any long-lived client can block its own retirement
+  forever with no retry). Both tracked under this Phase 7's Plan above;
+  neither started.
+- **2026-10-03** — Claimed and landed a bounded Phase 7 slice: extended
+  `worktree-manager doctor` to run `model.coverage()` and report
+  plugin-catalog alignment (uncovered/phantom/published-prereq-gap)
+  alongside the existing mux-daemon-health report, in both human-readable
+  and `--json` output — closing part of the "doctor/validation breadth"
+  wording (installer §`health-doctoring-and-validation`). Landed as PR
+  [#4986](https://github.com/ThomasMichon/copilot-extensions/pull/4986)
+  after **four** Copilot review submissions (three "changes recommended" /
+  "needs a closer look" rounds, then an approval that still carried one
+  open low-severity finding). Findings and disposition: (1) initial round
+  flagged both the "no catalog drift" success message being wrong when
+  only non-blocking uncovered plugins were present, and missing
+  published-prereq-gap regression coverage — both fixed (message now
+  matches `plugins --reconcile`'s existing ok/uncovered distinction; added
+  the gap-rendering/exit-status test); (2) second round flagged a manual
+  version bump conflicting with this repo's changefile-only release
+  workflow for PRs into `dev` — reverted (`check-changefile-presence.py`
+  replaced `check-version-bump.py` for this path per `ci.yml`); that round
+  also re-surfaced the still-open documentation finding from round one;
+  (3) third round, after README docs were added, flagged that a clean
+  report under remote discovery (no local checkout) implied full
+  validation when `coverage()` actually skips the published-prerequisite
+  check entirely without a checkout — qualified as membership-only, with a
+  regression test; (4) the approval still listed "add the required
+  Documentation impact statement to the PR description" as an open
+  low-severity finding (CONTRIBUTING.md's required-before-opening
+  statement, not the README content itself, which was already in place).
+  **Correction to this entry's first draft:** that draft claimed the
+  statement was "addressed by editing the PR description before merge,"
+  but the `gh pr edit` used to do so silently truncated the body at an
+  un-escaped backtick in a PowerShell argument — the PR merged with the
+  edit never actually applied, so the low-severity finding was in fact
+  still open at merge time (caught by this very journal PR's own Copilot
+  review, round 2, auditing the inaccurate claim against the live PR
+  record). Fixed post-merge by re-editing #4986's description via a
+  `--body-file`, verified present in the PR's current body. Validation:
+  targeted `test_doctor.py` (8/8 after the fixes), full `worktree-manager`
+  suite (1407 passed, the same 9 pre-existing Windows
+  symlink-privilege/daemon-race failures noted in the prior session's
+  entry, 4 skipped, 1 deselected known flake), `ruff`, install-contract,
+  version-consistency, and changefile-presence checks all green. Phase 7
+  remains open — `doctor` plugin-alignment is one slice of "doctor/
+  validation breadth, plugin updating & alignment, and git-referenced
+  presets"; plugin updating/alignment already has `worktree-manager
+  update` + `agent-worktrees update`/`reconcile-plugins`, and
+  git-referenced presets (installer §`git-referenced-presets`, tracked by
+  issue #358) remains fully undesigned — the next natural slice if this
+  phase is picked up again.
+
+- **2026-10-03** — Operator direction: the installer §`git-referenced-presets`
+  vision item (a human ingesting a shareable config bundle by explicit Git
+  reference) is **superseded**, not merely deferred — revised in place to
+  §`harness-plugin-onboard-presets` in the same PR as this entry
+  (`visions/installer/README.md`, per this repo's cross-repo-sequencing
+  rule: the vision update lands before any further realization work). The
+  real direction is a `<repo>-harness` plugin shipping its own onboard
+  "preset" — related-repo declarations, CodeSpace/venue support, and more
+  — as part of its own plugin payload, picked up automatically rather than
+  ingested by reference. Investigated the existing substrate this would
+  build on (no code named "preset" exists yet — this is a forward design, not
+  something already implemented under a different name):
+  `worktree-manager/src/worktree_manager/harness_state.py`'s
+  `build_state()`/`build_repos()`/`build_projects()` already sweep the
+  registered-projects manifest (`~/.agent-worktrees/{repos,projects}.yaml`)
+  plus each repo's own `enabledPlugins` into a read-only "checkout layout"
+  model Worktree Manager already consumes; separately,
+  `plugins/agent-codespaces/src/agent_codespaces/config.py`'s
+  `load_merged_config()` already layers and deep-merges a generic
+  `.copilot-extensions/agent-codespaces/config.yaml` across every *adopted*
+  repo (including a
+  `codespace_plugins:` list explicitly documented in-code as "same entry
+  shape as a harness plugin's `codespacePlugins` manifest array"). The
+  onboard-preset mechanism is the natural extension of both: a
+  `<repo>-harness` plugin's own payload carries the equivalent default
+  config, discovered/merged the same layered way, with Worktree Manager
+  eventually folding that merged result into its own `harness_state`/
+  `doctor` surface. No design doc exists for this yet (not even a stub) —
+  it is the real next open item for anyone picking up presets, replacing
+  (not just updating) the original git-ref-ingestion framing. Updated the
+  Phase 7 checklist above to reflect the supersession, revised the
+  governing installer vision in place
+  (§`git-referenced-presets` → §`harness-plugin-onboard-presets`, plus the
+  `visions/README.md` one-line summary), and left a comment on issue
+  [#358](https://github.com/ThomasMichon/copilot-extensions/issues/358)
+  pointing at this entry. **Correction to this entry's original draft:**
+  that draft claimed this PR itself fixed issue
+  [#5030](https://github.com/ThomasMichon/copilot-extensions/issues/5030)
+  (the `troubleshooting-agent-dispatch/SKILL.md` marketplace-isolation
+  `bare-agent-command` guard failures blocking `origin/dev`'s required
+  `guards + lint`/`PR gate` check). By the time this branch could rebase
+  cleanly, PRs #5037 and #5039 had already landed the real upstream fix —
+  this PR carries none of it, just a rebase onto it. The only actual
+  change this PR makes to that skill is a small, genuinely incremental
+  follow-up (flagged by this same review round): the "Before you start"
+  catalog-path note only resolved the `agent-dispatch` placeholder even
+  though the body already used `agent-bridge` and `agent-mcp` placeholders
+  too — extended the note to cover all three, with its own changefile.
 
 - **2026-10-02** — Added a genuine `## Participants` declaration (this
   effort predates that template convention and had none) solely so an

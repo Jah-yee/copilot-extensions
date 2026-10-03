@@ -122,22 +122,33 @@ order.
       (the vision deliberately left this open; this effort makes the call).
       Must satisfy the vision's attribution-correctness Behavior: measured
       against `dev`'s own pre-vendor-materialization source form.
-      **Decided 2026-10-01:** the baseline is checked into `main`,
-      piggybacking on the promotion pipeline's own existing
+      **Current decision (see Journal for the full history, including a
+      2026-10-03 revision):** a small correlation **pointer**
+      (`measured_commit` + `release_tag` + `asset`) is checked into
+      `main`, piggybacking on the promotion pipeline's own existing
       commit-per-promotion + `promote-<timestamp>-<sha>` tag — this repo
       already has a trusted, audited correlation mechanism
       (`.github/release-pipeline-state.json`'s `last_promotion.dev_head`,
       recording the exact `dev` commit each `main` promotion was measured
-      against) rather than needing to invent a GitHub-Release-asset path
-      with no existing analog in this pipeline. Attribution correctness is
-      unaffected either way: measurement happens against `dev`'s own source
-      form regardless of which branch later stores the resulting JSON. See
-      this entry's own Journal note for the fuller rationale and the
-      rejected alternative (a GitHub Release asset tied to the same tag).
-- [ ] Spike coverage collection inside `validate-and-promote.yml`'s existing
+      against). The full per-line coverage map itself is published
+      separately as a **GitHub Release asset**, tagged on the `dev`
+      commit it was measured against (`coverage-baselines-<dev_head>`).
+      Attribution correctness is unaffected either way: measurement
+      happens against `dev`'s own source form regardless of which
+      branch/mechanism later stores the resulting JSON, and Phase 2's
+      already-merged `ancestor_resolution.py` works unchanged either way
+      (it only ever walks `main`'s git history of the small pointer file,
+      never the payload).
+- [x] Spike coverage collection inside `validate-and-promote.yml`'s existing
       `full`/`worktree-manager` jobs (no new job; instrument the existing
       one) and confirm the artifact it produces round-trips through the
-      chosen storage/correlation mechanism.
+      chosen storage/correlation mechanism. **Mechanism spiked and unit-
+      tested** (`tools/test_promote_release.py::test_promote_checks_in_a_matching_coverage_baseline`
+      confirms the pointer-only round-trip); **real pipeline confirmation
+      still open** — the first actual `validate-and-promote.yml` dispatch
+      with all 9 enrolled plugins producing a baseline (run `37112726450`)
+      is what surfaced the 100MB blocker this very entry reverses, so a
+      fresh real run against this fix is still needed once it lands.
 
 ### Phase 1 — Baseline generation + correlation at the promotion gate
 - [x] Instrument the promotion gate's full-suite run to emit a durable,
@@ -148,8 +159,10 @@ order.
       collection (needed to resolve `agent-ssh`'s own vendored
       dependencies, unlike the dependency-free `ai-attribution` Phase 0
       pilot) and uploads the resulting baseline as a build artifact.
-      Expanding to the remaining 8 plugins in this matrix is the next
-      increment, not yet done.
+      **Expanded to all remaining 8 plugins across several follow-up
+      increments; completed 2026-10-02 (latest Journal entry) with
+      `agent-dispatch`'s enrollment -- the full 9-plugin matrix now
+      produces a real baseline.**
 - [x] Publish baselines **atomically**: since `validate-and-promote.yml` runs
       per-plugin suites as separate matrix jobs (plus `worktree-manager`
       separately), never persist per-job coverage results directly as a
@@ -176,15 +189,44 @@ order.
       -- a stale/mis-targeted artifact can never be silently checked in.
 
 ### Phase 2 — Nearest-ancestor resolution + attribution remap/invalidate
-- [ ] Given an arbitrary fork-point commit, resolve the newest baseline
+- [x] Given an arbitrary fork-point commit, resolve the newest baseline
       whose measured commit is an ancestor, per the vision's Feature.
-- [ ] Implement remap-or-invalidate: for files touched by commits between
+      **Done 2026-10-03:** `ancestor_resolution.resolve_nearest_baseline`
+      walks `main`'s own history of a plugin's checked-in baseline file
+      (newest generation first) and returns the first whose
+      `measured_commit` is a real ancestor of the fork point (via `git
+      merge-base --is-ancestor`), skipping any generation that doesn't
+      qualify rather than assuming the newest one always does.
+- [x] Implement remap-or-invalidate: for files touched by commits between
       the resolved baseline and the fork point, either translate line-level
       attribution through those commits' own diffs, or mark the file's
       attribution invalid (forcing it through the smoke fallback for that
-      file specifically).
-- [ ] Unit-test this against a constructed history with real intervening
+      file specifically). **Done:** `ancestor_resolution.compute_file_remap`
+      classifies each touched file's `--unified=0` diff as containing at
+      least one hunk that both removes and adds lines (content actually
+      changed -- invalidate the whole file) or as pure insertions/deletions
+      only (per-line remap, via `remap_line`); `remap_or_invalidate_baseline`
+      applies that per file across a whole baseline, dropping invalidated
+      files from the ``coverage`` map entirely -- which
+      `selection.select_tests` already treats as `no_baseline_entry`, so no
+      changes were needed there to make Phase 2's output usable by Phase
+      0's existing selector. `remap_line` itself is deliberately
+      **asymmetric**: a line preceded only by deletions is safely
+      remapped, but a line preceded by *any* insertion is dropped, never
+      remapped -- a clean line-coordinate shift proves nothing about
+      execution, and inserted code can introduce new control flow that
+      makes a previously-reached line unreachable even though its line
+      number translates perfectly (see the Journal for how this was
+      found).
+- [x] Unit-test this against a constructed history with real intervening
       line insertions/deletions, not just a same-content forward-move case.
+      **Done:** `tools/test_coverage_guided_selection.py`'s
+      `TestIsAncestor`/`TestResolveNearestBaseline`/
+      `TestComputeFileRemap`/`TestRemapOrInvalidateBaseline` build real git
+      histories via subprocess (temp repos, real commits) covering pure
+      insertion, pure deletion, content replacement, a mixed
+      insertion-then-replacement hunk set, and a full three-file
+      integration case.
 
 ### Phase 3 — Diff-scoped selection + coverage-debt / smoke fallback
 - [ ] Build the diff-scoped selector: PR diff + resolved baseline (with
@@ -295,6 +337,264 @@ copilot-extensions-specific Phase 1.
 _Pending review of this plan._
 
 ## Journal
+
+### 2026-10-03 — Phase 0 storage/correlation decision reversed: hybrid pointer + Release asset
+Reopens and revises the 2026-10-01 Phase 0 storage/correlation decision
+below ("check into `main`") after its first real end-to-end exercise hit a
+hard wall that decision didn't anticipate.
+
+**What happened:** driving this effort's own pipeline-health follow-up
+(after fixing an unrelated `agent-logger` coverage-baseline collection bug,
+PR #5056), a manual `validate-and-promote.yml` dispatch against `dev`'s tip
+was the first run ever to have all 9 enrolled plugins actually produce a
+coverage baseline in the same promotion. All 9 `full - <plugin>` coverage-
+baseline-collection jobs succeeded — but the "Promote dev -> main" job's
+own `git push` failed outright:
+
+```
+remote: error: File .github/coverage-baselines/agent-dispatch.json is 145.33 MB; this exceeds GitHub's file size limit of 100.00 MB
+remote: error: File .github/coverage-baselines/agent-worktrees.json is 115.24 MB; this exceeds GitHub's file size limit of 100.00 MB
+remote: error: GH001: Large files detected.
+remote: pre-receive hook declined
+```
+
+This was invisible until now because `agent-logger`'s own (separately
+broken, #5056-fixed) baseline collection had always failed the promotion
+gate's "enrolled plugin missing a baseline" check first, long before
+`promote_release.py` ever got far enough to attempt pushing the complete
+9-plugin baseline set. Filed as `ThomasMichon/copilot-extensions#5075`.
+
+**Why not just enable Git LFS and keep the original design as-is?**
+Considered, but LFS changes every consumer's clone/checkout cost
+(LFS-tracked files are fetched on `git clone`/`checkout` by default unless
+every consumer configures smudge filtering, which this repo's own
+contributors/CI runners would then all need to opt into) for data that, by
+this effort's own Phase 2/3 design, only a correlation-resolution step
+ever actually needs to read — baking that cost into every ordinary clone of
+`main` for all time is a worse trade than decoupling the payload from the
+git tree entirely.
+
+**Decision (hybrid, not a full migration):** split the single baseline
+document the original decision checked into `main` into two pieces:
+- A tiny **pointer** (`measured_commit`, `release_tag`, `asset` — a few
+  hundred bytes regardless of plugin suite size) still checked into
+  `main`'s own tree at the exact same path
+  (`.github/coverage-baselines/<plugin>.json`), via the exact same
+  commit+tag correlation mechanism the original decision chose. This
+  preserves that decision's own real insight (reuse the pipeline's
+  existing, trusted correlation mechanism rather than inventing a second
+  one) and -- critically -- means Phase 2's already-merged, already-
+  reviewed `ancestor_resolution.resolve_nearest_baseline` (PR #5049) needs
+  **zero code changes**: it only ever walked `main`'s git history of this
+  file via `git log`/`git show`, and a pointer is just as walkable as a
+  full baseline was.
+- The full per-line coverage map itself, published as a **GitHub Release**
+  asset (one asset per plugin), tagged on the measured `dev` commit itself
+  (`coverage-baselines-<dev_head>` — deliberately NOT the promotion's
+  own eventual `main`-side tag, whose name isn't knowable until after a
+  real post-merge squash-merge; see `tools/promote_release.py`'s own
+  `candidate_branch` docstring for why that's a separate, later-known
+  value). Published the moment collection succeeds, independent of
+  whether/when/how that `dev` commit's own promotion actually lands.
+- No Git LFS, no new token scope (`gh release create`/`upload` already
+  work under the existing `APERTURE_RELEASE_TOKEN`'s `Contents: Read and
+  write` grant — Releases are a `Contents` API surface), and no change to
+  an ordinary `git clone`'s size at all: Release assets are never part of
+  a repo's object database.
+
+**What actually changed:**
+- `tools/coverage_guided_selection/correlation.py` — rewritten module
+  docstring; added `release_tag_for`, `asset_name_for`, `build_pointer`,
+  `POINTER_SCHEMA`. `baseline_path_on_main` and `require_measured_commit`
+  are unchanged (both are schema-agnostic about what's at that path, by
+  design).
+- `tools/promote_release.py` — `_write_coverage_baselines_into_scratch`
+  now writes `build_pointer`'s small document instead of the full
+  collected baseline; `_seed_coverage_baselines_from_main` is unchanged
+  (it already just copies forward whatever was previously committed,
+  verbatim, regardless of content size).
+- `.github/workflows/validate-and-promote.yml` — new "Publish coverage
+  baselines as a GitHub Release" step, right after the existing "Verify
+  enrolled coverage baselines were actually collected" gate and before the
+  "Promote" step, using the exact same `release_tag_for` formula
+  (duplicated by hand in bash, same convention this file already uses for
+  `COVERAGE_BASELINES_DIR`).
+- Tests: `tools/test_promote_release.py`'s existing coverage-baseline
+  tests updated to assert the pointer shape (and the explicit absence of
+  a `coverage`/`tests` key); new `TestCorrelation` cases for the four new
+  `correlation.py` functions. `ancestor_resolution.py`'s own
+  `TestResolveNearestBaseline` suite needed **no changes at all** — it
+  already only ever asserted on `measured_commit`, never on a `coverage`
+  key being present.
+- **Not yet done** (genuinely new work, not regressed by this reversal):
+  the actual "fetch the full coverage map from its Release asset once a
+  pointer is resolved" step is Phase 3 wiring that was never built yet
+  either way (nothing in production reads `ResolvedBaseline.baseline`'s
+  `coverage` key today) — this reversal doesn't block or complicate that,
+  since the resolution step it builds on is unchanged.
+
+### 2026-10-03 — Phase 2: nearest-ancestor resolution + attribution remap/invalidate
+Operator asked to continue into the next phases now that Phase 1 is fully
+complete (9/9).
+
+Added `tools/coverage_guided_selection/ancestor_resolution.py`, the first
+piece of Phase 2:
+
+- **`resolve_nearest_baseline(repo_root, plugin, fork_commit, main_ref=...)`**
+  -- walks `main`'s own commit history of a plugin's checked-in baseline
+  file (`correlation.baseline_path_on_main`), newest generation first, and
+  returns the first whose embedded `measured_commit` is a real ancestor of
+  `fork_commit` (`git merge-base --is-ancestor`). Deliberately does not
+  assume the newest generation on `main` always qualifies -- a long-lived
+  PR branch's own fork point can sit behind the latest promotion, in which
+  case an older generation is the correct (and still valid) answer. Returns
+  `None` (not an error) when nothing qualifies, reserving a raised
+  `AncestorResolutionError` for a genuine git-plumbing failure (an
+  unreachable/invalid commit, a missing repo) -- the same "never silently
+  wrong, but 'nothing found' isn't an error" contract `selection.py`
+  already established in Phase 0.
+- **`compute_file_remap` / `remap_line` / `remap_or_invalidate_baseline`**
+  -- realize the Plan's remap-or-invalidate requirement. For each file the
+  resolved baseline covers, diffs it (`git diff --unified=0 --no-ext-diff
+  --no-textconv`) between the baseline's own `measured_commit` and the
+  fork point: a diff with even one hunk that genuinely replaces content
+  invalidates that file's attribution entirely, dropping it from the
+  resulting baseline's `coverage` map -- which `selection.select_tests`
+  already treats as `no_baseline_entry`, forcing that file's own smoke/
+  coverage-debt fallback for free. Otherwise (pure insertions/deletions
+  only), each covered line is remapped **asymmetrically**, not just
+  shifted by cumulative offset: a line preceded only by deletions
+  translates safely (a test that already reached it in the old code can't
+  be retroactively un-reached by removing unrelated code elsewhere), but a
+  line preceded by *any* insertion is dropped rather than remapped --
+  caught during review (see below): inserted code can introduce new
+  control flow (an early `return`, a new guard clause) that causes a
+  previously-reaching test to no longer reach it, and a clean
+  line-coordinate shift alone can't prove an insertion was
+  execution-neutral. No changes were needed to `selection.py` itself to
+  make Phase 2's output immediately usable by Phase 0's existing selector
+  -- confirmed by construction, not by assumption (see the integration
+  test below).
+- Uses `--unified=0` specifically because it makes "a hunk with both
+  nonzero old_len and nonzero new_len genuinely replaced content" a
+  reliable signal -- with default context lines, an insertion sitting next
+  to an unrelated unchanged line could otherwise look like it "replaced"
+  that context line. `--no-ext-diff --no-textconv` (added during review)
+  prevent `GIT_EXTERNAL_DIFF`/a configured textconv driver from
+  transforming this machine-readable output in a way `_parse_hunks`
+  wouldn't recognize, which could otherwise silently report "unchanged"
+  for a file that actually changed.
+
+**Verified directly, per the Plan's own explicit ask** ("unit-test against
+a constructed history with real intervening line insertions/deletions, not
+just a same-content forward-move case"): `tools/test_coverage_guided_selection.py`
+gained `TestIsAncestor`, `TestResolveNearestBaseline`,
+`TestComputeFileRemap`, and `TestRemapOrInvalidateBaseline` -- each builds
+a real, throwaway git repo via subprocess (actual commits, not mocked
+diffs) covering: a real ancestor/non-ancestor/self pair and an unreachable
+commit; the newest-qualifying-generation resolution case and the
+none-qualify case; pure insertion (and that lines after it are
+conservatively dropped, not shifted), pure deletion, content replacement,
+a mixed insertion-then-replacement hunk set (confirming the whole file
+invalidates, not just the replaced hunk's own range); a full three-file
+integration pass (one untouched, one deletion-shifted, one
+content-replaced) plus a "the only covered line was itself deleted" edge
+case and a no-mutation check on the input baseline; a real multi-commit
+cumulative-remap case built entirely from deletions (baseline measured ->
+two separate real intervening deletion commits -> a fork-point commit
+that also deletes a line, with a hand-computed expected mapping); a
+direct regression test for the control-flow scenario above (inserting an
+early-exit guard clause before a covered line correctly drops that line's
+attribution rather than carrying it forward); and a binary-file-change
+case (a nonempty diff with no parsed `@@` hunks at all must invalidate,
+not pass through as "unchanged"). Every git subprocess scrubs ambient
+repository-selection env vars. Full
+`tools/test_coverage_guided_selection.py` suite: 49 passed,
+5 skipped (the pre-existing opt-in real-subprocess integration tests,
+unaffected). `ruff check --select F,E9` (this repo's actual required
+lint selection) clean.
+
+**Caught during review (before merge):** the first version of this phase
+remapped a line through *any* pure insertion/deletion uniformly, treating
+a clean line-coordinate shift as proof an edit was execution-neutral.
+It isn't -- inserting a new early `return`/guard clause before a
+previously-covered line shifts that line's position predictably while
+also making it unreachable for a test that used to execute it, and hunk
+lengths alone can't distinguish that case from a harmless insertion.
+Also caught: a nonempty diff with no parsed hunks at all (e.g. a binary
+file change) fell through to "remapped" with an empty hunk set, silently
+carrying every old attribution forward unchanged across a real, unparsed
+edit -- now invalidates instead.
+Fixed by making insertions asymmetric with deletions (see above) before
+this phase's own PR merged, not after.
+
+**Not yet done:** wiring `ancestor_resolution` into a real caller (Phase 3's
+diff-scoped selector is the first consumer -- it needs a resolved,
+remapped baseline as an input, which this phase now provides but nothing
+yet calls for a real PR). Phase 3 (diff-scoped selection + coverage-debt /
+smoke fallback) is the next slice.
+
+### 2026-10-02 (latest) — Fixed `agent-dispatch`'s async-cancellation race; enrolled; Phase 1 complete (9/9)
+Operator asked to pursue `agent-dispatch` -- the last plugin blocked from
+the previous entry's own Phase 1 tally -- to completion.
+
+**Root cause, confirmed directly** (matches the previous entry's own
+characterization): `agent-dispatch`'s coordinator `lifespan()` teardown
+tore down its background verification-drain loop with plain
+`task.cancel()` + `await task`. That loop's real work (recovering/claiming
+verification requests, evaluating them) all runs through
+`asyncio.to_thread(...)`, and cancelling the *task* that is currently
+awaiting a `to_thread` call only cancels the awaiting coroutine --
+`asyncio`'s own cancellation propagates through the coroutine immediately,
+but the underlying OS thread keeps running the real, synchronous call to
+completion regardless (reproduced directly with a minimal
+`asyncio.to_thread`/`task.cancel()` script: `await task` returned ~0.9s
+before the thread's own "finished" print). Under normal (uninstrumented)
+execution, that orphaned thread's own SQLite open usually finishes before
+a test's own `tmp_path` fixture tears down its directory; under
+coverage-instrumented execution's much slower per-line tracing, the race
+widens enough that the thread loses, and the next test's own queue
+`_connect()` raises `sqlite3.OperationalError: unable to open database
+file` because the directory is already gone.
+
+**Fix:** replaced that one `task.cancel()` call with a cooperative
+`stop_event`: `drain_verification_requests` now checks it at each loop
+checkpoint between `to_thread` calls (and races it into its own idle
+`_wait`), so setting the event and awaiting the task lets the loop finish
+whatever synchronous DB call is currently in flight and exit **on its
+own** -- the awaited task only returns once that real work is actually
+done, closing the race rather than requiring a longer wait or a retry.
+`task.cancel()` remains available as an explicit last-resort fallback
+(with a bounded 10s wait) for a genuinely hung loop. Added two regression
+tests: one characterizing the original defect directly (`task.cancel()`
+returns before an in-flight `to_thread` call finishes), and one proving
+the `stop_event` fix (the awaited task only returns after that same
+in-flight call completes).
+
+**Verified directly, same bar as every other plugin this phase:** the
+real repro (`baseline.py` against `agent-dispatch/tests/test_coordinator.py`,
+`project_dir` mode) succeeded cleanly 3 consecutive runs (previously failed
+intermittently); the fix doesn't regress `run-plugin-tests.py`'s own full
+suite (3,799 tests, all 7 sub-suites green); and `baseline.py` against the
+plugin's **entire** test suite (174 source files) now collects a clean,
+complete baseline end to end with no `sqlite3.OperationalError`.
+
+`agent-dispatch` enrolled in this same change -- the `full` job's
+Coverage-baseline/Upload-coverage-baseline `if:` conditions and the
+`promote` job's matching enrolled-baseline hard-gate list both now include
+it, same two-line-list pattern as every prior enrollment this phase.
+
+**Phase 1 is now fully complete: 9 of 9 plugins enrolled** (`agent-ssh`,
+`agent-codespaces`, `agent-containers`, `agent-vault`, `agent-logger`,
+`agent-mcp`, `agent-bridge`, `agent-worktrees`, `agent-dispatch`) -- every
+plugin in the `full` job's matrix now produces a real coverage baseline at
+the promotion gate.
+
+**Not yet done:** Phase 2 (nearest-ancestor resolution), Phase 3
+(diff-scoped selection + coverage-debt/smoke fallback), Phase 4 (replacing
+`agent-worktrees`' own collect-only tier), and Phase 5 (generalizing beyond
+`agent-worktrees`) haven't started. Phase 1's completion is a real
+milestone, not the whole effort's.
 
 ### 2026-10-02 — Incident: `select.py` shadowed the stdlib, blocking every real promotion for ~3h
 Operator asked me to check whether this effort's own coverage-artifact work

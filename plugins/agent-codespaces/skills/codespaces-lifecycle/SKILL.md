@@ -271,7 +271,13 @@ The **Connection Owner** keeps the
 credential relay and the host-bridge forward alive while its mux session exists
 (checked from the host every couple of minutes, only after the
 launch confirmed the session; never by waking a stopped CodeSpace), up to a 24h
-cap, and both forwards follow a host bridge restart onto its new port. On the same
+cap, and both forwards follow a host bridge restart onto its new port. When a held
+CodeSpace stops (an idle timeout or GitHub's runtime limit), the Owner tears its
+forwards down and does not rebuild them until the CodeSpace is `Available` again
+(a rebuild would boot it back up). A rejoin (`copilot <name> --detach
+--copilot-arg=--resume=<id>`) starts it, and the Owner restores its forwards
+within one cycle. Its `gh` calls run off the loop that carries every forward, so
+one slow or stopped CodeSpace never stalls another CodeSpace's relay or bridge. On the same
 check it mirrors the running session's transcript to this host (whole lines, only
 what was appended) and pushes it into the agent-logger hub under
 `.codespaces-live/<name>` (its own namespace: the close-out capture below uses
@@ -281,7 +287,12 @@ it lands whole, across Owner restarts and even after the session ends or the
 box stops (it never contacts the box for that); an Owner with nothing else to
 hold stays up to an hour to retry it, and the next Owner start resumes it after
 that. `delete` removes a CodeSpace's local mirror once its hub copy is current,
-then or on a later retry (`AGENT_CODESPACES_TRANSCRIPT_MIRROR=0` turns this off). Observe and steer it through agent-bridge
+then or on a later retry (`AGENT_CODESPACES_TRANSCRIPT_MIRROR=0` turns this off).
+The Owner usually runs headless, so it logs to
+`~/.agent-codespaces/logs/owner.log` (rotated when an Owner starts; under
+`AGENT_CODESPACES_HOME` when set): its start and stop, every relay or forward
+re-establish, and every failed cycle. Read it first when a worker's credential
+relay or a forward drops. Observe and steer it through agent-bridge
 (`live-sessions resolve`, `result`, `send`, `ui`). A detached launch keeps the
 CodeSpace claim active; `--stop` settles it like any finished connection and
 deregisters the stopped session from the host bridge at once. When close-out

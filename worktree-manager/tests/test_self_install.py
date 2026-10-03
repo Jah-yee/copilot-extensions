@@ -31,6 +31,7 @@ def _fake_payload(tmp: Path, version: str) -> Path:
     pkg = pd / "src" / "worktree_manager"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text(f'__version__ = "{version}"\n')
+    (pkg / "__main__.py").write_text("")
     (pd / "pyproject.toml").write_text("[project]\nname='x'\n")
     return pd
 
@@ -89,6 +90,135 @@ def test_apply_installs_marker_slot_and_binstub(tmp_path, monkeypatch):
     assert payload["provider_root"] == str(root.resolve())
 
 
+def test_apply_reaps_stranded_cutover_passive_before_copying_payload(tmp_path, monkeypatch):
+    """A slot left occupied by an abandoned cutover passive (spawned by
+    ``mux_daemon_cutover.spawn_passive`` with its ``cwd`` pinned inside the
+    slot, then stranded when the orchestrator driving that cutover died
+    before promoting or terminating it) must be reaped via the existing
+    breadcrumb-driven recovery BEFORE ``_copy_payload`` tries to delete the
+    slot -- otherwise a bare ``self-install --apply`` can hit a Windows
+    ``PermissionError`` that only ``self_update()``'s own cutover path would
+    have cleared (the gap this test guards against regressing)."""
+    from zdd import breadcrumb
+
+    import worktree_manager.mux_daemon_cutover as mdc
+
+    pd = _fake_payload(tmp_path, "9.9.9")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+
+    # Pre-create the slot, as a crashed prior self-update attempt would have
+    # left it (payload already copied in, but never finalized/marked).
+    slot = version_slot("9.9.9", root)
+    slot.mkdir(parents=True)
+    (slot / "stale-marker.txt").write_text("from an aborted attempt")
+
+    # A non-terminal breadcrumb naming the stranded passive's pid -- exactly
+    # what spawn_passive + CutoverOrchestrator leave behind when the
+    # orchestrator dies before the passive is ever promoted or terminated.
+    stranded_pid = 999999
+    routing_dir = mdc.routing_dir(root)
+    breadcrumb.write_breadcrumb(
+        routing_dir, state="started", old=None, new_port=54321, new_pid=stranded_pid,
+    )
+
+    reaped: list[int] = []
+    monkeypatch.setattr(mdc, "_iter_mux_daemon_pids", lambda: {stranded_pid})
+    monkeypatch.setattr(
+        mdc, "_terminate_mux_daemon_pid",
+        lambda pid, *, root: (reaped.append(pid), True)[1],
+    )
+
+    res = self_install(pd, root=root, dry_run=False)
+
+    assert res.action == "installed"
+    assert reaped == [stranded_pid], "the stranded passive must be reaped before rmtree"
+    assert not (slot / "stale-marker.txt").exists(), "the slot must be freshly recopied"
+    assert (slot / "src" / "worktree_manager" / "__init__.py").exists()
+    assert current_version(root) == "9.9.9"
+    # The breadcrumb must be left ALONE (not cleared, not rewritten): it may
+    # still name an "old" endpoint that a later, full activate_after_update()
+    # -> recover_stale_cutover() needs to undrain. A later real cutover
+    # re-reading this same file simply finds the reaped pid no longer alive
+    # -- a clean no-op on its side -- so leaving it is always safe.
+    record = breadcrumb.read_breadcrumb(routing_dir)
+    assert record is not None
+    assert record["new_pid"] == stranded_pid
+    assert breadcrumb.is_stale(record)
+
+
+def test_apply_rechecks_install_need_after_acquiring_the_lease(tmp_path, monkeypatch):
+    """A concurrent self_install()/self_update() could finish installing (and
+    even activating) this EXACT version while this call was waiting to
+    acquire the cutover lease. Without a recheck under the lease, this call
+    would blindly rmtree + recopy a slot that is now the live, already-active
+    install -- racing whatever is currently running out of it. The
+    lock-free pre-check only proves the version was needed at that point in
+    time, not that it still is by the time the lease is actually held."""
+    pd = _fake_payload(tmp_path, "7.8.9")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+
+    real_needs_install = si.needs_install
+    calls: list[bool] = []
+
+    def _needs_install_then_satisfied(version_arg, root_arg):
+        result = real_needs_install(version_arg, root_arg)
+        calls.append(result)
+        if len(calls) == 1:
+            return True  # the lock-free pre-check: install still needed
+        # Simulate a concurrent self_install() having finished installing
+        # (and activating) this exact version while we waited for the lease.
+        slot = version_slot(version_arg, root_arg)
+        slot.mkdir(parents=True, exist_ok=True)
+        (slot / "installed-by-concurrent-caller.txt").write_text("already live")
+        si._write_marker(root_arg, version_arg)
+        return False
+
+    monkeypatch.setattr(si, "needs_install", _needs_install_then_satisfied)
+
+    res = self_install(pd, root=root, dry_run=False)
+
+    assert res.action == "already-current"
+    assert len(calls) == 2, "must recheck needs_install() a second time under the lease"
+    # The concurrently-installed slot must be left completely untouched --
+    # not rmtree'd and not recopied over.
+    slot = version_slot("7.8.9", root)
+    assert (slot / "installed-by-concurrent-caller.txt").exists()
+    assert not (slot / "src").exists()
+
+
+def test_apply_defers_when_cutover_lock_is_busy(tmp_path, monkeypatch):
+    """If another process genuinely holds the cutover lock (a real,
+    concurrent self_update()/activate_after_update() in flight),
+    self_install must never mutate the slot unprotected -- per
+    docs/patterns/graceful-daemon-cutover.md's "serialize cutover attempts
+    under one lease" rule, it must defer (report action="error") rather
+    than proceed with an unguarded rmtree/copy that a concurrent cutover's
+    own spawn_passive could race against."""
+    import worktree_manager.mux_daemon_cutover as mdc
+
+    pd = _fake_payload(tmp_path, "4.5.6")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+
+    def _always_busy(root_arg, *, timeout_s=5.0, poll_s=0.2):
+        raise TimeoutError("mux-daemon cutover lock busy")
+
+    monkeypatch.setattr(mdc, "_acquire_cutover_lock", _always_busy)
+
+    res = self_install(pd, root=root, dry_run=False)
+
+    assert res.action == "error"
+    assert "cutover" in res.reason
+    # Nothing must have been mutated: no marker, no slot.
+    assert current_version(root) is None
+    assert not version_slot("4.5.6", root).exists()
+
+
 def test_apply_is_idempotent_and_version_gated(tmp_path, monkeypatch):
     pd = _fake_payload(tmp_path, "1.2.3")
     root = tmp_path / "root"
@@ -130,6 +260,160 @@ def test_stale_legacy_binstub_content_forces_redeploy(tmp_path, monkeypatch):
     assert needs_install("1.2.3", root) is False
 
 
+def test_needs_install_rejects_an_empty_broken_slot(tmp_path, monkeypatch):
+    """Regression: a slot that exists but is EMPTY must not be mistaken for
+    a valid, already-current install just because ``current-version``
+    already names it and the directory exists. ``needs_install()`` must
+    verify the slot's actual runnable content, not merely that it exists.
+    """
+    pd = _fake_payload(tmp_path, "1.2.3")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+    self_install(pd, root=root, dry_run=False)
+    assert needs_install("1.2.3", root) is False
+
+    # Simulate the on-disk corruption directly: marker + binstub still
+    # correct, but the slot's content is gone (e.g. an interrupted
+    # rmtree/copytree left an existing, empty directory behind).
+    slot = version_slot("1.2.3", root)
+    import shutil as _shutil
+    _shutil.rmtree(slot)
+    slot.mkdir(parents=True)
+    assert slot.is_dir() and not any(slot.iterdir())
+
+    assert needs_install("1.2.3", root) is True, (
+        "an empty slot must never be treated as a valid install"
+    )
+    res = self_install(pd, root=root, dry_run=False)
+    assert res.action == "installed"
+    assert (slot / "src" / "worktree_manager" / "__init__.py").exists()
+    assert needs_install("1.2.3", root) is False
+
+
+def test_needs_install_rejects_a_slot_missing_the_module_launch_target(tmp_path, monkeypatch):
+    """A slot can retain ``src/worktree_manager/__init__.py`` while still
+    missing another file the shipped binstubs need to launch (``uv run
+    --project <slot> python -m worktree_manager``, which also requires
+    ``pyproject.toml`` and ``__main__.py``) -- a partial recopy failure
+    need not empty the whole tree to leave it unlaunchable. Only checking
+    for one file would still mistake this for a valid install.
+    """
+    pd = _fake_payload(tmp_path, "1.2.3")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+    self_install(pd, root=root, dry_run=False)
+    assert needs_install("1.2.3", root) is False
+
+    slot = version_slot("1.2.3", root)
+    (slot / "src" / "worktree_manager" / "__main__.py").unlink()
+    assert (slot / "src" / "worktree_manager" / "__init__.py").is_file()
+
+    assert needs_install("1.2.3", root) is True, (
+        "a slot missing its module launch target must never be treated as a valid install"
+    )
+    res = self_install(pd, root=root, dry_run=False)
+    assert res.action == "installed"
+    assert needs_install("1.2.3", root) is False
+
+
+def test_self_install_refuses_to_mark_complete_a_payload_missing_a_key_file(tmp_path, monkeypatch):
+    """A payload missing ``__main__.py`` (not caught by ``payload_version()``,
+    which only reads ``__init__.py``, nor by the ``pyproject.toml``-only
+    check ``self_update()`` performs on the fetched payload) must not be
+    marked complete, published as ``current-version``, or reported
+    ``action='installed'`` -- it would leave a slot ``_slot_is_complete()``
+    immediately rejects, with the binstub unable to launch it.
+    """
+    pd = _fake_payload(tmp_path, "1.2.3")
+    (pd / "src" / "worktree_manager" / "__main__.py").unlink()
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+
+    res = self_install(pd, root=root, dry_run=False)
+
+    assert res.action == "error"
+    assert "__main__.py" in (res.reason or "")
+    assert current_version(root) is None
+    assert not version_slot("1.2.3", root).exists()
+
+
+def test_copy_payload_oserror_is_normalized_to_a_clean_error_result(tmp_path, monkeypatch):
+    """A bare ``OSError`` raised by ``shutil.rmtree``/``shutil.copytree``
+    inside ``_copy_payload`` (most notably a Windows ``PermissionError``/
+    WinError 32 -- copilot-extensions#4999) must be normalized to the one
+    exception type ``self_install()`` catches at its boundary, so it
+    reports a clean ``action='error'`` result -- exactly like any other
+    recognized install failure -- instead of propagating uncaught and
+    skipping cleanup.
+    """
+    import shutil as _shutil
+
+    pd = _fake_payload(tmp_path, "1.2.3")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+
+    real_copytree = _shutil.copytree
+
+    def _boom(*args, **kwargs):
+        raise PermissionError(
+            "[WinError 32] The process cannot access the file because it "
+            "is being used by another process"
+        )
+
+    monkeypatch.setattr(si.shutil, "copytree", _boom)
+
+    res = self_install(pd, root=root, dry_run=False)
+
+    assert res.action == "error"
+    assert "WinError 32" in (res.reason or "") or "being used" in (res.reason or "")
+    assert current_version(root) is None
+    assert not version_slot("1.2.3", root).exists(), (
+        "a failed copy must not leave a broken, empty slot behind"
+    )
+
+    # And a retry with the real implementation restored succeeds cleanly.
+    monkeypatch.setattr(si.shutil, "copytree", real_copytree)
+    res2 = self_install(pd, root=root, dry_run=False)
+    assert res2.action == "installed"
+    assert current_version(root) == "1.2.3"
+
+
+def test_marker_invalidation_permission_error_aborts_instead_of_proceeding(tmp_path, monkeypatch):
+    """A ``PermissionError`` invalidating a prior slot's completion marker
+    (e.g. the marker file itself is momentarily held open) must abort the
+    install rather than being swallowed and letting mutation proceed with
+    a stale marker still on disk. Only a genuinely absent marker
+    (``FileNotFoundError``) is the ordinary, ignorable case.
+    """
+    pd = _fake_payload(tmp_path, "1.2.3")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+    self_install(pd, root=root, dry_run=False)
+    assert current_version(root) == "1.2.3"
+
+    real_unlink = Path.unlink
+
+    def _flaky_unlink(self, *a, **k):
+        if self.name == si._SLOT_COMPLETE_MARKER:
+            raise PermissionError(13, "Access is denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", _flaky_unlink)
+    # Force a reinstall of the SAME version so _copy_payload_unsafe's
+    # invalidation step actually runs against a marker that already exists.
+    monkeypatch.setattr(si, "_binstubs_are_stale", lambda: True)
+
+    res = self_install(pd, root=root, dry_run=False)
+
+    assert res.action == "error"
+    assert "Access is denied" in (res.reason or "")
+
+
 def test_stale_provider_manifest_forces_repair(tmp_path, monkeypatch):
     pd = _fake_payload(tmp_path, "1.2.3")
     root = tmp_path / "root"
@@ -150,6 +434,123 @@ def test_stale_provider_manifest_forces_repair(tmp_path, monkeypatch):
     payload = __import__("json").loads(manifest.read_text(encoding="utf-8"))
     assert payload["command"] == [str((lb / si._primary_binstub_name()).resolve())]
     assert payload["provider_root"] == str(root.resolve())
+
+
+def test_stale_provider_manifest_repair_never_touches_the_payload_slot(tmp_path, monkeypatch):
+    """Regression: a manifest-only repair (marker/slot/binstubs already
+    correct -- only the control-plane provider manifest is stale) must not
+    go through ``_copy_payload``. That path rmtrees the existing version
+    slot before recopying it, which fails with a PermissionError if any
+    OTHER running ``worktree-manager`` instance has that slot's venv open --
+    exactly the shape a routine repair should be safe to run under, not one
+    more way for it to fail.
+    """
+    pd = _fake_payload(tmp_path, "1.2.3")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    registry = _patch_provider_registry(monkeypatch, tmp_path)
+    self_install(pd, root=root, dry_run=False)
+
+    manifest = registry / "worktree-manager.json"
+    manifest.write_text(
+        '{"schema_version":1,"provider":"worktree-manager","command":["C:/stale.cmd"],'
+        '"minimum_version":"0.1.0-dev21","provider_root":"C:/stale"}\n',
+        encoding="utf-8",
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("_copy_payload must not run for a manifest-only repair")
+
+    monkeypatch.setattr(si, "_copy_payload", _boom)
+
+    assert needs_install("1.2.3", root) is True
+    repaired = self_install(pd, root=root, dry_run=False)
+    assert repaired.action == "installed"
+    payload = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    assert payload["command"] != ["C:/stale.cmd"]
+    assert needs_install("1.2.3", root) is False
+
+
+def test_concurrent_manifest_repairs_do_not_race(tmp_path, monkeypatch):
+    """Regression: two writers racing _write_control_plane_provider_manifest
+    must not share a temp filename -- the loser used to raise
+    FileNotFoundError when os.replace() found the winner had already moved
+    the shared ``.tmp`` file out from under it.
+    """
+    import threading
+
+    pd = _fake_payload(tmp_path, "1.2.3")
+    root = tmp_path / "root"
+    _patch_local_bin(monkeypatch, tmp_path)
+    _patch_provider_registry(monkeypatch, tmp_path)
+
+    errors: list[BaseException] = []
+    start = threading.Barrier(2)
+
+    def _writer():
+        start.wait()
+        try:
+            si._write_control_plane_provider_manifest(pd, root=root)
+        except BaseException as exc:  # noqa: BLE001 -- capture to assert none occurred
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == []
+    manifest = si._control_plane_provider_manifest_path(pd, root=root)
+    assert manifest.is_file()
+    assert not si._control_plane_provider_manifest_is_stale(pd, root=root)
+
+
+def test_replace_with_retry_recovers_from_a_transient_permission_error(tmp_path, monkeypatch):
+    """Deterministic coverage for ``_replace_with_retry``'s own retry loop:
+    a transient Windows ``PermissionError`` from ``os.replace()`` (the
+    exact failure mode ``test_concurrent_manifest_repairs_do_not_race``
+    exercises only probabilistically, via genuine thread contention) must
+    not fail the call -- it must retry until a later attempt succeeds.
+    """
+    src = tmp_path / "src.tmp"
+    dst = tmp_path / "dst"
+    src.write_text("content", encoding="utf-8")
+
+    real_replace = os.replace
+    calls: list[int] = []
+
+    def _flaky_replace(s, d):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied")
+        return real_replace(s, d)
+
+    monkeypatch.setattr(si.os, "replace", _flaky_replace)
+
+    si._replace_with_retry(src, dst)
+
+    assert len(calls) == 2, "must have retried exactly once after the transient failure"
+    assert dst.read_text(encoding="utf-8") == "content"
+    assert not src.exists()
+
+
+def test_replace_with_retry_reraises_after_exhausting_attempts(tmp_path, monkeypatch):
+    """A PermissionError that never clears must still surface to the caller
+    -- not be swallowed indefinitely -- once the bounded retry budget is
+    spent.
+    """
+    src = tmp_path / "src.tmp"
+    dst = tmp_path / "dst"
+    src.write_text("content", encoding="utf-8")
+
+    def _always_fails(s, d):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(si.os, "replace", _always_fails)
+
+    with pytest.raises(PermissionError):
+        si._replace_with_retry(src, dst, attempts=3, delay_s=0.0)
 
 
 def test_known_legacy_prerename_binstub_is_recognized_and_cleaned(tmp_path, monkeypatch):

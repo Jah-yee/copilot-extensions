@@ -1423,8 +1423,9 @@ class TestGitHubProvider:
 
     def test_merge_pull_squash_admin_builds_args(self, monkeypatch):
         # pr-merge --now: a submitter self-merge is a squash merge, admin past
-        # the non-blocking gate, and NEVER deletes the branch (so finalize can
-        # affirm the merge).
+        # the non-blocking gate, and deletes the branch by default (safe --
+        # finalize/pr-complete verify a merged PR against the tracked record's
+        # own head_sha, never the live remote branch).
         from agent_worktrees.providers import github
         captured = {}
 
@@ -1438,7 +1439,82 @@ class TestGitHubProvider:
         a = captured["args"]
         assert a[:5] == ["gh", "pr", "merge", "7", "--repo"]
         assert "--squash" in a and "--admin" in a
-        assert "--delete-branch" not in a
+        assert "--delete-branch" in a
+
+    def test_merge_pull_delete_source_branch_false_omits_flag(self, monkeypatch):
+        from agent_worktrees.providers import github
+        captured = {}
+        monkeypatch.setattr(
+            github, "run_cli",
+            lambda args, **kw: (captured.__setitem__("args", args), _proc())[1],
+        )
+        github.GitHubProvider().merge_pull(
+            "o/r", 7, squash=True, delete_source_branch=False,
+        )
+        assert "--delete-branch" not in captured["args"]
+
+    def test_merge_pull_passes_match_head_commit(self, monkeypatch):
+        # The stale-PR-object safety net (ThomasMichon/copilot-extensions#4949):
+        # when pr-merge --now resolves a locally tracked pushed head, it must
+        # reach gh as --match-head-commit <sha> so GitHub's own merge endpoint
+        # refuses rather than silently merges a stale view of the PR.
+        from agent_worktrees.providers import github
+        captured = {}
+        monkeypatch.setattr(
+            github, "run_cli",
+            lambda args, **kw: (captured.__setitem__("args", args), _proc())[1],
+        )
+        err = github.GitHubProvider().merge_pull(
+            "o/r", 7, squash=True, admin=True, expected_head_sha="deadbeef",
+        )
+        assert err == ""
+        a = captured["args"]
+        assert "--match-head-commit" in a
+        assert a[a.index("--match-head-commit") + 1] == "deadbeef"
+
+    def test_merge_pull_omits_match_head_commit_when_not_given(self, monkeypatch):
+        from agent_worktrees.providers import github
+        captured = {}
+        monkeypatch.setattr(
+            github, "run_cli",
+            lambda args, **kw: (captured.__setitem__("args", args), _proc())[1],
+        )
+        github.GitHubProvider().merge_pull("o/r", 7, squash=True, admin=True)
+        assert "--match-head-commit" not in captured["args"]
+
+    def test_enable_auto_merge_passes_match_head_commit(self, monkeypatch):
+        # Same stale-PR-object safety net as merge_pull, but for the
+        # NATIVE-AUTO-MERGE path (the default, prefer_auto_merge=True):
+        # auto-merge can complete immediately rather than only arm, so it
+        # needs the identical --match-head-commit protection -- proven here
+        # at the provider-CLI-args level, not just the fake-provider wiring
+        # level, so a regression that stops actually forwarding the flag
+        # into `gh pr merge --auto` would be caught.
+        from agent_worktrees.providers import github
+        captured = {}
+        monkeypatch.setattr(
+            github, "run_cli",
+            lambda args, **kw: (captured.__setitem__("args", args), _proc())[1],
+        )
+        err = github.GitHubProvider().enable_auto_merge(
+            "o/r", 7, squash=True, expected_head_sha="deadbeef",
+        )
+        assert err == ""
+        a = captured["args"]
+        assert "--match-head-commit" in a
+        assert a[a.index("--match-head-commit") + 1] == "deadbeef"
+
+    def test_enable_auto_merge_omits_match_head_commit_when_not_given(
+        self, monkeypatch,
+    ):
+        from agent_worktrees.providers import github
+        captured = {}
+        monkeypatch.setattr(
+            github, "run_cli",
+            lambda args, **kw: (captured.__setitem__("args", args), _proc())[1],
+        )
+        github.GitHubProvider().enable_auto_merge("o/r", 7, squash=True)
+        assert "--match-head-commit" not in captured["args"]
 
     def test_merge_pull_no_admin_omits_admin_flag(self, monkeypatch):
         from agent_worktrees.providers import github
@@ -1478,7 +1554,9 @@ class TestGitHubProvider:
 
     def test_enable_auto_merge_builds_auto_squash_no_admin(self, monkeypatch):
         # #225: native auto-merge is `--auto --squash`, never `--admin` (it must
-        # wait on required checks, not bypass them), and never deletes the branch.
+        # wait on required checks, not bypass them); deletes the branch by
+        # default once the eventual merge lands (same safety reasoning as
+        # merge_pull).
         from agent_worktrees.providers import github
         captured = {}
 
@@ -1492,7 +1570,19 @@ class TestGitHubProvider:
         a = captured["args"]
         assert a[:5] == ["gh", "pr", "merge", "7", "--repo"]
         assert "--auto" in a and "--squash" in a
-        assert "--admin" not in a and "--delete-branch" not in a
+        assert "--admin" not in a and "--delete-branch" in a
+
+    def test_enable_auto_merge_delete_source_branch_false_omits_flag(self, monkeypatch):
+        from agent_worktrees.providers import github
+        captured = {}
+        monkeypatch.setattr(
+            github, "run_cli",
+            lambda args, **kw: (captured.__setitem__("args", args), _proc())[1],
+        )
+        github.GitHubProvider().enable_auto_merge(
+            "o/r", 7, delete_source_branch=False,
+        )
+        assert "--delete-branch" not in captured["args"]
 
     def test_enable_auto_merge_honors_explicit_host(self, monkeypatch):
         from agent_worktrees.providers import github

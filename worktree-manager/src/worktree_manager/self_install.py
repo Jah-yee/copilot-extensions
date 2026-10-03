@@ -23,6 +23,8 @@ import os
 import re
 import shutil
 import subprocess
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +174,67 @@ def version_slot(version: str, root: Path | None = None) -> Path:
     return (root or default_root()) / VERSIONS_DIR / version
 
 
+_SLOT_COMPLETE_MARKER = ".install-complete"
+_SLOT_KEY_FILES = (
+    "pyproject.toml",
+    "src/worktree_manager/__init__.py",
+    "src/worktree_manager/__main__.py",
+)
+
+
+def _invalidate_slot_completion(slot: Path) -> None:
+    """Remove ``slot``'s completion marker, if any, before any mutation of
+    ``slot`` begins. A slot is proven complete only by this marker having
+    been published as the LAST step of a fully successful
+    ``_copy_payload_unsafe()`` -- invalidating it first (rather than
+    relying on the mutation that follows to remove it, which can itself
+    fail partway through) guarantees no stale marker from a slot's
+    previous occupant can ever survive an interrupted rebuild of the same
+    path and be mistaken for proof that the NEW content is complete.
+
+    Only a missing marker (the ordinary case: no prior install, or one
+    already invalidated) is swallowed. Any OTHER failure -- a
+    ``PermissionError`` from the marker still being held open, most
+    notably -- must propagate rather than let mutation proceed with a
+    stale marker still in place: ``_copy_payload``'s own boundary
+    normalizes it to the one exception type ``self_install()`` catches,
+    aborting the install instead of silently risking exactly the
+    stale-proof-of-completeness state this marker exists to prevent.
+    """
+    try:
+        (slot / _SLOT_COMPLETE_MARKER).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _mark_slot_complete(slot: Path) -> None:
+    (slot / _SLOT_COMPLETE_MARKER).write_text("", encoding="utf-8")
+
+
+def _slot_is_complete(slot: Path) -> bool:
+    """``True`` only when ``slot`` is proven complete by its own marker --
+    published solely as the last step of a fully successful payload copy
+    and pointer materialization -- AND still carries the key files the
+    shipped binstubs need to launch (``uv run --project <slot> python -m
+    worktree_manager``: ``pyproject.toml``, ``src/worktree_manager/
+    __init__.py``, and ``src/worktree_manager/__main__.py``).
+
+    The marker alone proves the install completed; it does not prove the
+    slot hasn't been damaged since (a file removed by something outside
+    this module's control after a genuinely successful install). The key
+    files remain a cheap, independent second check against that later
+    damage. Directory existence, or any subset of files present without
+    the marker, proves nothing: a slot can exist, and even partially
+    survive a failed ``_copy_payload()`` recopy (one that imports or
+    materialized libraries it depends on at runtime may still be missing),
+    while still being unlaunchable (``No module named worktree_manager``
+    or an equivalent failure at run time).
+    """
+    return (slot / _SLOT_COMPLETE_MARKER).is_file() and all(
+        (slot / rel).is_file() for rel in _SLOT_KEY_FILES
+    )
+
+
 def _binstub_files() -> list[str]:
     if os.name == "nt":
         return ["worktree-manager.cmd", "worktree-manager.ps1", "worktree-manager"]
@@ -225,7 +288,12 @@ def _write_control_plane_provider_manifest(
 ) -> Path:
     path = _control_plane_provider_manifest_path(payload_dir, root=root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # A unique per-writer temp name -- a concurrent repair (two
+    # worktree-manager instances independently detecting and fixing the
+    # same stale manifest) must not race on one shared ``.tmp`` file, where
+    # the loser's os.replace() would raise FileNotFoundError after the
+    # winner already moved it.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(
         json.dumps(
             _expected_control_plane_provider_manifest(payload_dir, root=root),
@@ -235,8 +303,36 @@ def _write_control_plane_provider_manifest(
         + "\n",
         encoding="utf-8",
     )
-    os.replace(tmp, path)
+    _replace_with_retry(tmp, path)
     return path
+
+
+def _replace_with_retry(src: Path, dst: Path, *, attempts: int = 10, delay_s: float = 0.01) -> None:
+    """``os.replace(src, dst)``, retrying a transient Windows
+    ``PermissionError`` (``ERROR_ACCESS_DENIED``, errno 13).
+
+    POSIX ``rename()`` is atomic even when two processes/threads target the
+    same ``dst`` concurrently -- exactly one call wins and the other simply
+    sees its own replace succeed with no error either way. Windows'
+    underlying ``MoveFileEx`` can instead briefly deny one of two truly
+    concurrent replacements of the same destination (observed in practice:
+    two callers each committing their own uniquely-named temp file onto the
+    same manifest path at once). The content is identical in that case --
+    both writers computed the same expected manifest -- so retrying after a
+    short backoff until this call's own replace succeeds (another
+    concurrent winner having already published equivalent content is not a
+    failure) is correct, not merely a cosmetic swallow.
+    """
+    last: PermissionError | None = None
+    for _ in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:
+            last = e
+            time.sleep(delay_s)
+    assert last is not None
+    raise last
 
 
 def binstub_present() -> Path | None:
@@ -317,13 +413,21 @@ def status(root: Path | None = None) -> SelfInstallStatus:
     )
 
 
+def _core_install_satisfied(version: str, root: Path | None = None) -> bool:
+    """Marker/slot/binstubs match ``version`` -- independent of the manifest."""
+    r = root or default_root()
+    return (
+        current_version(r) == version
+        and _slot_is_complete(version_slot(version, r))
+        and binstub_present() is not None
+        and not _binstubs_are_stale()
+    )
+
+
 def needs_install(version: str, root: Path | None = None) -> bool:
     r = root or default_root()
     return not (
-        current_version(r) == version
-        and version_slot(version, r).is_dir()
-        and binstub_present() is not None
-        and not _binstubs_are_stale()
+        _core_install_satisfied(version, r)
         and not _control_plane_provider_manifest_is_stale(root=r)
     )
 
@@ -496,7 +600,116 @@ def _find_any_symlink(tree: Path) -> Path | None:
     return None
 
 
+class _CutoverLockBusy(Exception):
+    """A genuinely concurrent cutover holds the mux-daemon lock right now."""
+
+
+def _acquire_install_cutover_lease(root: Path):
+    """The shared mux-daemon cutover lease, held for the WHOLE slot mutation
+    below (reap + :func:`_copy_payload`).
+
+    Raises :class:`_CutoverLockBusy` both when the lock is genuinely held by
+    a live concurrent cutover elsewhere, AND when the cutover machinery
+    itself fails to import: an import failure does not prove no older mux
+    daemon or concurrent cutover exists, so this fails CLOSED (defers the
+    install) rather than silently proceeding unprotected. Per
+    ``docs/patterns/graceful-daemon-cutover.md``'s "serialize cutover
+    attempts under one lease" rule, a caller that cannot establish the
+    lease must defer rather than mutate the slot unprotected -- releasing
+    the lease before ``_copy_payload`` runs (or skipping it on a busy
+    timeout or missing dependency) would reopen the exact race this
+    closes: a concurrent cutover's ``spawn_passive`` could stand a new
+    passive up inside the very slot ``_copy_payload`` is about to
+    ``rmtree``.
+    """
+    try:
+        from . import mux_daemon_cutover
+    except Exception as exc:  # surfaced to the caller as a defer, not swallowed
+        raise _CutoverLockBusy(
+            f"mux-daemon cutover machinery is unavailable for {root}: {exc}"
+        ) from exc
+    try:
+        lease = mux_daemon_cutover._acquire_cutover_lock(root, timeout_s=5.0)
+    except Exception as exc:  # surfaced to the caller as a defer, not swallowed
+        raise _CutoverLockBusy(
+            f"a concurrent mux-daemon cutover holds the lock for {root}: {exc}"
+        ) from exc
+    return lease, mux_daemon_cutover
+
+
+def _reap_stranded_cutover_passive(root: Path, mux_daemon_cutover) -> None:
+    """Best-effort: clear a passive mux-daemon stranded by an aborted cutover.
+
+    Must be called ONLY while the caller already holds the cutover lease
+    from :func:`_acquire_install_cutover_lease` for the same ``root`` --
+    this performs no locking of its own.
+
+    ``mux_daemon_cutover.spawn_passive`` spawns a new version's mux-daemon
+    with its ``cwd`` pinned INSIDE the version slot being cut over to, so it
+    can be health-checked before promotion. If the orchestrator driving that
+    cutover (``self_update()`` -> ``activate_after_update()``) dies before
+    the passive is ever promoted or terminated -- a crash, a killed
+    terminal, an interrupted upgrade -- the passive lingers indefinitely,
+    its open ``cwd`` handle preventing that slot from ever being deleted on
+    Windows (``WinError 32``).
+
+    ``activate_after_update()`` already reaps exactly this (via the durable
+    cutover breadcrumb + :func:`mux_daemon_cutover._reap_abandoned_passive`)
+    -- but only when IT runs. A bare ``self_install(dry_run=False)`` (the
+    ``self-install`` CLI command, or any retry after a crashed self-update)
+    calls :func:`_copy_payload` directly and never goes through that
+    recovery, so a stranded passive pinned inside the slot about to be
+    ``rmtree``'d is never cleared first, and the delete fails.
+
+    This reuses the SAME breadcrumb-driven reap (never a new cwd-hunting
+    mechanism -- that would need a new OS-specific dependency this
+    deliberately dependency-free installer does not carry). Deliberately
+    does NOT touch the breadcrumb file itself (no clearing, no rewriting):
+    the SAME breadcrumb may still name an ``old`` endpoint that a later,
+    full ``activate_after_update()`` -> ``recover_stale_cutover()`` needs to
+    undrain -- clearing it here, even after a successful reap, would
+    silently discard that other half of recovery. Leaving the file
+    untouched is always safe: a later real cutover re-reads it and finds
+    the reaped pid simply no longer alive (a clean no-op on its side).
+    """
+    try:
+        from zdd import breadcrumb
+
+        record = breadcrumb.read_breadcrumb(mux_daemon_cutover.routing_dir(root))
+        mux_daemon_cutover._reap_abandoned_passive(root, record)
+    except Exception:  # noqa: BLE001, S110 -- reap is best-effort, never fatal to install
+        pass
+
+
 def _copy_payload(payload_dir: Path, slot: Path) -> None:
+    try:
+        _copy_payload_unsafe(payload_dir, slot)
+    except RuntimeError:
+        # Already our one normalized, self_install()-caught boundary type --
+        # re-raise as-is (don't re-wrap).
+        raise
+    except OSError as e:
+        # shutil.rmtree(slot)/shutil.copytree() can themselves raise a bare
+        # OSError -- most notably a Windows PermissionError (WinError 32)
+        # when the slot directory is still held open by another process's
+        # cwd (a stranded OR still-legitimately-running mux-daemon pinned
+        # there -- see copilot-extensions#4999). self_install() only
+        # catches RuntimeError at its boundary (matching
+        # _materialize_payload_pointers' own boundary below), so any
+        # filesystem failure here must be normalized to that type for
+        # self_install()'s cleanup-and-report ("best-effort slot removal,
+        # report action='error'") to run instead of this exception
+        # escaping uncaught (``_slot_is_complete`` is what then lets a
+        # later run detect and repair a slot that cleanup could not fully
+        # remove).
+        raise RuntimeError(f"copying payload into {slot} failed: {e}") from e
+
+
+def _copy_payload_unsafe(payload_dir: Path, slot: Path) -> None:
+    # Invalidate completion FIRST, before any mutation -- see
+    # _invalidate_slot_completion's own docstring for why this must not be
+    # left to the rmtree below (which can itself fail partway through).
+    _invalidate_slot_completion(slot)
     if slot.exists():
         shutil.rmtree(slot)
     if payload_dir.is_symlink():
@@ -534,6 +747,16 @@ def _copy_payload(payload_dir: Path, slot: Path) -> None:
             "anywhere in it could resolve outside the slot at runtime)"
         )
     _materialize_payload_pointers(payload_dir, slot)
+    missing = [rel for rel in _SLOT_KEY_FILES if not (slot / rel).is_file()]
+    if missing:
+        raise RuntimeError(
+            f"refusing to mark {slot} complete: payload is missing "
+            + ", ".join(missing)
+        )
+    # Published only here, as the LAST step of a fully successful copy +
+    # materialization that has itself verified every _SLOT_KEY_FILES entry
+    # is present -- this is what proves the slot complete.
+    _mark_slot_complete(slot)
 
 
 # ── legacy artifact recognition + cleanup ────────────────────────────────
@@ -727,21 +950,58 @@ def self_install(
     if not needs_install(version, r):
         return SelfInstallResult(version=version, action="already-current", root=str(r),
                                  slot=str(slot), marker=version, cleaned=cleaned)
+    if _core_install_satisfied(version, r):
+        # Only the manifest is stale -- repair it directly rather than
+        # falling through to the lease-guarded _copy_payload below, which
+        # would pointlessly rmtree + recopy an already-good (possibly
+        # in-use) version slot.
+        _write_control_plane_provider_manifest(pd, root=r)
+        return SelfInstallResult(
+            version=version, action="installed", root=str(r), slot=str(slot),
+            marker=version, cleaned=cleaned,
+        )
+    # Hold the cutover lease across BOTH the stale-passive reap AND
+    # _copy_payload itself -- releasing it in between (or skipping it on a
+    # busy timeout or missing dependency) would reopen the exact race this
+    # closes: a concurrent cutover's spawn_passive could stand a new
+    # passive up inside the very slot _copy_payload is about to rmtree. A
+    # genuinely busy lock, or an unavailable cutover machinery, means this
+    # cannot be proven safe; defer rather than mutate the slot unprotected
+    # (docs/patterns/graceful-daemon-cutover.md).
     try:
-        _copy_payload(pd, slot)
-    except RuntimeError as e:
-        # _materialize_payload_pointers() raises when a vendor-pointer copy
-        # inside the payload can't be resolved/expanded -- _copy_payload
-        # has already copytree'd the payload into slot by that point, so a
-        # bare re-raise would leave a partially-populated, broken slot on
-        # disk that a later needs_install() version-existence check could
-        # mistake for a valid install and skip retrying. Remove it so a
-        # retry starts clean, and report the failure rather than crashing
-        # the caller (self_update's own contract is best-effort/non-fatal).
-        if slot.exists():
-            shutil.rmtree(slot, ignore_errors=True)
+        lease, mux_daemon_cutover = _acquire_install_cutover_lease(r)
+    except _CutoverLockBusy as exc:
         return SelfInstallResult(version=version, action="error", root=str(r),
-                                 slot=str(slot), reason=str(e), cleaned=cleaned)
+                                 slot=str(slot), reason=str(exc), cleaned=cleaned)
+    try:
+        # Re-check under the lease: a concurrent self_install()/self_update()
+        # could have finished installing (and even activated) this EXACT
+        # version while this call was waiting to acquire it -- without this
+        # recheck, we would blindly rmtree + recopy a slot that is now the
+        # live, already-active install, racing whatever is currently running
+        # out of it. The lock-free check above only proves the version was
+        # needed at that point in time, not that it still is now.
+        if not needs_install(version, r):
+            return SelfInstallResult(version=version, action="already-current", root=str(r),
+                                     slot=str(slot), marker=version, cleaned=cleaned)
+        _reap_stranded_cutover_passive(r, mux_daemon_cutover)
+        try:
+            _copy_payload(pd, slot)
+        except RuntimeError as e:
+            # _materialize_payload_pointers() raises when a vendor-pointer copy
+            # inside the payload can't be resolved/expanded -- _copy_payload
+            # has already copytree'd the payload into slot by that point, so a
+            # bare re-raise would leave a partially-populated, broken slot on
+            # disk that a later needs_install() version-existence check could
+            # mistake for a valid install and skip retrying. Remove it so a
+            # retry starts clean, and report the failure rather than crashing
+            # the caller (self_update's own contract is best-effort/non-fatal).
+            if slot.exists():
+                shutil.rmtree(slot, ignore_errors=True)
+            return SelfInstallResult(version=version, action="error", root=str(r),
+                                     slot=str(slot), reason=str(e), cleaned=cleaned)
+    finally:
+        lease.release()
     stubs = _deploy_binstubs()
     _write_marker(r, version)  # publish last, so the marker only names a ready slot
     _write_control_plane_provider_manifest(pd, root=r)

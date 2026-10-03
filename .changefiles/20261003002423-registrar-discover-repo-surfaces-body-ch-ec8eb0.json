@@ -1,0 +1,9 @@
+{
+  "comment": "registrar discover-repo surfaces body.charter + label-override fields; fix 3 ambient-environment test bugs (session-fencing, real-bridge-verdict probe)",
+  "changes": [
+    {
+      "plugin": "agent-dispatch",
+      "type": "patch"
+    }
+  ]
+}

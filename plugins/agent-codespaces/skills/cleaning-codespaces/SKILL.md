@@ -59,13 +59,17 @@ For every candidate, report:
    sibling product-repo checkout. **Do not use that raw field, from
    any repo-scoped `gh` or `<agent-codespaces catalog argv[0]> list` call, to
    decide dirty vs. clean for a multi-repo workspace.** Use
-   `<agent-codespaces catalog argv[0]>
-   verify <name> --json` instead -- its cleanliness probe scans *every* git
-   repo under `/workspaces/*` and aggregates `dirty`/`ahead`/
-   `unpushed_branches` across all of them (see `cleanliness.py`'s
-   `probe_cleanliness`/`probe_command`) -- or SSH in and check each
-   `/workspaces/*/.git` checkout directly when a definitive per-repo diff is
-   needed.
+   `<agent-codespaces catalog argv[0]> verify <name> --json` instead -- its
+   cleanliness probe scans *every* git
+   repo under `/workspaces/*` **plus the account's persisted personalization
+   checkout** (a hidden, dot-prefixed directory under
+   `.codespaces/.persistedshare/` that the bare `/workspaces/*` glob cannot
+   reach even with `nullglob`: bash's default pathname expansion never
+   matches a dot-prefixed name -- see `cleanliness.py`'s `probe_command`
+   docstring for the exact path, verified live) -- and
+   aggregates `dirty`/`ahead`/`unpushed_branches` across all of them (see
+   `probe_cleanliness`) -- or SSH in and check each repo directly when a
+   definitive per-repo diff is needed.
 4. **Live session:** use bridge/lifecycle status. Never connect diagnostically
    in a way that can disrupt an active dispatch.
 5. **Effort:** locate the matching effort in the **user's state repo**, not

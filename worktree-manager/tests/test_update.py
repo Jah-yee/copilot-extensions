@@ -204,10 +204,30 @@ def test_self_update_without_git_falls_back_to_tarball(monkeypatch, tmp_path):
             "[project]\nname='x'\nversion='9.9.9'\n")
 
     monkeypatch.setattr(self_install, "_fetch_via_tarball", fake_fetch)
+    # This test is about the git-optional tarball-fetch path, not daemon
+    # cutover -- but self_update's own real (unmocked) cutover step reaches
+    # mux_daemon_cutover.activate_after_update -> spawn_passive, which
+    # launches a REAL, detached/breakaway background OS process (see
+    # spawn_passive's windowless_daemon_kwargs(breakaway=True)) rooted at
+    # this test's own tmp_path. That process outlives both the test and the
+    # whole pytest run -- pytest's teardown has no handle on a detached
+    # child -- and was confirmed to leak a real, persistent Windows
+    # user-PATH mutation pointing at the now-deleted tmp_path on a machine
+    # that ran this suite natively. Every sibling self_update test in this
+    # file already mocks activate_after_update for exactly this reason;
+    # this one was missing it.
+    def _fake_cutover(**kw):
+        seen["cutover_kwargs"] = kw
+        return {"action": "cutover", "result": {"ok": True}}
+
+    monkeypatch.setattr(
+        "worktree_manager.mux_daemon_cutover.activate_after_update", _fake_cutover
+    )
     res = self_install.self_update(root=tmp_path, dry_run=False)
     assert seen["url"] == "https://codeload.github.com/acme/widgets/tar.gz/main"
     assert res.action == "updated"
     assert res.version == "9.9.9"
+    assert res.cutover == {"action": "cutover", "result": {"ok": True}}
 
 
 @pytest.mark.parametrize("repo,ref,expected", [

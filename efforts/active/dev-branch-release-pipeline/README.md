@@ -2624,15 +2624,17 @@ scoped. All folded into the sibling doc before merge.
 
 That local-install question was flagged back to the operator rather than
 assumed. Presented two options: give a local `dev` checkout its own
-distinct non-release version identity, or route every local install
-through a generated preview/dev slot instead of ever installing the raw
-repo-tree `plugin.json` directly. **Operator chose the preview/dev-slot
-route** — local install now always materializes a real hypothetical
-version via `preview_release.py` first (already being extended in this
-phase for the same seeding/propagation model as promotion), then installs
-that generated slot, so the raw `"0.0.0"` placeholder is never what
-actually gets installed. Folded into the Plan, Design points, and
-Validation Plan.
+distinct non-release version identity, or route ordinary numbered
+install/update flows through a generated preview/dev slot instead of ever
+installing the raw repo-tree `plugin.json` directly. **Operator chose the
+preview/dev-slot route** — a numbered install now always materializes a
+real, content-distinct hypothetical version via `preview_release.py` first
+(already being extended in this phase for the same seeding/propagation
+model as promotion), then installs that generated slot, so the raw
+`"0.0.0"` placeholder is never what actually gets installed. The existing
+mutable `dev`-slot editable-install path is unaffected and keeps installing
+straight from the worktree exactly as today. Folded into the Plan, Design
+points, and Validation Plan.
 
 Phase 7 implementation can now begin.
 

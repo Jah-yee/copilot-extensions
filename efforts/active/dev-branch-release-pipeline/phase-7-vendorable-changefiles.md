@@ -240,20 +240,25 @@ changefiles and auto-bumps."
       change, not just the general intent to "route through preview." The
       mutable `dev`-slot editable-install command/entry point is unaffected
       and keeps installing straight from the worktree exactly as today.
-- [ ] **Decided:** a numbered-install preview build's computed hypothetical
-      version is just a normal version number to the existing immutable-
-      slot machinery — no special-casing. A repeated preview build against
-      an unchanged pending changefile set computes the identical version
-      both times, so it behaves exactly like re-running a numbered install
-      at an unchanged version already does today: the existing invariant
-      (`docs/patterns/mutable-dev-slot.md:15-18`) already defines that case
-      as an in-place rebuild of that one slot, and the installers' existing
-      fallback (`install.ps1:2763-2768`, `install.sh:2166-2169`) already
-      implements it — a *new* changefile producing a *new* computed version
-      mints a new numbered slot the same way a real release would. This
-      needs no new rule, only confirmation that the preview path reuses the
-      installers' existing version-to-slot logic rather than inventing a
-      parallel one.
+- [ ] **Decided (corrected):** every numbered runtime slot is immutable by
+      repo-wide invariant (`docs/patterns/README.md:120-130`,
+      `visions/plugin-services/README.md:159-169`) — only `versions/dev`
+      may ever be rebuilt in place (`docs/patterns/mutable-dev-slot.md:
+      44-54`). A preview's hypothetical version is computed purely from the
+      pending changefiles' bump *type*, not content, so two different dirty
+      checkouts (or the same checkout before/after a further uncommitted
+      edit) can compute the identical version while holding different
+      bytes — installing both as the same numbered slot would silently
+      overwrite an existing immutable slot and break rollback/concurrent-
+      process safety, the exact thing numbered immutability exists to
+      prevent. The preview route must therefore mint a **content-distinct**
+      identity for every numbered-install preview build (e.g. a semver
+      build-metadata suffix derived from a content/dirty-tree hash,
+      `X.Y.Z-devN+<hash>`, which doesn't affect version precedence but
+      guarantees two different builds never collide on one slot) rather
+      than reusing the bare computed version as-is. A rebuild against
+      truly unchanged content (identical hash) may still reuse its own
+      slot; anything else always mints a new one.
 - [ ] Extend the placeholder-conversion inventory and migration to cover
       every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       every real copy), not just per-plugin manifests and hook-owned
@@ -285,11 +290,11 @@ changefiles and auto-bumps."
    `agent-bridge`'s downgrade rejection of `"0.0.0"` never comes into play.
    The existing mutable `dev`-slot editable-install path is explicitly
    **excluded** and keeps installing straight from the worktree exactly as
-   today. A repeated numbered-install preview build against an unchanged
-   changefile set needs no special rule: it computes the same version both
-   times, which the installers' existing version-to-slot logic already
-   resolves as an in-place rebuild of that one slot, the same as a real
-   unchanged-version install does today.
+   today. Every numbered runtime slot stays immutable: a numbered-install
+   preview build mints a content-distinct identity (a hash-derived build
+   suffix on the computed version), so two builds with different content
+   never collide on one slot even if their computed base version matches —
+   only a byte-identical rebuild may reuse its own slot.
 
 ## Validation Plan
 
@@ -350,12 +355,11 @@ changefiles and auto-bumps."
       dirty-state provenance) after a preview-routed numbered install still
       reflects the originating checkout, not `preview_release.py`'s scratch
       tree path.
-- [ ] Two sequential numbered-install preview builds against the same
-      unchanged pending changefile set rebuild the same slot in place (the
-      installers' existing unchanged-version behavior), while a build after
-      a new changefile lands mints a new slot — confirming no special-cased
-      preview identity logic was introduced, just the existing
-      version-to-slot machinery.
+- [ ] Two numbered-install preview builds with the SAME computed base
+      version but DIFFERENT content (e.g. two dirty checkouts sharing a
+      pending changefile set) mint two distinct numbered slots, never
+      silently overwriting one with the other's bytes; a byte-identical
+      rebuild of the same content may reuse its own slot.
 - [ ] Every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       real copies) reads `"0.0.0"` on `dev` alongside the per-plugin
       manifests, and vendorable seeding (above) still recovers its real

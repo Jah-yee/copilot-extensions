@@ -1772,6 +1772,16 @@ def test_idle_headless_fleet_nudge_includes_remote_host(q, client):
         repo=TEST_REPO,
         labels=["review"],
         fleet_activity_fn=lambda _host, _sid: "IDLE",
+        # Isolates this from the DEFAULT fleet_verdict_fn, which probes a
+        # REAL local agent-bridge carrier (embody.fleet_body_verdict) --
+        # on a machine where one happens to be running, "host-a"/"sess-9"
+        # genuinely resolves to GONE (session not found), triggering real
+        # recovery/respawn instead of the plain idle-nudge path this test
+        # means to exercise. An explicit unknown-liveness stub (matching
+        # the style already used elsewhere in this file) keeps the test's
+        # outcome independent of whatever bridge infrastructure happens to
+        # be reachable from the box running it.
+        fleet_verdict_fn=lambda _host, _sid: "unknown",
         idle_nudge_fn=lambda target, t: nudged.append(
             (target, t.get("_idle_host"))
         )

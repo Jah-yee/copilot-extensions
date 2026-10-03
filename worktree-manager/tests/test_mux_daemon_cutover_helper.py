@@ -503,6 +503,26 @@ def _spawn_fake_mux_daemon_process(root: Path) -> subprocess.Popen:
     )
 
 
+def _wait_until_recognized_as_mux_daemon(pid: int, *, timeout: float = 5.0) -> bool:
+    """Poll ``_iter_mux_daemon_pids()`` until ``pid`` appears or ``timeout``
+    elapses.
+
+    ``subprocess.Popen`` returns as soon as ``fork``/``CreateProcess``
+    succeeds, which races the child's ``exec`` actually taking effect and
+    the OS process table (``ps``/``Win32_Process``) reflecting its final
+    command line -- a single immediate check can spuriously see the
+    pre-exec (or not-yet-listed) process and report a false "test setup
+    invalid" under CI load, even though the process is a genuine match a
+    moment later.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pid in mdc._iter_mux_daemon_pids():
+            return True
+        time.sleep(0.1)
+    return pid in mdc._iter_mux_daemon_pids()
+
+
 def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():
     """``_terminate_mux_daemon_pid`` must actually terminate a REAL process
     that is both a genuine mux-daemon (by command-line shape) and bound to
@@ -512,7 +532,7 @@ def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():
     root = Path.home() / ".worktree-manager-test-identity-match"
     proc = _spawn_fake_mux_daemon_process(root)
     try:
-        assert proc.pid in mdc._iter_mux_daemon_pids(), (
+        assert _wait_until_recognized_as_mux_daemon(proc.pid), (
             "the real spawned process was not recognized as a mux-daemon -- "
             "test setup invalid"
         )
@@ -533,7 +553,7 @@ def test_terminate_mux_daemon_pid_refuses_a_root_mismatched_real_process():
     other_root = Path.home() / ".worktree-manager-test-identity-other"
     proc = _spawn_fake_mux_daemon_process(its_root)
     try:
-        assert proc.pid in mdc._iter_mux_daemon_pids(), (
+        assert _wait_until_recognized_as_mux_daemon(proc.pid), (
             "the real spawned process was not recognized as a mux-daemon -- "
             "test setup invalid"
         )

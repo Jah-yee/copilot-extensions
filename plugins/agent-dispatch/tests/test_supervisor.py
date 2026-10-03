@@ -437,6 +437,32 @@ def test_poll_spawns_eligible_task_once(q, client):
     assert spawn.calls == [t.id]
 
 
+def test_eligible_scopes_the_200_limit_per_own_label_not_globally(q, client):
+    """aperture-labs#7890 section 1 regression: `client.list()` truncates at
+    `limit` (200) newest-first ACROSS THE WHOLE COORDINATOR -- every
+    label/pool sharing it, not just this one. Flood the queue with 250
+    newer, differently-labeled tasks (simulating heavy unrelated activity
+    from other pools) ahead of one older task in THIS supervisor's own
+    label -- it must still be found eligible, not silently truncated off a
+    shared newest-first page before this supervisor's own label filter ever
+    gets a chance to apply."""
+    old_task = q.create("old durable review", labels=["intelligence-dampener-review"])
+    for i in range(250):
+        q.create(f"unrelated newer task {i}", labels=["some-other-pool"])
+
+    spawn = _ok_spawn()
+    sup = Supervisor(
+        client,
+        spawn_fn=spawn,
+        repo=TEST_REPO,
+        max_concurrent=5,
+        labels={"intelligence-dampener-review"},
+    )
+
+    spawned = sup.poll_once()
+    assert spawned == [old_task.id]
+
+
 def test_poll_skips_a_held_queued_task(q, client):
     """PR #2913 review finding: `Supervisor._eligible()` must exclude a
     queued task with a durable operator hold (Phase 1's Pause primitive) --

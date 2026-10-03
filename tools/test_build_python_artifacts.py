@@ -228,6 +228,32 @@ def test_resolve_vendored_libs_recurses_nested(fake_repo: Path):
     assert libs["b"] == lib_b.resolve()
 
 
+def test_resolve_vendored_libs_nested_editable_ref_missing_src_raises(
+    fake_repo: Path,
+):
+    # Regression: a NESTED editable reference (one level deeper than the
+    # originally requested top-level plugin) was queued and would be built
+    # completely unvalidated -- only the top-level consumer's own
+    # references ever went through uv_editable_problems. Here lib_a's own
+    # reference to "b" resolves to a real canonical libs/b location, but
+    # that directory is missing src/ -- must now fail the same way a
+    # top-level reference to it would.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_a = _seed_valid_lib(fake_repo, "a")
+    incomplete_lib_b = fake_repo / "libs" / "b"
+    incomplete_lib_b.mkdir(parents=True)
+    _write_pyproject(incomplete_lib_b)  # no src/ directory
+    _write_pyproject(plugin_dir, sources={"demo-a": "../../libs/a"})
+    (lib_a / "pyproject.toml").write_text(
+        '[project]\nname = "a"\nversion = "0.1.0"\n\n'
+        '[tool.uv.sources]\ndemo-b = { path = "../b", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
 def test_resolve_vendored_libs_no_sources_is_empty(fake_repo: Path):
     plugin_dir = fake_repo / "plugins" / "demo"
     _write_pyproject(plugin_dir)
@@ -672,7 +698,7 @@ def test_build_plugin_artifacts_end_to_end(
 
     out_dir = fake_repo / "dist"
 
-    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None, reserved_names=None):  # noqa: ARG001
         out.mkdir(parents=True, exist_ok=True)
         name = source_dir.name.replace("-", "_")
         wheel = out / f"{name}-0.1.0-py3-none-any.whl"
@@ -730,7 +756,7 @@ def test_build_plugin_artifacts_payload_hash_excludes_build_residue(
     expected_hash = bpa.compute_payload_hash([plugin_dir])
     out_dir = fake_repo / "dist"
 
-    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None, reserved_names=None):  # noqa: ARG001
         (source_dir / "demo.egg-info").mkdir(exist_ok=True)
         (source_dir / "demo.egg-info" / "PKG-INFO").write_text(
             "build residue", encoding="utf-8"
@@ -764,7 +790,7 @@ def test_build_plugin_artifacts_artifact_id_changes_with_wheel_bytes(
     out_dir = fake_repo / "dist"
 
     def make_builder(payload: bytes):
-        def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+        def fake_build_wheel(source_dir: Path, out: Path, *, python=None, reserved_names=None):  # noqa: ARG001
             out.mkdir(parents=True, exist_ok=True)
             wheel = out / "demo-0.1.0-py3-none-any.whl"
             with zipfile.ZipFile(wheel, "w") as zf:
@@ -815,7 +841,7 @@ def test_build_plugin_artifacts_preserves_raw_version(
     )
     out_dir = fake_repo / "dist"
 
-    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None, reserved_names=None):  # noqa: ARG001
         out.mkdir(parents=True, exist_ok=True)
         wheel = out / "demo-0.4.1.dev3-py3-none-any.whl"
         _make_fake_wheel(wheel, generator="setuptools (84.1.0)")
@@ -838,7 +864,7 @@ def test_build_plugin_artifacts_rejects_real_version_mismatch(
     )
     out_dir = fake_repo / "dist"
 
-    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None, reserved_names=None):  # noqa: ARG001
         out.mkdir(parents=True, exist_ok=True)
         wheel = out / "demo-9.9.9-py3-none-any.whl"
         _make_fake_wheel(wheel, generator="setuptools (84.1.0)")
@@ -847,6 +873,60 @@ def test_build_plugin_artifacts_rejects_real_version_mismatch(
     monkeypatch.setattr(bpa, "build_wheel", fake_build_wheel)
     with pytest.raises(bpa.ArtifactBuildError):
         bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+
+
+def test_build_plugin_artifacts_unsafe_plugin_name_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression: `plugin` becomes a path component (PLUGINS_DIR / plugin,
+    # and the manifest filename) -- an absolute value or `../` traversal
+    # must be rejected before either is constructed.
+    monkeypatch.setattr(bpa, "PLUGINS_DIR", tmp_path / "plugins")
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.build_plugin_artifacts("../../etc", out_dir=tmp_path / "dist")
+
+
+def test_build_plugin_artifacts_rejects_duplicate_wheel_filename(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression: two DIFFERENT sources (here, the plugin and its one
+    # vendored lib) producing the identical wheel filename within the SAME
+    # invocation must fail closed -- silently overwriting would leave an
+    # earlier manifest entry's sha256 describing bytes no longer on disk.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _seed_valid_lib(fake_repo, "widget")
+    _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
+    out_dir = fake_repo / "dist"
+
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None, reserved_names=None):  # noqa: ARG001
+        out.mkdir(parents=True, exist_ok=True)
+        # Every source produces the SAME filename, regardless of identity.
+        wheel = out / "collision-0.1.0-py3-none-any.whl"
+        _make_fake_wheel(wheel, generator="setuptools (84.1.0)")
+        if reserved_names is not None:
+            if wheel.name in reserved_names:
+                raise bpa.ArtifactBuildError(f"{wheel.name} collides within this invocation")
+            reserved_names.add(wheel.name)
+        return wheel
+
+    monkeypatch.setattr(bpa, "build_wheel", fake_build_wheel)
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+
+
+def test_build_wheel_rejects_filename_already_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    out_dir = tmp_path / "dist"
+
+    def fake_run(cmd, capture_output, text):  # noqa: ARG001
+        (_staging_dir_from_cmd(cmd) / "demo-1.0-py3-none-any.whl").write_bytes(b"x")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(bpa.subprocess, "run", fake_run)
+    reserved = {"demo-1.0-py3-none-any.whl"}
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.build_wheel(tmp_path / "src", out_dir, reserved_names=reserved)
 
 
 def test_build_plugin_artifacts_unknown_plugin_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

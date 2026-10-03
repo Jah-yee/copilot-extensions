@@ -512,6 +512,28 @@ win grows with build complexity.
   the scenario unexercisable, same limitation already noted for `uv`
   itself elsewhere in this effort's Journal); re-verified both plugins
   build correctly, with their manifests' wheel entries now carrying tags.
+- A seventh review round found 3 more real issues: the per-entry symlink/
+  structure/location validation applied only to the top-level plugin's
+  escaping references (via `uv_editable_problems`, run once) -- a NESTED
+  lib's own escaping, `editable = true` reference was queued and built
+  completely unvalidated, since recursion deliberately stopped re-running
+  the whole-consumer `uv_editable_problems` check (to allow the legitimate
+  sibling cross-reference case from the prior round). Fixed by extracting
+  a new, single-entry validator (`_validate_editable_canonical_ref`,
+  reusing the exact same primitives `uv_editable_problems` itself calls)
+  and applying it to every escaping `editable = true` entry at EVERY
+  recursion depth, not only the top level; `plugin` (the CLI argument)
+  was used directly as a path component (`PLUGINS_DIR / plugin` and the
+  manifest filename) with no validation at all, letting an absolute value
+  or a `../` traversal escape both -- fixed by reusing `is_safe_lib_name`
+  on it the same way a vendored-lib name already is; and two different
+  sources producing the identical wheel filename within ONE invocation
+  would silently overwrite each other, leaving an earlier manifest entry's
+  sha256 describing bytes no longer on disk -- fixed by tracking filenames
+  already produced THIS invocation and failing closed on a real collision,
+  while still preserving the intentional retry-overwrite behavior for a
+  prior invocation's own leftover wheel. 56 unit tests now; re-verified
+  both `agent-bridge` and `agent-worktrees` build correctly.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

@@ -194,6 +194,63 @@ def _validate_in_tree_lib_dir(label: str, unresolved: Path) -> Path:
     return canonical
 
 
+def _validate_editable_canonical_ref(
+    *, consumer_dir: Path, name: str, raw_path: str, lib: str
+) -> Path:
+    """Full acceptance check for ONE escaping, `editable = true`
+    `[tool.uv.sources]` entry -- the exact rules
+    `uv_editable_ref.uv_editable_problems` applies, but scoped to a single
+    entry rather than a whole consumer's table. Applied uniformly at
+    EVERY recursion depth (not only the originally requested top-level
+    plugin, which already gets the aggregate `uv_editable_problems` check
+    too): a nested lib can carry its own escaping, editable reference, and
+    without this it would be queued and built completely unvalidated --
+    an unsafe name, a path resolving outside the canonical `libs/<lib>`, a
+    missing/incomplete directory, or a symlinked tree, none of which this
+    script would otherwise catch at that depth. Returns the resolved
+    canonical directory."""
+    if not uer.is_safe_lib_name(lib):
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path}: unsafe lib name {lib!r}"
+        )
+    canonical_unresolved = LIBS_DIR / lib
+    bad_ancestor = uer._find_symlinked_ancestor(canonical_unresolved, REPO)
+    if bad_ancestor is not None:
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path}: {bad_ancestor} is a "
+            "symlink -- refusing (a canonical lib root must be a real directory)"
+        )
+    canonical = (consumer_dir / raw_path).resolve()
+    if not canonical.is_dir():
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path} (resolved {canonical}) "
+            "does not exist"
+        )
+    if canonical_unresolved.resolve() != canonical:
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path} (resolved {canonical}) is "
+            f"not libs/{lib}"
+        )
+    if not (canonical / "src").is_dir():
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path} (resolved {canonical}): "
+            "src does not exist"
+        )
+    if not (canonical / "pyproject.toml").is_file():
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path} (resolved {canonical}): "
+            "pyproject.toml is missing"
+        )
+    nested = uer._find_symlink(canonical)
+    if nested is not None:
+        where = canonical if nested == "." else canonical / nested
+        raise ArtifactBuildError(
+            f"{consumer_dir}: {name} -> {raw_path}: {where} is a symlink -- "
+            "refusing (a canonical lib tree must contain only real files)"
+        )
+    return canonical
+
+
 def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
     """Every vendored lib ``consumer_dir`` needs, recursively, discovering
     BOTH known `[tool.uv.sources]` shapes: the dev-branch live, escaping,
@@ -250,14 +307,20 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
             escaping_refs = uer.find_uv_editable_refs(current)
         except uer.ManifestUnreadable as exc:
             raise ArtifactBuildError(str(exc)) from exc
-        for _name, raw_path, lib, editable in escaping_refs:
+        for name, raw_path, lib, editable in escaping_refs:
             if not editable:
                 # Not the dev-branch live canonical form -- a sibling
                 # in-tree cross-reference, handled by the in-tree branch
                 # below instead (its own `find_in_tree_lib_sources` scan
                 # of this same `current` will pick it up).
                 continue
-            canonical = (current / raw_path).resolve()
+            # Validated per-entry at EVERY recursion depth (not only via
+            # the top-level `uv_editable_problems` call above) -- a nested
+            # lib can carry its own escaping, editable reference, and
+            # without this it would be queued and built unvalidated.
+            canonical = _validate_editable_canonical_ref(
+                consumer_dir=current, name=name, raw_path=raw_path, lib=lib
+            )
             if lib not in out:
                 out[lib] = canonical
                 pending.append(canonical)
@@ -479,7 +542,13 @@ def sha256_file(path: Path) -> str:
     return f"sha256:{h.hexdigest()}"
 
 
-def build_wheel(source_dir: Path, out_dir: Path, *, python: str | None = None) -> Path:
+def build_wheel(
+    source_dir: Path,
+    out_dir: Path,
+    *,
+    python: str | None = None,
+    reserved_names: set[str] | None = None,
+) -> Path:
     """Builds a wheel for ``source_dir`` via `uv build --wheel`, resolving
     its build-system `requires` the normal (isolated) way -- which, on a
     correctly governed-feed-configured machine, already resolves only from
@@ -494,7 +563,17 @@ def build_wheel(source_dir: Path, out_dir: Path, *, python: str | None = None) -
     later manifest step failed and left the wheel behind from a prior
     attempt). A fresh staging directory has no such pre-existing-name
     ambiguity: whatever `uv build` places there is unambiguously this
-    invocation's own output."""
+    invocation's own output.
+
+    ``reserved_names``, when given, is checked BEFORE the move: a name
+    already in it means two DIFFERENT sources within THIS SAME invocation
+    produced the identical wheel filename -- a real collision (the earlier
+    entry's manifest record and sha256 would silently describe bytes no
+    longer on disk once the later wheel overwrites it) that must fail
+    closed, distinct from the intentional retry-overwrite case this
+    function's staging-directory design already handles (a prior
+    invocation's own leftover wheel, which carries no in-progress
+    ``reserved_names`` entry to collide with)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="build-python-artifacts-") as staging:
         staging_dir = Path(staging)
@@ -514,8 +593,16 @@ def build_wheel(source_dir: Path, out_dir: Path, *, python: str | None = None) -
                 f"a fresh staging directory, expected exactly 1: "
                 f"{sorted(p.name for p in built)}"
             )
+        if reserved_names is not None and built[0].name in reserved_names:
+            raise ArtifactBuildError(
+                f"uv build for {source_dir} produced {built[0].name!r}, which "
+                "another source already produced earlier in this same "
+                "invocation -- a real filename collision, not a retry"
+            )
         dest = out_dir / built[0].name
         shutil.move(str(built[0]), str(dest))
+        if reserved_names is not None:
+            reserved_names.add(dest.name)
         return dest
 
 
@@ -565,6 +652,14 @@ def build_plugin_artifacts(
     """Builds the plugin's own wheel plus every vendored lib wheel it needs,
     and returns the manifest describing the whole set (also written to
     ``out_dir`` as ``<plugin>-<version>-manifest.json``)."""
+    if not uer.is_safe_lib_name(plugin):
+        # `plugin` becomes a path component twice over (`PLUGINS_DIR /
+        # plugin` and the manifest filename `{plugin}-{version}-manifest
+        # .json`) -- an absolute value or a `../` traversal must be
+        # rejected before either, the same way a vendored-lib name already
+        # is (`is_safe_lib_name` applies identically: a single path
+        # component, never empty, `.`/`..`, or containing a separator).
+        raise ArtifactBuildError(f"{plugin!r} is not a safe plugin name")
     plugin_dir = PLUGINS_DIR / plugin
     if not (plugin_dir / "pyproject.toml").is_file():
         raise ArtifactBuildError(f"{plugin_dir}: no pyproject.toml -- not a plugin")
@@ -603,8 +698,11 @@ def build_plugin_artifacts(
     entries: list[dict] = []
     wheel_infos: list[dict[str, str]] = []
     generators: set[str] = set()
+    reserved_names: set[str] = set()
 
-    plugin_wheel = build_wheel(plugin_dir, out_dir, python=python)
+    plugin_wheel = build_wheel(
+        plugin_dir, out_dir, python=python, reserved_names=reserved_names
+    )
     plugin_info = parse_wheel_filename(plugin_wheel)
     raw_version = read_project_version(plugin_dir)
     _assert_version_corresponds(
@@ -628,7 +726,9 @@ def build_plugin_artifacts(
     )
 
     for lib_name, lib_dir in vendored_libs:
-        lib_wheel = build_wheel(lib_dir, out_dir, python=python)
+        lib_wheel = build_wheel(
+            lib_dir, out_dir, python=python, reserved_names=reserved_names
+        )
         lib_info = parse_wheel_filename(lib_wheel)
         lib_generator = read_wheel_generator(lib_wheel)
         generators.add(lib_generator)

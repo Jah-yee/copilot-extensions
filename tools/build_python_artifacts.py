@@ -703,7 +703,10 @@ def read_project_version(project_dir: Path) -> str:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ArtifactBuildError(f"{pyproject}: could not read/parse: {exc}") from exc
-    version = data.get("project", {}).get("version")
+    project_table = data.get("project", {})
+    if not isinstance(project_table, dict):
+        raise ArtifactBuildError(f"{pyproject}: [project] is not a table")
+    version = project_table.get("version")
     if not isinstance(version, str) or not version:
         raise ArtifactBuildError(
             f"{pyproject}: [project].version is missing or not a string"

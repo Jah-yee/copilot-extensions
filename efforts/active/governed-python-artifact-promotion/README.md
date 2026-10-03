@@ -591,6 +591,15 @@ win grows with build complexity.
   technical state, and the egg-info test comment states the invariant
   without naming a review round. 62 unit tests now; re-verified both
   plugins build correctly.
+- An eleventh review round found one more instance of the same class of
+  bug: `read_project_version` also called `.get()` on `[project]` before
+  checking it was a table, raising an uncaught `AttributeError` on a
+  malformed-but-TOML-valid manifest -- fixed identically to
+  `_read_sources_table`'s own prior fix, with a regression test. 63 unit
+  tests now; re-verified both plugins build correctly. This slice has now
+  gone through 11 automated review rounds, each finding genuine,
+  progressively narrower issues -- a pattern consistent with this effort's
+  own documented review history on its original design PR.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

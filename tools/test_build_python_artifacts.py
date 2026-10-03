@@ -604,6 +604,18 @@ def test_read_project_version_missing_raises(tmp_path: Path):
         bpa.read_project_version(d)
 
 
+def test_read_project_version_malformed_project_table_raises(tmp_path: Path):
+    # Invariant: [project] itself must be validated as a table before
+    # .get() is called on it -- a TOML-valid manifest where `project` is
+    # not a table (e.g. an array) must raise the documented
+    # ArtifactBuildError, not an uncaught AttributeError.
+    d = tmp_path / "demo"
+    d.mkdir()
+    (d / "pyproject.toml").write_text("project = []\n", encoding="utf-8")
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.read_project_version(d)
+
+
 def test_assert_version_corresponds_accepts_hyphen_normalization():
     # No exception means acceptance.
     bpa._assert_version_corresponds(

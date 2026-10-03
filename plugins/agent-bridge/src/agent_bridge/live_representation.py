@@ -470,17 +470,17 @@ class LiveEventStore:
         copied that id's events and recorded its id map; a reader that took the
         log then would find no map for a valid reference. So this waits (up to
         ``timeout``; a blocking call, for the sync routes) for merges into that
-        log to finish, then reads both under one lock."""
-        with self._lock:
-            log = self._logs.get(session_id)
-            pending = list(self._merging.get(id(log), ())) if log is not None else []
-            if not pending:
-                return log, dict(self._merged_history)
+        log to finish, then reads both under one lock. A merge that starts
+        while it waits is waited for too, within the same ``timeout``."""
         deadline = time.monotonic() + timeout
-        for done in pending:
-            done.wait(max(0.0, deadline - time.monotonic()))
-        with self._lock:
-            return self._logs.get(session_id), dict(self._merged_history)
+        while True:
+            with self._lock:
+                log = self._logs.get(session_id)
+                pending = list(self._merging.get(id(log), ())) if log is not None else []
+                if not pending or time.monotonic() >= deadline:
+                    return log, dict(self._merged_history)
+            for done in pending:
+                done.wait(max(0.0, deadline - time.monotonic()))
 
     def get_or_create(
         self, session_id: str, *, worktree_id: str | None = None

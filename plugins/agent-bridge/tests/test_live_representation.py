@@ -720,6 +720,49 @@ def test_a_snapshot_waits_for_a_merge_still_copying_events() -> None:
     assert store.snapshot("resumed", timeout=0)[1] == history  # nothing pending now
 
 
+def test_a_snapshot_also_waits_for_a_merge_that_starts_while_it_waits() -> None:
+    import threading
+    import time
+
+    from agent_bridge.live_representation import LiveEventStore
+
+    store = LiveEventStore()
+    survivor = store.get_or_create("A")
+    survivor.append("agent_message", {"text": "a"})
+    gates = {}
+    for key in ("B", "C"):
+        log = store.get_or_create(key)
+        log.append("agent_message", {"text": key})
+        copying, release, read = threading.Event(), threading.Event(), log.get_events
+        gates[key] = (log.continuity_id, copying, release)
+
+        def slow(after, copying=copying, release=release, read=read):
+            copying.set()
+            release.wait(5)
+            return read(after)
+
+        log.get_events = slow
+    first = threading.Thread(target=store.alias, args=("A", "B"))
+    first.start()
+    assert gates["B"][1].wait(5)
+    got: list = []
+    reader = threading.Thread(target=lambda: got.append(store.snapshot("B")))
+    reader.start()
+    time.sleep(0.1)
+    second = threading.Thread(target=store.alias, args=("A", "C"))
+    second.start()
+    assert gates["C"][1].wait(5)
+    gates["B"][2].set()
+    first.join(5)
+    time.sleep(0.2)
+    assert not got  # the first merge finished, but the second is still copying
+    gates["C"][2].set()
+    second.join(5)
+    reader.join(5)
+    log, history = got[0]
+    assert log is survivor and gates["B"][0] in history and gates["C"][0] in history
+
+
 def test_dropping_the_last_key_clears_every_transitive_merge_mapping() -> None:
     """C -> B -> A: once nothing serves A, both C's and B's mappings go, while
     an unrelated merge's history stays."""

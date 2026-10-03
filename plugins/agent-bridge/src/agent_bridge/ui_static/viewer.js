@@ -3,7 +3,7 @@
 // per stretch of activity; only failures and the running tool stay visible.
 
 import { h, clear, replaceChildren, markdown, copyText } from "./dom.js";
-import { SessionModel, parseSseBlock, parseMarkdown, summarizeSteps, duration, ago } from "./model.js";
+import { SessionModel, parseSseBlock, parseMarkdown, summarizeSteps, duration, ago, followContinuity } from "./model.js";
 
 const PAGE = 60;  // blocks rendered per "show earlier" step
 
@@ -108,6 +108,17 @@ export class SessionViewer {
     clear(this.blocksEl);
   }
 
+  /** The bridge is replaying the current log from its start (a merge it
+   * couldn't translate, see followContinuity): show only the replay. */
+  _replayHistory(model) {
+    this.model = model;
+    this.nodes = [];
+    this.renderFrom = 0;
+    this.maxRendered = PAGE;
+    this.unseen = 0;
+    clear(this.blocksEl);
+  }
+
   /**
    * Show an ended session's transcript, read-only: no stream and no composer.
    * `events` are `{event, data, ts}` in the live stream's own kinds (the
@@ -190,9 +201,12 @@ export class SessionViewer {
         // The pair changes together: the bridge echoes the (translated) start.
         const echoed = r.headers.get("X-Agent-Bridge-Continuity");
         if (echoed) {
-          const start = Number(r.headers.get("X-Agent-Bridge-Cursor"));
-          if (Number.isFinite(start)) this.model.lastId = start;
-          this.model.continuity = echoed;
+          const cursor = r.headers.get("X-Agent-Bridge-Cursor");
+          const next = followContinuity(this.model, echoed, cursor == null ? NaN : Number(cursor));
+          if (next.replay) {
+            this.pending = [];  // blocks from the previous connection, numbered on the old log
+            this._replayHistory(next.model);
+          }
         }
         w.state = "live";
         this._renderHead();
@@ -231,14 +245,18 @@ export class SessionViewer {
     if (!this.pending.length || !this.watch) return;
     const catching = !this.catchUp.done;
     const stick = catching || this._atBottom();
-    const before = this.model.blocks.length;
+    let before = this.model.blocks.length;
     const changed = new Set();
     for (const block of this.pending.splice(0)) {
       const ev = parseSseBlock(block);
       if (ev.type === "continuity") {  // the stream followed a merge: ids are renumbered
         if (ev.data && ev.data.continuity_id) {
-          if (Number.isFinite(ev.data.after)) this.model.lastId = ev.data.after;
-          this.model.continuity = ev.data.continuity_id;
+          const next = followContinuity(this.model, ev.data.continuity_id, ev.data.after);
+          if (next.replay) {
+            this._replayHistory(next.model);
+            changed.clear();
+            before = 0;
+          }
         }
         continue;
       }

@@ -242,7 +242,7 @@ changefiles and auto-bumps."
       change, not just the general intent to "route through preview." The
       mutable `dev`-slot editable-install command/entry point is unaffected
       and keeps installing straight from the worktree exactly as today.
-- [ ] **Decided (corrected):** every numbered runtime slot is immutable by
+- [ ] **Decided:** every numbered runtime slot is immutable by
       repo-wide invariant (`docs/patterns/README.md:120-130`,
       `visions/plugin-services/README.md:159-169`) — only `versions/dev`
       may ever be rebuilt in place (`docs/patterns/mutable-dev-slot.md:
@@ -257,22 +257,32 @@ changefiles and auto-bumps."
       identity for every numbered-install preview build rather than reusing
       the bare computed version as-is; a rebuild against truly unchanged
       content (identical hash) may still reuse its own slot, anything else
-      always mints a new one. The exact identity scheme is an
-      implementation-time decision, not a plan-time one: a naive
-      build-metadata suffix (`X.Y.Z-devN+<hash>`) is **not** safe as-is —
+      always mints a new one. Slot separation by itself is **not**
+      sufficient: `agent_worktrees.reconcile` decides whether to deploy by
+      comparing *reported version strings* for equality
+      (`reconcile.py:1990-2004`'s `_versions_equal`), not by slot id, so a
+      distinct slot carrying the SAME reported base version as a later real
+      promoted build would still be skipped as "already equal" even though
+      its bytes differ. The exact identity scheme is an implementation-time
+      decision, not a plan-time one, but it must satisfy both of these
+      together: the *reported version string itself* (not just the backing
+      slot) must differ whenever content differs, so reconciliation's own
+      equality check is never fooled; and it must stay precedence-safe
+      against the existing comparators —
       `agent_worktrees.reconcile._version_lt`'s PEP 440 ordering sorts
       `1.2.3.dev1+abc` *after* bare `1.2.3.dev1`, which can make a later
       real promoted build look like a downgrade and get skipped, and the
       canonical runtime sorter (`libs/versioned-runtime/versioned_runtime.py:
       135-149`) only recognizes `X.Y.Z[-devN]`, dropping any suffixed form
       into its unsupported fallback bucket. Implementation must either pick
-      an identity scheme proven precedence-neutral against both of those
-      comparators (e.g. keeping the installed *slot* id distinct from the
-      *version* string the comparators read) or update both comparators
-      alongside it, and the Validation Plan item below requires proving the
-      real promoted build supersedes an installed preview across
-      reconciliation, downgrade guards, and runtime fallback/GC before this
-      is considered done.
+      a reported-version scheme proven both content-distinguishing and
+      precedence-neutral against every one of those comparators, or extend
+      `_versions_equal`/the runtime sorter alongside it — "keep the slot id
+      distinct but leave the version string as-is" is explicitly ruled out,
+      not an available option — and the Validation Plan item below requires
+      proving the real promoted build supersedes an installed preview
+      across reconciliation, downgrade guards, and runtime fallback/GC
+      before this is considered done.
 - [ ] Extend the placeholder-conversion inventory and migration to cover
       every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       every real copy), not just per-plugin manifests and hook-owned

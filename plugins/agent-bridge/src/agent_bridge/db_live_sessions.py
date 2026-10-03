@@ -71,8 +71,11 @@ class _LiveSessionsMixin:
 
         Returns the resulting registration status: ``'live'`` on a successful
         insert/refresh, or a rejection reason -- ``'reserved'`` (an owned ACP
-        reservation holds the worktree) or ``'taken-over'`` (this id was taken
-        over). The route maps a rejection to HTTP 409.
+        reservation holds the worktree), ``'taken-over'`` (this id was taken
+        over) or ``'incarnation_mismatch'`` (the pid or process start it reports
+        contradicts the row it would update, or -- through a renamed id's alias
+        -- its machine does: a stale heartbeat can't overwrite the successor).
+        The route maps a rejection to HTTP 409.
 
         The upsert, the CLI-mode reservation claim and a same-process rollover
         (alias insertion + predecessor deletion) commit in one transaction, so

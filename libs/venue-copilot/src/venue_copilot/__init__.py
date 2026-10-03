@@ -95,7 +95,7 @@ def _daemon_health(daemon_port: int) -> dict[str, Any]:
 #: Seed outcomes that prove no keystroke reached the pane (safe to deliver over
 #: the bridge instead). Any other unsubmitted outcome -- echoed but not entered,
 #: or a send-keys that failed part-way -- may have left a draft in Copilot's input.
-SEED_NEVER_TYPED_REASONS = frozenset({"not-ready-timeout", "pane-target-unresolved"})
+SEED_NEVER_TYPED_REASONS = frozenset({"not-ready-timeout", "pane-target-unresolved", "pane-target-lost"})
 
 
 def seed_outcome(embodied: dict, *, created: bool, seed: str | None) -> tuple[str | None, bool]:

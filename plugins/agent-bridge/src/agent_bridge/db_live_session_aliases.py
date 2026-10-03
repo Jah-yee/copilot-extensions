@@ -89,6 +89,35 @@ _REGISTER_SQL = (
 )
 
 
+def _incarnation_mismatch(
+    conn: Any, session_id: str, *, machine: str | None, pid: int | None,
+    process_started_at: float | None, aliased: bool,
+) -> bool:
+    """Whether a registration's own identity contradicts the canonical row it
+    would update (inside the caller's transaction, after alias resolution).
+
+    Another process (pid, or a known start time outside the tolerance) never
+    updates a row. Through an alias -- a heartbeat for a renamed id, landing
+    on its successor's row -- another machine doesn't either (a direct
+    re-registration may still move machines, as before). Omitted fields never
+    conflict -- an id-only heartbeat keeps the row's metadata -- and a
+    taken-over row is left to the write's own rejection."""
+    row = conn.execute(
+        "SELECT machine, pid, process_started_at, status FROM live_sessions WHERE session_id=?",
+        (session_id,),
+    ).fetchone()
+    if row is None or (row["status"] or "live") == "taken-over":
+        return False
+    if (aliased and machine and row["machine"]
+            and machine.casefold() != str(row["machine"]).casefold()):
+        return True
+    if pid is not None and row["pid"] is not None and int(pid) != int(row["pid"]):
+        return True
+    known = row["process_started_at"]
+    return (process_started_at is not None and known is not None
+            and abs(float(process_started_at) - float(known)) >= PROCESS_START_TOLERANCE_SECONDS)
+
+
 def register_live_session_atomic(
     db: Any, session_id: str, *, machine: str | None, cwd: str | None,
     worktree_id: str | None, repo: str | None, branch: str | None, pid: int | None,
@@ -105,7 +134,14 @@ def register_live_session_atomic(
     with db._write_lock:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            requested = session_id
             session_id = db.resolve_live_session_id(session_id)
+            mismatch = _incarnation_mismatch(
+                conn, session_id, machine=machine, pid=pid, process_started_at=process_started_at,
+                aliased=session_id != requested)
+            if mismatch:
+                conn.rollback()
+                return "incarnation_mismatch"
             cur = conn.execute(
                 _REGISTER_SQL,
                 (session_id, session_id, machine, cwd, worktree_id, repo, branch, pid,

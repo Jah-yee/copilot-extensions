@@ -1311,6 +1311,60 @@ def test_seed_targets_the_pane_inside_its_own_session_only():
     assert len(seen) == len([s for s in seen if s[1] == "wt-new:0.0"])  # nothing sent for wt-other
 
 
+def test_seed_follows_its_pane_when_the_layout_changes_during_the_wait():
+    """``session:window.pane`` is a position: when the pane moves mid-wait,
+    readiness seen at the old position doesn't count, and every capture and
+    keystroke goes to where the pane is now, never to whatever took its place."""
+    ready = "press esc to interrupt"
+    where = iter(["=wt-x:0.0", "=wt-x:0.0", "=wt-x:0.1"])
+    seen: list[tuple[str, str]] = []
+    typed = {"done": False}
+
+    def locate(pane, mux, session_name=None):
+        return next(where, "=wt-x:0.1")
+
+    def run(argv, **kw):
+        from types import SimpleNamespace
+
+        at = argv[argv.index("-t") + 1]
+        seen.append((argv[1], at))
+        if argv[1] == "capture-pane":
+            if at == "=wt-x:0.0":  # another Copilot now sits here, also ready
+                return SimpleNamespace(stdout=ready, returncode=0)
+            out = f"{ready}\nContinue: build" if typed["done"] else ready
+            return SimpleNamespace(stdout=out, returncode=0)
+        if argv[1] == "send-keys" and "-l" in argv:
+            typed["done"] = True
+        return SimpleNamespace(stdout="", returncode=0)
+
+    with patch("subprocess.run", side_effect=run), patch("time.sleep"), \
+         patch("time.monotonic", side_effect=_Clock()), \
+         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"), \
+         patch("agent_worktrees.sessions_pane_retire._mux_qualified_pane_target", side_effect=locate):
+        out = mux_seed_pane("%9", "Continue: build", session_name="wt-x",
+                            ready_timeout=100.0, poll_interval=0.0, settle=0.0)
+    assert out["submitted"] is True
+    assert [t for v, t in seen if v == "send-keys"] == ["=wt-x:0.1", "=wt-x:0.1"]
+    # Two stable polls at the new position before typing: the old one's didn't count.
+    caps = [t for v, t in seen if v == "capture-pane"]
+    assert caps.index("=wt-x:0.1") >= 1 and caps[caps.index("=wt-x:0.1") + 1] == "=wt-x:0.1"
+
+
+def test_seed_fails_closed_when_its_pane_disappears():
+    ready = "press esc to interrupt"
+    where = iter(["=wt-x:0.0", "=wt-x:0.0"])
+    driver = _SeedDriver(ready_caps=[ready, ready], echo_caps=[])
+    with patch("subprocess.run", side_effect=driver.run), patch("time.sleep"), \
+         patch("time.monotonic", side_effect=_Clock()), \
+         patch("agent_worktrees.sessions._mux_bin", return_value="tmux"), \
+         patch("agent_worktrees.sessions_pane_retire._mux_qualified_pane_target",
+               side_effect=lambda *a, **k: next(where, None)):
+        out = mux_seed_pane("%9", "Continue: build", session_name="wt-x",
+                            ready_timeout=100.0, poll_interval=0.0, settle=0.0)
+    assert out["reason"] == "pane-target-lost" and out["sent"] is False
+    assert driver.sends == []
+
+
 def test_seed_pane_not_ready_never_submits():
     # Copilot never shows a cue -> we must NOT type or press Enter (no blind
     # submit into a half-loaded TUI / fallback shell).

@@ -732,7 +732,7 @@ def cmd_detach(
                 "seed was never typed; delivering over bridge"
             )
             _progress("seed-bridge", detail)
-            seed_delivery_status = "bridge" if deliver_note(session_id, seed, **alias_floor) else "failed"
+            seed_delivery_status = "bridge" if deliver_note(session_id, seed, operation=reservation["reservation_id"], **alias_floor) else "failed"
         refs_delivered = None
         if refs_note_text:
             # A typed new session got the note in its seed; a running one (or a
@@ -749,7 +749,7 @@ def cmd_detach(
                 refs_delivered = "unconfirmed"
             elif not created:
                 refs_delivered = (
-                    "message" if deliver_note(session_id, refs_note_text, **alias_floor) else "failed"
+                    "message" if deliver_note(session_id, refs_note_text, operation=reservation["reservation_id"], **alias_floor) else "failed"
                 )
             else:
                 refs_delivered = "failed"

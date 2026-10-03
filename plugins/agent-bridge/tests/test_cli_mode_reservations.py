@@ -652,6 +652,32 @@ def test_two_unknown_machines_never_inherit(tmp_db: Database) -> None:
     assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
 
 
+def test_an_alias_heartbeat_from_another_incarnation_never_overwrites_the_successor(
+    tmp_db: Database,
+) -> None:
+    """``placeholder -> resumed`` on host-a: a registration for ``placeholder``
+    from host-b (same pid, no start time), or from another pid or start time on
+    host-a, is a different incarnation. It is refused inside the write, after
+    alias resolution, and the successor keeps its identity, claim and venue."""
+    now = time.time()
+    tmp_db.create_cli_mode_reservation("wt-R", now=now, ttl_seconds=300)
+    assert _register(tmp_db, "placeholder", "wt-R", now + 1, pid=4242, started=now,
+                     machine="host-a") == "live"
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242, started=now,
+                     machine="host-a") == "live"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+    for kw in ({"pid": 4242, "started": None, "machine": "host-b"},
+               {"pid": 777, "started": None, "machine": "host-a"},
+               {"pid": 4242, "started": now + 30, "machine": "host-a"}):
+        assert _register(tmp_db, "placeholder", "wt-R", now + 3, **kw) == "incarnation_mismatch", kw
+    row = tmp_db.get_live_session("resumed")
+    assert (row["machine"], row["pid"], row["cli_mode"]) == ("host-a", 4242, 1)
+    # The same incarnation (or an id-only heartbeat) still refreshes it.
+    assert _register(tmp_db, "placeholder", "wt-R", now + 4, pid=4242, started=now,
+                     machine="HOST-A") == "live"
+    assert _register(tmp_db, "placeholder", "wt-R", now + 5, pid=None, machine=None) == "live"
+
+
 def test_an_alias_heartbeat_without_a_pid_keeps_the_successors_pid(tmp_db: Database) -> None:
     """A late heartbeat through the retired id that omits its pid must not clear
     the successor's known pid, or its next rollover can't inherit the claim."""

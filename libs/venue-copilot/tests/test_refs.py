@@ -74,16 +74,26 @@ def test_deliver_note_sends_over_stdin():
         calls.append((argv, kw.get("input")))
         return type("R", (), {"returncode": 0})()
 
-    assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run)
+    assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run, operation="launch-1")
     argv, stdin = calls[0]
     assert argv[1:7] == ["send", "sid-1", "--prompt-file", "-", "--no-wait", "--steer"]
     assert stdin == "see /x/y.har"
-    # A stable idempotency key: resending the same note can't enqueue it twice.
-    key = argv[argv.index("--idempotency-key") + 1]
+
+    def key(i):
+        return calls[i][0][calls[i][0].index("--idempotency-key") + 1]
+
+    # A retry of the same delivery reuses its key: the bridge answers an
+    # ambiguous earlier attempt instead of enqueueing the note twice.
+    assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run, operation="launch-1")
+    assert key(1) == key(0)
+    # A later, separate delivery of the same text is really sent: a new key.
+    assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run, operation="launch-2")
+    assert key(2) != key(0)
+    assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run)  # no operation: its own
     assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run)
-    assert calls[1][0][calls[1][0].index("--idempotency-key") + 1] == key
-    assert venue_refs.deliver_note("sid-1", "another note", run=run)
-    assert calls[2][0][calls[2][0].index("--idempotency-key") + 1] != key
+    assert len({key(0), key(2), key(3), key(4)}) == 4
+    assert venue_refs.deliver_note("sid-1", "another note", run=run, operation="launch-1")
+    assert key(5) != key(0)
 
 
 def test_deliver_note_is_steered_and_bounded():

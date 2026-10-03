@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -130,6 +131,7 @@ def send_refs(
 
 def deliver_note(
     session_id: str, note: str, *, run=subprocess.run, min_daemon_protocol: int | None = None,
+    operation: str | None = None,
 ) -> bool:
     """Tell a running session about new reference files (over stdin; never raises).
 
@@ -138,13 +140,18 @@ def deliver_note(
     cannot block the rejoin that delivers it. ``min_daemon_protocol`` makes the
     send fail (deliver nothing) unless the host daemon speaks at least that
     protocol; an agent-bridge CLI too old to know the flag fails too.
+
+    ``operation`` names this logical delivery (a launch passes its reservation
+    id): a retry of it reuses the key, so the bridge answers an ambiguous
+    earlier attempt with the original message instead of enqueueing the note
+    -- or a seed -- twice. A later, separate delivery of the same text is a new
+    operation with its own key, so it is really sent. Omitted, every call is
+    its own operation.
     """
     _bin = "agent-bridge"  # marketplace-isolation: allow legacy-compatibility
     bridge = shutil.which(_bin) or _bin
-    # Stable for this text to this session: a retry after an ambiguous failure
-    # (the daemon may have accepted it) returns the original message instead of
-    # enqueueing the note -- or a seed -- twice.
-    key = "venue-note-" + hashlib.sha256(f"{session_id}\0{note}".encode("utf-8")).hexdigest()[:32]
+    op = operation or uuid.uuid4().hex
+    key = "venue-note-" + hashlib.sha256(f"{session_id}\0{op}\0{note}".encode("utf-8")).hexdigest()[:32]
     argv = [bridge, "send", session_id, "--prompt-file", "-", "--no-wait", "--steer",
             "--idempotency-key", key]
     if min_daemon_protocol:

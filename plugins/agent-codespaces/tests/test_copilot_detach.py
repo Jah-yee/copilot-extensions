@@ -190,7 +190,7 @@ def test_seed_never_submitted_but_registered_is_delivered_over_bridge(seams, mon
     from venue_copilot import refs as venue_refs
 
     sent = []
-    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
+    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note, **kw: sent.append((sid, note)) or True)
     unready = json.dumps({"ok": True, "created": True, "seed_submitted": False,
                           "seed_reason": "not-ready-timeout"})
     rc = detach.cmd_detach(_args(), ssh_session=_ssh(seams, stdout=unready))
@@ -233,7 +233,7 @@ def test_a_resumed_seed_needs_a_daemon_that_follows_renames(
     sent = []
     monkeypatch.setattr(
         venue_refs, "deliver_note",
-        lambda sid, note, **kw: sent.append(kw) or daemon_has_aliases,
+        lambda sid, note, **kw: sent.append({k: v for k, v in kw.items() if k != "operation"}) or daemon_has_aliases,
     )
     unready = json.dumps({"ok": True, "created": True, "seed_submitted": False})
     rc = detach.cmd_detach(_args(copilot_args=["--resume=abc"]), ssh_session=_ssh(seams, stdout=unready))
@@ -919,7 +919,7 @@ def test_ref_files_for_a_running_session_are_sent_as_a_message(seams, tmp_path, 
     from venue_copilot import refs as venue_refs
 
     sent = []
-    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
+    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note, **kw: sent.append((sid, note)) or True)
     resumed = json.dumps({"ok": True, "created": False, "resumed": True})
     rc = detach.cmd_detach(
         _args(ref_files=[_ref_file(tmp_path)]), ssh_session=_ssh(seams, stdout=resumed),
@@ -940,7 +940,7 @@ def test_a_resumed_rejoin_sends_ref_notes_only_through_a_daemon_that_follows_ren
     sent = []
     monkeypatch.setattr(
         venue_refs, "deliver_note",
-        lambda sid, note, **kw: sent.append(kw) or daemon_has_aliases,
+        lambda sid, note, **kw: sent.append({k: v for k, v in kw.items() if k != "operation"}) or daemon_has_aliases,
     )
     resumed = json.dumps({"ok": True, "created": False, "resumed": True})
     rc = detach.cmd_detach(

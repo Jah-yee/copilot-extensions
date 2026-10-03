@@ -319,7 +319,7 @@ def launch_detached(
                 "seed was never typed; delivering over bridge"
             )
             progress("seed-bridge", detail)
-            seed_delivery_status = "bridge" if deliver_note(session_id, seed, **alias_floor) else "failed"
+            seed_delivery_status = "bridge" if deliver_note(session_id, seed, operation=reservation["reservation_id"], **alias_floor) else "failed"
         refs_extra: dict[str, Any] = {}
         if notes:
             # A typed new session got the note in its seed; a running one (or a
@@ -332,7 +332,7 @@ def launch_detached(
             elif seed_needs_bridge and seed_delivery_status == "bridge":
                 refs_delivered = "message"
             elif not created:
-                refs_delivered = "message" if deliver_note(session_id, notes, **alias_floor) else "failed"
+                refs_delivered = "message" if deliver_note(session_id, notes, operation=reservation["reservation_id"], **alias_floor) else "failed"
             refs_extra = {
                 "ref_files": notes.splitlines()[1:],
                 "refs_delivered": refs_delivered,

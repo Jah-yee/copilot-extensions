@@ -680,7 +680,8 @@ class TestDetachedRunner:
 
         self._patch_bridge(monkeypatch)
         sent = []
-        monkeypatch.setattr(refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
+        monkeypatch.setattr(refs, "deliver_note",
+                            lambda sid, note, **kw: sent.append((sid, note, kw.get("operation"))) or True)
         adapter = _Adapter({"ok": True, "created": False, "session": "wt-anchor-repo"})
         rc, payload = detached.launch_detached(
             adapter, self._plan(), seed=None, driver=None, copilot_args=[],
@@ -689,6 +690,7 @@ class TestDetachedRunner:
         assert rc == 0
         assert payload["refs_delivered"] == "message"
         assert sent and sent[0][0] == "sid-42" and "trace.har" in sent[0][1]
+        assert sent[0][2] == "r1"  # keyed to this launch: a later launch's same note is sent again
 
     @pytest.mark.parametrize("daemon_has_aliases", [True, False])
     def test_a_resumed_rejoins_ref_note_needs_a_daemon_that_follows_renames(
@@ -699,7 +701,7 @@ class TestDetachedRunner:
         self._patch_bridge(monkeypatch)
         sent = []
         monkeypatch.setattr(
-            refs, "deliver_note", lambda sid, note, **kw: sent.append(kw) or daemon_has_aliases,
+            refs, "deliver_note", lambda sid, note, **kw: sent.append({k: v for k, v in kw.items() if k != "operation"}) or daemon_has_aliases,
         )
         adapter = _Adapter({"ok": True, "created": False, "session": "wt-anchor-repo"})
         rc, payload = detached.launch_detached(
@@ -736,7 +738,7 @@ class TestDetachedRunner:
             lambda scope, venue, **kw: {"reservation_id": "r1"},
         )
         monkeypatch.setattr("venue_copilot.detached.await_claim", lambda scope, rid, timeout: "sid-42")
-        monkeypatch.setattr(refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
+        monkeypatch.setattr(refs, "deliver_note", lambda sid, note, **kw: sent.append((sid, note)) or True)
         monkeypatch.setattr("venue_copilot.detached.release_cli_mode", lambda *a, **k: 1)
 
         rc, payload = detached.launch_detached(

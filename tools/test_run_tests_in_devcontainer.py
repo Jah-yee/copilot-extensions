@@ -1119,6 +1119,31 @@ def test_main_installs_a_sigterm_handler(monkeypatch) -> None:
     assert registered_handler is wrapper._raise_on_sigterm
 
 
+def test_main_restores_the_previous_sigterm_handler_after_returning(monkeypatch, tmp_path: Path) -> None:
+    # `main` is also invoked in-process by this module's own test suite
+    # (and any other programmatic caller) -- permanently replacing the
+    # process-wide SIGTERM handler without restoring it would leak
+    # `_raise_on_sigterm` into every later in-process call.
+    config_path = tmp_path / "cfgdir-restore" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+    monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-restore")
+    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough, *, include_untracked: None)
+    monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
+    monkeypatch.setattr(wrapper, "_tear_down", lambda container_id, volume_name: None)
+
+    sentinel_handler = lambda signum, frame: None
+    previous = signal.signal(signal.SIGTERM, sentinel_handler)
+    try:
+        signal.signal(signal.SIGTERM, sentinel_handler)
+        wrapper.main(["agent-worktrees"])
+        assert signal.getsignal(signal.SIGTERM) is sentinel_handler
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def test_cleanup_signals_deferred_records_signals_instead_of_ignoring_them(monkeypatch) -> None:
     # `SIG_IGN` would DISCARD a signal outright (nothing delivered or
     # queued later) -- this context manager must instead install a
@@ -1482,6 +1507,50 @@ def test_main_cleans_up_orphan_and_reraises_when_bring_up_fails(monkeypatch, tmp
         raise AssertionError("expected the original SystemExit to propagate")
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0][1] == "fake-volume"
+
+
+def test_main_tears_down_not_orphan_cleans_up_when_bring_up_succeeded_but_something_then_fails(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    # The exact gap this closes: previously, a failure arriving in the
+    # narrow window right after `_bring_up` returns (but before the
+    # `_populate_workspace`/`_run_tests` try block) had NO cleanup guard
+    # active at all -- neither `_cleanup_orphan` (gated on the old
+    # bring-up-only except block) nor `_tear_down` (gated on a later
+    # try/finally) would fire, leaking the live container and volume.
+    # `container_id` being non-`None` must now route to `_tear_down`
+    # (which knows the real container to remove), never `_cleanup_orphan`
+    # (which only searches by label, for when no container id exists yet).
+    config_path = tmp_path / "cfgdir-gap" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+    tear_down_calls: list[tuple[str, str]] = []
+    orphan_calls: list[tuple[str, str]] = []
+
+    def failing_populate(container_id: str, passthrough: list[str], *, include_untracked: bool) -> None:
+        raise RuntimeError("failure right after bring-up succeeded")
+
+    monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-gap")
+    monkeypatch.setattr(wrapper, "_populate_workspace", failing_populate)
+    monkeypatch.setattr(
+        wrapper, "_tear_down",
+        lambda container_id, volume_name: tear_down_calls.append((container_id, volume_name)),
+    )
+    monkeypatch.setattr(
+        wrapper, "_cleanup_orphan",
+        lambda instance_label, volume_name: orphan_calls.append((instance_label, volume_name)),
+    )
+
+    try:
+        wrapper.main(["agent-worktrees"])
+    except RuntimeError as exc:
+        assert "failure right after bring-up succeeded" in str(exc)
+    else:
+        raise AssertionError("expected the original RuntimeError to propagate")
+    assert tear_down_calls == [("container-gap", "fake-volume")]
+    assert orphan_calls == []
     # The per-instance config dir must still be cleaned up even on this
     # failure path.
     assert not config_path.parent.exists()

@@ -278,18 +278,13 @@ def _warn_about_dirty_tracked_files() -> None:
     """Print a clear, explicit stderr warning naming every tracked file
     with an uncommitted modification -- the tracked-files-only boundary
     (see ``_tracked_paths``) is about which PATHS are copied, not which
-    BYTES; the actual content copied for a tracked path is its current
-    on-disk state, so a secret pasted into an otherwise-tracked file and
-    never committed is still copied in. A clean CI checkout never hits
-    this; a contributor's dirty local checkout might -- this surfaces that
-    residual exposure at the moment it's actually relevant, not only in a
-    docstring/doc page nobody reads before running the command.
+    BYTES; a secret pasted into an otherwise-tracked file and never
+    committed is still copied in (the actual content copied is the file's
+    current on-disk state). A clean CI checkout never hits this; a dirty
+    local checkout might -- this surfaces it at the moment it's relevant.
 
-    Fails CLOSED (raises) if ``git status`` itself cannot be run: this
-    check is the runtime mitigation for accidental secret exposure, so an
-    unknown dirty state must never be silently treated as "clean" and
-    allowed to proceed -- that would defeat the whole point of the
-    warning."""
+    Fails CLOSED (raises) if ``git status`` itself cannot be run: an
+    unknown dirty state must never be silently treated as "clean"."""
     res = subprocess.run(
         ["git", "-C", str(REPO), "status", "--porcelain=v1", "--untracked-files=no"],
         capture_output=True, timeout=30, env=_scrubbed_git_env(),
@@ -876,18 +871,16 @@ def _cleanup_signals_deferred():
     immediately, restore the previous handlers once cleanup finishes, then
     raise `_TerminationRequested` if one was recorded AND no exception is
     propagating. Plain ``signal.SIG_IGN`` would DISCARD a signal outright
-    (not defer it) -- for the ordinary (non-exceptional) teardown path,
-    that would let `main` silently return 0 for a cancelled run. Replaying
-    unconditionally has its own failure mode: it could REPLACE a genuine
-    failure already propagating -- either one already in flight when this
-    context is entered (the caller mid-handling an exception, e.g. the
-    startup-failure branch's pending `raise`), OR one the cleanup BODY
-    itself raises (e.g. a real `_tear_down` failure) -- exactly the
-    masking this wrapper's teardown logic elsewhere exists to prevent. A
-    single ``sys.exc_info()`` check after ``yield`` covers both cases:
-    Python sets it for the whole dynamic extent of an already-active
-    ``except``/``finally`` (including nested calls) and ALSO when an
-    exception newly thrown into this generator is still propagating."""
+    (not defer it) -- for the ordinary teardown path, that would let
+    `main` silently return 0 for a cancelled run. Replaying unconditionally
+    could instead REPLACE a genuine failure already propagating, whether
+    already in flight when entered (the caller mid-handling an exception)
+    or raised by the cleanup BODY itself -- exactly the masking this
+    wrapper's teardown logic elsewhere exists to prevent. A single
+    ``sys.exc_info()`` check after ``yield`` covers both cases: Python
+    sets it for the whole dynamic extent of an already-active
+    ``except``/``finally`` AND when an exception newly thrown into this
+    generator is still propagating."""
     received: list[int] = []
     previous = {
         sig: signal.signal(sig, lambda signum, frame: received.append(signum))
@@ -913,81 +906,87 @@ def main(argv: list[str] | None = None) -> int:
     # Converts a SIGTERM into a normal raised exception so this
     # function's own try/finally cleanup runs -- see
     # `_TerminationRequested`'s docstring. SIGINT needs no equivalent
-    # handler for the FIRST signal: Python already raises
-    # `KeyboardInterrupt` for it by default, which the same
-    # `except BaseException` paths already catch -- `_cleanup_signals_deferred`
-    # (used around the cleanup calls below) is what protects against a
-    # REPEAT of either signal during cleanup itself.
-    signal.signal(signal.SIGTERM, _raise_on_sigterm)
-    ap = argparse.ArgumentParser(
-        description=(
-            "Run tools/run-plugin-tests.py inside the test-isolation devcontainer."
-        ),
-    )
-    ap.add_argument("--keep", action="store_true",
-                     help="leave the container running after the test run (debugging)")
-    ap.add_argument("--include-untracked", action="store_true",
-                     help=(
-                         "also copy untracked-but-not-gitignored files into the "
-                         "snapshot (default: tracked files only -- an untracked "
-                         "secret-shaped file sitting in the working tree is not "
-                         "necessarily gitignored, so this is opt-in, not default)"
-                     ))
-    ns, passthrough = ap.parse_known_args(argv)
-    # "--" is argparse's own flags/positionals separator, not a real
-    # run-plugin-tests.py argument -- strip every occurrence (not just a
-    # leading one), since it can appear anywhere in the extras list
-    # (e.g. ``--all -- -k some_filter`` leaves it in the MIDDLE).
-    passthrough = [arg for arg in passthrough if arg != "--"]
-    # Rewriting `--base` to its resolved SHA here (before EITHER the
-    # snapshot is built or the in-container command is assembled) means
-    # both consistently see and use the SAME resolved commit, including
-    # for a ref-relative expression that would otherwise fail to resolve
-    # again inside the materialized bundle clone -- see
-    # `_rewrite_base_to_resolved_sha`'s own docstring.
-    passthrough = _rewrite_base_to_resolved_sha(passthrough)
-
-    instance_label = uuid.uuid4().hex[:12]
-    config_path, volume_name = _per_instance_config(instance_label)
+    # handler for the FIRST signal (Python already raises
+    # `KeyboardInterrupt`) -- `_cleanup_signals_deferred` (used around the
+    # cleanup calls below) protects against a REPEAT of either signal
+    # during cleanup itself. The previous handler is restored in the
+    # outer `finally` below, since `main` is also invoked in-process by
+    # this module's own tests (and any other programmatic caller).
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _raise_on_sigterm)
     try:
-        try:
-            _create_bounded_volume(volume_name)
-            container_id = _bring_up(instance_label, config_path)
-        except BaseException:
-            with _cleanup_signals_deferred():
-                _cleanup_orphan(instance_label, volume_name)
-            raise
-        # The primary test path's own result (a nonzero exit code) OR
-        # exception must win over a secondary teardown failure -- a raised
-        # `_tear_down` SystemExit in a bare `finally` would otherwise
-        # silently replace either, discarding the real failure (and, for
-        # an exception, its traceback too). `result`/`primary_failed` let
-        # the `finally` below tell which case it's in: report (but don't
-        # re-raise) a teardown failure whenever the primary path already
-        # failed -- whether that failure raised or merely returned
-        # nonzero -- and raise it directly only when the primary path
-        # truly succeeded (a zero exit code, no exception).
+        ap = argparse.ArgumentParser(
+            description=(
+                "Run tools/run-plugin-tests.py inside the test-isolation devcontainer."
+            ),
+        )
+        ap.add_argument("--keep", action="store_true",
+                         help="leave the container running after the test run (debugging)")
+        ap.add_argument("--include-untracked", action="store_true",
+                         help=(
+                             "also copy untracked-but-not-gitignored files into the "
+                             "snapshot (default: tracked files only -- an untracked "
+                             "secret-shaped file sitting in the working tree is not "
+                             "necessarily gitignored, so this is opt-in, not default)"
+                         ))
+        ns, passthrough = ap.parse_known_args(argv)
+        # "--" is argparse's own flags/positionals separator, not a real
+        # run-plugin-tests.py argument -- strip every occurrence (not just a
+        # leading one), since it can appear anywhere in the extras list
+        # (e.g. ``--all -- -k some_filter`` leaves it in the MIDDLE).
+        passthrough = [arg for arg in passthrough if arg != "--"]
+        # Rewriting `--base` to its resolved SHA here (before EITHER the
+        # snapshot is built or the in-container command is assembled) means
+        # both consistently see and use the SAME resolved commit, including
+        # for a ref-relative expression that would otherwise fail to resolve
+        # again inside the materialized bundle clone -- see
+        # `_rewrite_base_to_resolved_sha`'s own docstring.
+        passthrough = _rewrite_base_to_resolved_sha(passthrough)
+
+        instance_label = uuid.uuid4().hex[:12]
+        config_path, volume_name = _per_instance_config(instance_label)
+        # `container_id` doubles as the lifecycle marker the `finally`
+        # below uses to pick cleanup: still `None` means `_bring_up`
+        # never returned one (orphan cleanup, regardless of `--keep`), a
+        # real id means normal teardown. One try/finally spanning the
+        # whole lifecycle (vs. two separate blocks with a gap) means no
+        # window where a SIGTERM/SIGINT could raise before any cleanup
+        # guard is active and leak both the container and its volume.
+        container_id: str | None = None
         result: int | None = None
         primary_failed = False
         try:
-            _populate_workspace(container_id, passthrough, include_untracked=ns.include_untracked)
-            result = _run_tests(container_id, config_path, passthrough)
-            primary_failed = result != 0
-        except BaseException:
-            primary_failed = True
-            raise
-        finally:
-            if not ns.keep:
-                try:
+            try:
+                _create_bounded_volume(volume_name)
+                container_id = _bring_up(instance_label, config_path)
+                _populate_workspace(container_id, passthrough, include_untracked=ns.include_untracked)
+                result = _run_tests(container_id, config_path, passthrough)
+                primary_failed = result != 0
+            except BaseException:
+                primary_failed = True
+                raise
+            finally:
+                # The primary path's result/exception must win over a
+                # secondary cleanup failure -- a bare `finally` raising
+                # would otherwise silently discard it. `primary_failed`
+                # tells which case this is: report (don't re-raise) a
+                # cleanup failure once the primary already failed; raise
+                # it directly only when the primary truly succeeded.
+                if container_id is None:
                     with _cleanup_signals_deferred():
-                        _tear_down(container_id, volume_name)
-                except BaseException as teardown_exc:
-                    if not primary_failed:
-                        raise
-                    print(f"warning: teardown also failed: {teardown_exc}", file=sys.stderr)
-        return result
+                        _cleanup_orphan(instance_label, volume_name)
+                elif not ns.keep:
+                    try:
+                        with _cleanup_signals_deferred():
+                            _tear_down(container_id, volume_name)
+                    except BaseException as teardown_exc:
+                        if not primary_failed:
+                            raise
+                        print(f"warning: teardown also failed: {teardown_exc}", file=sys.stderr)
+            return result
+        finally:
+            shutil.rmtree(config_path.parent, ignore_errors=True)
     finally:
-        shutil.rmtree(config_path.parent, ignore_errors=True)
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 

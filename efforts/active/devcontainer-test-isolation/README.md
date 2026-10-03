@@ -1378,3 +1378,41 @@ Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
 confirms the common case still works with the pinned digest. Docker
 cleanup and host `git status --short` reconfirmed clean of anything
 beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (twelfth pass): 2 findings addressed (restore SIGTERM handler, close the post-start cleanup gap)
+A twelfth review pass of the same round confirmed the base-image-pinning
+fix resolved, and raised two more previously-missed findings against
+earlier code in this round. MEDIUM: `main()` replaced the process-wide
+`SIGTERM` handler but never restored the previous one on either success
+or failure -- observable in this PR's own in-process tests (several call
+`main()` directly without patching `signal.signal`), so every later
+in-process `main()` call, and any other programmatic caller, inherited
+`_raise_on_sigterm` unexpectedly. Fixed by saving the prior handler and
+restoring it from a new outer `finally` wrapping the entire function
+body (argument parsing and config setup included, not just the
+container lifecycle). MEDIUM: between `_bring_up()` returning
+successfully and the (then-separate) inner `try` block that actually
+registered teardown protection, there was a narrow window with NO
+cleanup guard active at all -- a `SIGTERM`/`SIGINT` landing there raised
+before any `finally` could run, and the outer `finally` only ever
+deleted the temporary config directory, leaving the live container and
+volume behind. Fixed by collapsing the two previously-separate
+try/except blocks into one try/finally spanning the whole lifecycle,
+using `container_id`'s own `None`-vs-set state as the lifecycle marker
+the single `finally` reads to choose orphan cleanup (bring-up never
+completed) versus normal teardown (it did) -- closing the gap entirely
+rather than widening the existing guard's scope piecemeal.
+
+Re-validated end-to-end: the full unit test suite (83 tests, including a
+new test proving the SIGTERM handler is genuinely restored via
+`signal.getsignal` after `main()` returns, and a new test proving a
+failure arriving right after a successful `_bring_up` now correctly
+routes to `_tear_down` with the real container id rather than
+`_cleanup_orphan`) passes; `check-module-size.py --changed-since
+origin/dev` passes; a fresh Docker-backed end-to-end run (`ai-attribution`,
+98 passed / 6 skipped) confirms the common case still works; and the
+SIGTERM-during-a-real-run scenario was re-validated live (sent to a real
+background run, confirmed full teardown with no leftover container or
+volume) to confirm the restructure didn't regress the mechanism itself.
+Docker cleanup and host `git status --short` reconfirmed clean of
+anything beyond this round's own diff.

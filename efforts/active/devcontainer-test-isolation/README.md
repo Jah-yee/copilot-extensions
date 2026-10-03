@@ -24,6 +24,23 @@ posture (see that plugin's vision) — a container used for headless, dispatched
 bounding test execution specifically, and not for interactive/local
 contributor use.
 
+## Participants
+
+Single-driver effort at this stage -- no multi-agent split yet.
+
+| Participant | Role in this effort | Reached via |
+|-------------|---------------------|-------------|
+| Driving session | Plans and (once this plan clears review) implements the devcontainer spec | this worktree/branch |
+
+## Coordination
+
+- **Topology:** independent per-phase PRs (no shared feature branch needed
+  yet -- revisit if a phase grows a genuine multi-agent split).
+- **Host (owns PRs):** the driving session above.
+- **Delegates:** none at this stage.
+- **Handoff:** n/a -- single driver; re-evaluate if a future phase is
+  delegated.
+
 ## Context
 
 ### Prior art this effort must not duplicate or regress
@@ -131,15 +148,35 @@ verbatim ask.
 - [ ] **Prerequisite, must be done first:** establish and test the container's
       own host-boundary capability before relying on it for anything else --
       a devcontainer is not automatically a stronger boundary than the
-      existing process-level containment. Concretely verify: the workspace
-      bind-mount's actual write scope (does it expose more of the host than
-      intended -- can a test modify files outside the repo checkout through
-      it?), whether the Docker socket is exposed into the container (a
-      exposed socket is a full host-escape vector), what credentials are
-      visible inside the container and from where they're sourced, and
-      whether networking is restricted to what a test genuinely needs or
-      left wide open. Only once this boundary is concretely measured does the
-      next bullet's comparison mean anything.
+      existing process-level containment, and checking mounts/credentials/
+      network alone is not sufficient either (a permissive runtime posture
+      defeats even a correctly-scoped mount). Concretely verify, and prefer a
+      **container-local or read-only/overlay workspace** over a plain
+      read-write bind of the host checkout (a read-write bind lets an
+      adversarial test modify the host checkout directly, regardless of how
+      "correctly scoped" the mount path looks):
+      - the workspace mount's actual write scope -- does it expose more of
+        the host than intended, and can a test modify files outside (or, with
+        a plain bind mount, even inside) the checkout through it;
+      - whether the Docker socket is exposed into the container (an exposed
+        socket is a full host-escape vector);
+      - what credentials are visible inside the container and from where
+        they're sourced;
+      - whether networking is restricted to what a test genuinely needs or
+        left wide open;
+      - the broader **runtime posture**, not just mounts/credentials/network:
+        privileged mode, added Linux capabilities, `no-new-privileges`/seccomp
+        confinement, host device access, and shared host namespaces (PID/IPC/
+        UTS/user). This repository's own restricted-container boundary
+        already treats all of these as fixed, checked invariants --
+        `plugins/agent-containers/src/agent_containers/lifecycle.py`'s
+        `restricted_policy_errors` (roughly lines 280-410) is the concrete
+        reference for what "runtime posture" means in practice and the
+        checks worth adapting here, even though this effort's container is a
+        different (test-isolation, not dispatched-development) use case and
+        may land on a different point on the trusted/restricted spectrum.
+      Only once this boundary is concretely measured does the next bullet's
+      comparison mean anything.
 - [ ] Confirm, with a concrete reproduction, what a `.devcontainer`-based test
       run -- using the established, tested boundary above -- would actually
       catch that `tools/run-plugin-tests.py`'s existing process-level

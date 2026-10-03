@@ -18,6 +18,7 @@ from .producers.evaluator import (
     NoOp,
 )
 from .queue import Status, TaskError, TaskQueue
+from .pr_observation_store import observation_store_path
 from .registrations import RegistrationKind
 from .reviewer_loops import wrap_reviewer_loop_evaluator
 
@@ -82,7 +83,11 @@ def _active_evaluators(
             continue
         try:
             loaded = load_registration_evaluator(spec)
-            loaded = wrap_reviewer_loop_evaluator(loaded, spec)
+            loaded = wrap_reviewer_loop_evaluator(
+                loaded,
+                spec,
+                observation_store_path=observation_store_path(queue.db_path),
+            )
         except EvaluatorError as exc:
             log.warning(
                 "skipping evaluator registration %s (%s): %s",

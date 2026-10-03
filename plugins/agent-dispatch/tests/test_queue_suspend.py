@@ -287,3 +287,74 @@ def test_reconcile_reviewer_deadlines_reads_blob_spilled_payload(tmp_path, monke
     resumed = q.reconcile_reviewer_deadlines(now=now)
 
     assert resumed == 1
+
+
+def test_reconcile_reviewer_deadlines_skips_bad_payload_and_keeps_processing(
+    tmp_path, monkeypatch
+):
+    q = TaskQueue(str(tmp_path / "q.sqlite3"))
+    monkeypatch.setenv("AGENT_DISPATCH_ENV", "default")
+    monkeypatch.setattr(
+        "agent_dispatch.remote_dispatch.local_machine", lambda: "host-a"
+    )
+    q.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {},
+            "reviewer_loop": {"stale_after_days": 7},
+        },
+        machine="host-a",
+        env="default",
+    )
+    now = 1_000_000.0
+    payload = json.dumps({"reviewer_loop": {"last_commit_at": now - (8 * 86400.0)}})
+    bad = q.create(
+        "bad payload",
+        repo=TEST_REPO,
+        require_verification=True,
+        evaluator_ref="review-loop",
+        payload_inline=payload,
+    )
+    good = q.create(
+        "good payload",
+        repo=TEST_REPO,
+        require_verification=True,
+        evaluator_ref="review-loop",
+        payload_inline=payload,
+    )
+    for index, task in enumerate((bad, good), start=1):
+        worker = f"worker-{index}"
+        q.claim_one(worker, task_id=task.id, repo=TEST_REPO)
+        q.start(task.id, worker, owner_session_id=f"session-{index}")
+        q.suspend(task.id, worker, reason="waiting", cooldown_seconds=None, now=now)
+
+    original = q.read_payload
+
+    def flaky_read_payload(task_or_id):
+        task = q.get(task_or_id) if isinstance(task_or_id, str) else task_or_id
+        assert task is not None
+        if task.id == bad.id:
+            raise KeyError("missing blob")
+        return original(task)
+
+    monkeypatch.setattr(q, "read_payload", flaky_read_payload)
+
+    assert q.reconcile_reviewer_deadlines(now=now) == 1
+    assert q.list_wakes(good.id)
+    assert q.list_run_waiter_wakes(bad.id) == []
+
+    later = q.create(
+        "later payload",
+        repo=TEST_REPO,
+        require_verification=True,
+        evaluator_ref="review-loop",
+        payload_inline=payload,
+    )
+    q.claim_one("worker-3", task_id=later.id, repo=TEST_REPO)
+    q.start(later.id, "worker-3", owner_session_id="session-3")
+    q.suspend(later.id, "worker-3", reason="waiting", cooldown_seconds=None, now=now)
+
+    assert q.reconcile_reviewer_deadlines(now=now) == 1
+    assert q.list_wakes(later.id)

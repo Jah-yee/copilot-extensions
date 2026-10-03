@@ -224,7 +224,14 @@ def test_reviewer_loop_stale_after_days_is_per_declaration(tmp_path, monkeypatch
         reviewer_loop={"stale_after_days": 30},
     )
     last_commit_at = 1_000_000.0
-    payload = json.dumps({"reviewer_loop": {"last_commit_at": last_commit_at}})
+    payload = json.dumps(
+        {
+            "reviewer_loop": {
+                "last_commit_at": last_commit_at,
+                "observed_at": last_commit_at + (31 * 86400.0),
+            }
+        }
+    )
     seven_day_id = _submitted_task(
         queue,
         "review repo-seven",
@@ -322,15 +329,27 @@ def test_reviewer_loop_stale_deadline_requeues_and_fires_without_manual_evaluate
         evaluator_ref="review-loop-delayed",
         reviewer_loop={"stale_after_days": 7},
     )
+    store = PRObservationStore(tmp_path / "pr-observations.db")
     task_id = _submitted_task(
         queue,
         "review repo-delayed",
         repo="example/repo-delayed",
         require_verification=True,
         evaluator_ref="review-loop-delayed",
-        payload_inline=json.dumps(
-            {"reviewer_loop": {"last_commit_at": current_time["value"]}}
+        payload_ref="github-pr:example/repo-delayed#1",
+    )
+    store.put(
+        "example/repo-delayed",
+        1,
+        PRObservation(
+            number=1,
+            approval_status=ApprovalStatus.APPROVED,
+            mergeability=Mergeability.CLEAN,
+            holds=frozenset(),
+            revision=Revision(diff_hash="head-1", base_sha="base-1"),
+            last_commit_at=current_time["value"],
         ),
+        observed_at=current_time["value"],
     )
     signal: asyncio.Queue[None] = asyncio.Queue()
 
@@ -378,6 +397,19 @@ def test_reviewer_loop_stale_deadline_requeues_and_fires_without_manual_evaluate
             assert queue.get(task_id).status == Status.SUBMITTED
 
             current_time["value"] += 8 * 86400.0
+            store.put(
+                "example/repo-delayed",
+                1,
+                PRObservation(
+                    number=1,
+                    approval_status=ApprovalStatus.APPROVED,
+                    mergeability=Mergeability.CLEAN,
+                    holds=frozenset(),
+                    revision=Revision(diff_hash="head-1", base_sha="base-1"),
+                    last_commit_at=1_000_000.0,
+                ),
+                observed_at=current_time["value"],
+            )
             signal.put_nowait(None)
             for _ in range(200):
                 if queue.get(task_id).status == Status.ABANDONED:
@@ -401,6 +433,7 @@ def test_reviewer_loop_can_derive_last_commit_at_from_provider_observation_store
     install_root.mkdir()
     monkeypatch.setenv("AGENT_DISPATCH_INSTALL_DIR", str(install_root))
     last_commit_at = 1_000_000.0
+    queue = TaskQueue(install_root / "tasks.db")
     store = PRObservationStore(install_root / "pr-observations.db")
     store.put(
         "example/provider-repo",
@@ -413,9 +446,8 @@ def test_reviewer_loop_can_derive_last_commit_at_from_provider_observation_store
             revision=Revision(diff_hash="head-1", base_sha="base-1"),
             last_commit_at=last_commit_at,
         ),
-        observed_at=last_commit_at,
+        observed_at=last_commit_at + (8 * 86400.0),
     )
-    queue = TaskQueue(tmp_path / "tasks.db")
     script = tmp_path / "eval.py"
     script.write_text(
         "import json, sys\n"
@@ -478,13 +510,173 @@ def test_reviewer_loop_stale_after_days_works_with_blob_spilled_payload(
         evaluator_ref="review-loop-blob",
         payload_inline=json.dumps(
             {
-                "reviewer_loop": {"last_commit_at": last_commit_at},
+                "reviewer_loop": {
+                    "last_commit_at": last_commit_at,
+                    "observed_at": last_commit_at + (8 * 86400.0),
+                },
                 "padding": "x" * 200,
             }
         ),
     )
     task = queue.get(task_id)
     assert task is not None and task.payload_inline is None and task.payload_ref is not None
+
+    report = evaluate_submitted_task(queue, task_id, trigger="submitted")
+
+    assert report["applied"][0]["decision"] == "abandon"
+    assert queue.get(task_id).status == Status.ABANDONED
+
+
+def test_reviewer_loop_stale_after_days_applies_even_when_evaluator_raises(
+    tmp_path, monkeypatch
+):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import sys\n"
+        "raise RuntimeError('boom')\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/repo-raise",
+        evaluator_ref="review-loop-raise",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    last_commit_at = 1_000_000.0
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (8 * 86400.0),
+    )
+    task_id = _submitted_task(
+        queue,
+        "review repo-raise",
+        repo="example/repo-raise",
+        require_verification=True,
+        evaluator_ref="review-loop-raise",
+        payload_inline=json.dumps(
+            {
+                "reviewer_loop": {
+                    "last_commit_at": last_commit_at,
+                    "observed_at": last_commit_at + (8 * 86400.0),
+                }
+            }
+        ),
+    )
+
+    report = evaluate_submitted_task(queue, task_id, trigger="submitted")
+
+    assert report["applied"][0]["decision"] == "abandon"
+    assert queue.get(task_id).status == Status.ABANDONED
+
+
+def test_reviewer_loop_stale_after_days_requires_fresh_provider_observation(
+    tmp_path, monkeypatch
+):
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    observation_db = install_root / "custom" / "tasks.db"
+    observation_db.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_DISPATCH_DB", str(observation_db))
+    last_commit_at = 1_000_000.0
+    deadline = last_commit_at + (7 * 86400.0)
+    store = PRObservationStore(observation_db.parent / "pr-observations.db")
+    store.put(
+        "example/provider-repo",
+        9,
+        PRObservation(
+            number=9,
+            approval_status=ApprovalStatus.APPROVED,
+            mergeability=Mergeability.CLEAN,
+            holds=frozenset(),
+            revision=Revision(diff_hash="head-1", base_sha="base-1"),
+            last_commit_at=last_commit_at,
+        ),
+        observed_at=deadline - 10.0,
+    )
+    queue = TaskQueue(observation_db)
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/provider-repo",
+        evaluator_ref="review-loop-provider-freshness",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: deadline + 60.0,
+    )
+    task_id = _submitted_task(
+        queue,
+        "review provider freshness",
+        repo="example/provider-repo",
+        require_verification=True,
+        evaluator_ref="review-loop-provider-freshness",
+        payload_ref="github-pr:example/provider-repo#9",
+    )
+
+    report = evaluate_submitted_task(queue, task_id, trigger="submitted")
+
+    assert report["applied"][0]["decision"] == "noop"
+    assert queue.get(task_id).status == Status.SUBMITTED
+
+
+def test_reviewer_loop_stale_after_days_uses_relocated_observation_store_path(
+    tmp_path, monkeypatch
+):
+    relocated = tmp_path / "relocated"
+    relocated.mkdir()
+    queue_db = relocated / "nested" / "tasks.db"
+    queue_db.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_DISPATCH_DB", str(queue_db))
+    last_commit_at = 1_000_000.0
+    store = PRObservationStore(queue_db.parent / "pr-observations.db")
+    store.put(
+        "example/provider-repo",
+        11,
+        PRObservation(
+            number=11,
+            approval_status=ApprovalStatus.APPROVED,
+            mergeability=Mergeability.CLEAN,
+            holds=frozenset(),
+            revision=Revision(diff_hash="head-1", base_sha="base-1"),
+            last_commit_at=last_commit_at,
+        ),
+        observed_at=last_commit_at + (8 * 86400.0),
+    )
+    queue = TaskQueue(queue_db)
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/provider-repo",
+        evaluator_ref="review-loop-provider-relocated",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (8 * 86400.0),
+    )
+    task_id = _submitted_task(
+        queue,
+        "review relocated provider store",
+        repo="example/provider-repo",
+        require_verification=True,
+        evaluator_ref="review-loop-provider-relocated",
+        payload_ref="github-pr:example/provider-repo#11",
+    )
 
     report = evaluate_submitted_task(queue, task_id, trigger="submitted")
 

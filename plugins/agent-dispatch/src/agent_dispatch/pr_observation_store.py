@@ -31,14 +31,27 @@ if a future slice introduces a genuinely concurrent writer.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
 
 from .github_provider_adapter import PRObservation
+from .config import default_db_path
 from .provider_state_machine import ApprovalStatus, HoldReason, Mergeability, Revision
 
 _BUSY_TIMEOUT_MS = 5000
+
+
+def observation_store_path(
+    queue_db_path: str | Path | None = None,
+) -> Path:
+    """The observation-store path for the active coordinator deployment."""
+    if queue_db_path is None:
+        db_path = Path(os.environ.get("AGENT_DISPATCH_DB") or default_db_path())
+    else:
+        db_path = Path(queue_db_path)
+    return db_path.expanduser().resolve().parent / "pr-observations.db"
 
 
 class PRObservationStore:

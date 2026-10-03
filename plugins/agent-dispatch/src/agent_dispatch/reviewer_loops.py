@@ -11,6 +11,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .registrar import (
@@ -136,6 +137,14 @@ class ReviewerLoopLifecycleConfig:
     stale_after_days: float | None = None
 
 
+@dataclass(frozen=True)
+class ReviewerLoopCommitSnapshot:
+    last_commit_at: float
+    observed_at: float | None = None
+    repo: str | None = None
+    source: str = "inline"
+
+
 class ReviewerLoopEvaluator:
     """Whole-goal reviewer lifecycle wrapper.
 
@@ -149,28 +158,44 @@ class ReviewerLoopEvaluator:
         config: ReviewerLoopLifecycleConfig,
         *,
         clock=None,
+        observation_store_path: str | Path | None = None,
     ) -> None:
         self._evaluator = evaluator
         self._config = config
         self._clock = time.time if clock is None else clock
+        self._observation_store_path = observation_store_path
 
     def evaluate(self, event: dict[str, Any]) -> list[Decision]:
-        decisions = list(self._evaluator.evaluate(event))
+        try:
+            decisions = list(self._evaluator.evaluate(event))
+        except Exception:
+            stale = reviewer_loop_stale_decision(
+                event,
+                stale_after_days=self._config.stale_after_days,
+                now=self._clock(),
+                observation_store_path=self._observation_store_path,
+            )
+            if stale is not None:
+                return [stale]
+            raise
         if any(isinstance(decision, (Confirm, Abandon)) for decision in decisions):
             return decisions
         stale = reviewer_loop_stale_decision(
             event,
             stale_after_days=self._config.stale_after_days,
             now=self._clock(),
+            observation_store_path=self._observation_store_path,
         )
         if stale is not None and all(isinstance(decision, NoOp) for decision in decisions):
             return [stale]
         return decisions
 
     def next_verification_not_before(self, event: Mapping[str, Any]) -> float | None:
-        return reviewer_loop_deadline(
+        return reviewer_loop_next_check_not_before(
             event,
             stale_after_days=self._config.stale_after_days,
+            now=self._clock(),
+            observation_store_path=self._observation_store_path,
         )
 
 
@@ -214,44 +239,99 @@ def _timestamp(value: object) -> float | None:
         return None
 
 
-def _provider_last_commit_at(task: Mapping[str, Any]) -> float | None:
-    from .config import default_db_path
-    from .pr_observation_store import PRObservationStore
+def _provider_snapshot(
+    task: Mapping[str, Any],
+    *,
+    observation_store_path: str | Path | None = None,
+) -> ReviewerLoopCommitSnapshot | None:
+    from .pr_observation_store import PRObservationStore, observation_store_path as _store_path
 
     target = _reviewer_loop_payload_ref(task)
     if target is None:
         return None
     repo, number = target
-    db_path = default_db_path().parent / "pr-observations.db"
+    db_path = _store_path(observation_store_path)
     if not db_path.exists():
         return None
-    observation = PRObservationStore(db_path).get(repo, number)
-    return None if observation is None else observation.last_commit_at
+    store = PRObservationStore(db_path)
+    observation = store.get(repo, number)
+    if observation is None or observation.last_commit_at is None:
+        return None
+    return ReviewerLoopCommitSnapshot(
+        last_commit_at=observation.last_commit_at,
+        observed_at=store.last_observed_at(repo, number),
+        repo=repo,
+        source="provider",
+    )
 
 
-def reviewer_loop_last_commit_at(task: Mapping[str, Any]) -> float | None:
+def reviewer_loop_commit_snapshot(
+    task: Mapping[str, Any],
+    *,
+    observation_store_path: str | Path | None = None,
+) -> ReviewerLoopCommitSnapshot | None:
     payload = _reviewer_loop_payload(task)
     if payload is not None:
         last_commit_at = _timestamp(payload.get("last_commit_at"))
         if last_commit_at is not None:
-            return last_commit_at
-    return _provider_last_commit_at(task)
+            return ReviewerLoopCommitSnapshot(
+                last_commit_at=last_commit_at,
+                observed_at=_timestamp(payload.get("observed_at")),
+                source="inline",
+            )
+    return _provider_snapshot(task, observation_store_path=observation_store_path)
 
 
 def reviewer_loop_deadline(
     event: Mapping[str, Any],
     *,
     stale_after_days: float | None,
+    observation_store_path: str | Path | None = None,
 ) -> float | None:
     if stale_after_days is None:
         return None
     task = event.get("task")
     if not isinstance(task, Mapping):
         return None
-    last_commit_at = reviewer_loop_last_commit_at(task)
-    if last_commit_at is None:
+    snapshot = reviewer_loop_commit_snapshot(
+        task, observation_store_path=observation_store_path
+    )
+    if snapshot is None:
         return None
-    return last_commit_at + (stale_after_days * 86400.0)
+    return snapshot.last_commit_at + (stale_after_days * 86400.0)
+
+
+def reviewer_loop_next_check_not_before(
+    event: Mapping[str, Any],
+    *,
+    stale_after_days: float | None,
+    now: float | None = None,
+    observation_store_path: str | Path | None = None,
+) -> float | None:
+    task = event.get("task")
+    if not isinstance(task, Mapping):
+        return None
+    snapshot = reviewer_loop_commit_snapshot(
+        task, observation_store_path=observation_store_path
+    )
+    deadline = reviewer_loop_deadline(
+        event,
+        stale_after_days=stale_after_days,
+        observation_store_path=observation_store_path,
+    )
+    if snapshot is None or deadline is None:
+        return None
+    current_time = time.time() if now is None else now
+    if current_time < deadline:
+        return deadline
+    if snapshot.source == "provider" and snapshot.observed_at is not None and snapshot.repo:
+        from .pr_polling_policy import polling_interval_seconds
+
+        return max(
+            current_time + 60.0,
+            snapshot.observed_at + polling_interval_seconds(snapshot.repo),
+        )
+    return None
 
 
 def reviewer_loop_stale_decision(
@@ -259,13 +339,26 @@ def reviewer_loop_stale_decision(
     *,
     stale_after_days: float | None,
     now: float | None = None,
+    observation_store_path: str | Path | None = None,
 ) -> Abandon | None:
     """Return the reviewer loop's stale-exit decision, if any."""
-    deadline = reviewer_loop_deadline(event, stale_after_days=stale_after_days)
+    task = event.get("task")
+    if not isinstance(task, Mapping):
+        return None
+    snapshot = reviewer_loop_commit_snapshot(
+        task, observation_store_path=observation_store_path
+    )
+    deadline = reviewer_loop_deadline(
+        event,
+        stale_after_days=stale_after_days,
+        observation_store_path=observation_store_path,
+    )
     if deadline is None:
         return None
     current_time = time.time() if now is None else now
     if current_time < deadline:
+        return None
+    if snapshot is None or snapshot.observed_at is None or snapshot.observed_at < deadline:
         return None
     return Abandon(
         reason=(
@@ -381,11 +474,18 @@ def reviewer_loop_lifecycle_config(
     )
 
 
-def wrap_reviewer_loop_evaluator(evaluator: Any, spec: Mapping[str, Any]) -> Any:
+def wrap_reviewer_loop_evaluator(
+    evaluator: Any,
+    spec: Mapping[str, Any],
+    *,
+    observation_store_path: str | Path | None = None,
+) -> Any:
     config = reviewer_loop_lifecycle_config(spec)
     if config is None:
         return evaluator
-    return ReviewerLoopEvaluator(evaluator, config)
+    return ReviewerLoopEvaluator(
+        evaluator, config, observation_store_path=observation_store_path
+    )
 
 
 def _placement_filters(data: object) -> Filters:

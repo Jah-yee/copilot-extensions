@@ -28,6 +28,7 @@ task's own current owner once the monitor is due.
 from __future__ import annotations
 
 import math
+import logging
 from collections.abc import Iterator
 
 from .monitors import DEFAULT_SUSPEND_COOLDOWN_SECONDS, MonitorKind, suspend_monitor_columns
@@ -40,12 +41,15 @@ from .queue_common import (
     _task_transition_spec,
 )
 from .queue_records import Status, TaskError
+from .pr_observation_store import observation_store_path
 from .reviewer_loops import (
     active_reviewer_loop_lifecycle_configs,
     reviewer_loop_deadline,
     reviewer_loop_lifecycle_for_task,
     reviewer_loop_runtime_scope,
 )
+
+log = logging.getLogger("agent-dispatch.queue-suspend")
 
 
 class QueueSuspendMixin:
@@ -225,44 +229,45 @@ class QueueSuspendMixin:
             return 0
         resumed = 0
         for task in self._iter_suspended_reviewer_candidates():
-            if (
-                not task.owner
-                or not task.evaluator_ref
-                or task.resume_requested
-                or task.wake_status in {"pending", "delivering"}
-            ):
-                continue
-            config = reviewer_loop_lifecycle_for_task(
-                registrations,
-                repo=task.repo,
-                evaluator_ref=task.evaluator_ref,
-            )
-            if config is None or config.stale_after_days is None:
-                continue
-            deadline = reviewer_loop_deadline(
-                {
-                    "task": {
-                        "payload_inline": self.read_payload(task),
-                        "payload_ref": task.payload_ref,
-                    }
-                },
-                stale_after_days=config.stale_after_days,
-            )
-            if deadline is None or not math.isfinite(deadline) or deadline > ts:
-                continue
-            wakes = [
-                wake
-                for wake in self.list_run_waiter_wakes(task.id)
-                if wake.status in {"pending", "delivering"}
-            ]
-            if wakes:
-                continue
-            message = (
-                f"Task {task.id}'s reviewer stale deadline elapsed while it was "
-                "suspended. Re-check the change and resolve it instead of leaving "
-                "the review parked."
-            )
             try:
+                if (
+                    not task.owner
+                    or not task.evaluator_ref
+                    or task.resume_requested
+                    or task.wake_status in {"pending", "delivering"}
+                ):
+                    continue
+                config = reviewer_loop_lifecycle_for_task(
+                    registrations,
+                    repo=task.repo,
+                    evaluator_ref=task.evaluator_ref,
+                )
+                if config is None or config.stale_after_days is None:
+                    continue
+                deadline = reviewer_loop_deadline(
+                    {
+                        "task": {
+                            "payload_inline": self.read_payload(task),
+                            "payload_ref": task.payload_ref,
+                        }
+                    },
+                    stale_after_days=config.stale_after_days,
+                    observation_store_path=observation_store_path(self.db_path),
+                )
+                if deadline is None or not math.isfinite(deadline) or deadline > ts:
+                    continue
+                wakes = [
+                    wake
+                    for wake in self.list_run_waiter_wakes(task.id)
+                    if wake.status in {"pending", "delivering"}
+                ]
+                if wakes:
+                    continue
+                message = (
+                    f"Task {task.id}'s reviewer stale deadline elapsed while it was "
+                    "suspended. Re-check the change and resolve it instead of leaving "
+                    "the review parked."
+                )
                 result = self.supersede_run_waiter_with_wake(
                     task.id,
                     reason="reviewer stale deadline elapsed",
@@ -279,6 +284,13 @@ class QueueSuspendMixin:
                         now=ts,
                     )
             except TaskError:
+                continue
+            except Exception:
+                log.warning(
+                    "reviewer stale reconcile skipped task %s after data/read failure",
+                    task.id,
+                    exc_info=True,
+                )
                 continue
             resumed += 1
         return resumed

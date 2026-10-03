@@ -452,7 +452,12 @@ async def _gc_loop(
         if resumed:
             log.info("cooldown reconcile auto-resumed %d suspended task(s)", resumed)
             bus.publish({"type": "task.reconciled", "cooldown_resumed": resumed})
-        reviewer_resumed = await asyncio.to_thread(queue.reconcile_reviewer_deadlines)
+        reviewer_resumed = await run_supervised_cycle(
+            health,
+            queue.reconcile_reviewer_deadlines,
+            cycle_timeout=cycle_timeout or min(interval, 120.0),
+        )
+        reviewer_resumed = reviewer_resumed or 0
         if reviewer_resumed:
             log.info(
                 "reviewer deadline reconcile woke %d suspended review task(s)",

@@ -1201,3 +1201,39 @@ non-`SIG_IGN` handler shape) passes; a fresh Docker-backed end-to-end run
 (`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
 works; Docker cleanup and host `git status --short` reconfirmed clean of
 anything beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (final stretch): 1 finding addressed (ref-relative `--base` expressions)
+An eighth review pass of the same round confirmed the record-and-replay
+signal fix resolved, and raised one more (previously missed, against
+code introduced back in round 4). MEDIUM: a REF-RELATIVE `--base`
+expression (e.g. `origin/dev~1`) resolves fine on the host, but `git
+bundle create` does not preserve a REMOTE-TRACKING ref
+(`refs/remotes/origin/...`) as a named ref in its resulting clone --
+confirmed via direct experimentation: a plain LOCAL branch name IS
+preserved as a named ref by `git clone --bare` from the bundle, but a
+`refs/remotes/...` ref is not. The old fetch-by-`--symbolic-full-name`
+step existed specifically to re-materialize that named ref, but
+`--symbolic-full-name` returns nothing useful for a ref-RELATIVE
+expression (it isn't itself a plain ref), so that step silently did
+nothing for exactly this case -- the unchanged in-container `--base`
+value would then fail to resolve, and since `run-plugin-tests.py` treats
+a failed diff as an empty target set, a `--changed` run could silently
+report no suites instead of the real problem. Fixed with a new
+`_rewrite_base_to_resolved_sha` that replaces `--base`'s passthrough
+VALUE with its resolved commit SHA before the in-container command is
+assembled -- a bare SHA resolves against any clone containing its
+object, named ref or not, which made the old fetch-by-full-name step
+entirely unnecessary (removed) regardless of ref type.
+
+Re-validated end-to-end: the full unit test suite (75 tests, including 5
+new `_rewrite_base_to_resolved_sha` tests and a new real-git regression
+test proving a genuine ref-relative expression over an actual
+`refs/remotes/...` ref resolves and diffs correctly inside the bundle
+clone after rewriting) passes; a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
+works; and a dedicated live check against this PR's own real `origin/dev`
+remote (`--changed --base origin/dev~1`) confirmed the expression
+resolves on the host, gets correctly rewritten to its SHA, and the full
+invocation completes without error. Docker cleanup and host
+`git status --short` reconfirmed clean of anything beyond this round's
+own diff.

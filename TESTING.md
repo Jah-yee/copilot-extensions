@@ -244,6 +244,18 @@ silently report "No plugin suites to run." instead of the real problem. An
 explicit plugin name or `--all` run is unaffected, since neither ever
 consults `--base` at all.
 
+A `--base` value that DOES resolve on the host (bare flag, `=value` form,
+or an unambiguous abbreviation like `--bas`) is rewritten to its resolved
+commit SHA before the in-container invocation is assembled -- this matters
+for a ref-relative expression (e.g. `origin/dev~1`): it resolves fine on
+the host, but `git bundle create` does not preserve a remote-tracking ref
+(`refs/remotes/origin/...`) as a named ref in its resulting clone (unlike
+a plain local branch name, which it does preserve), so the unrewritten
+expression would otherwise fail to resolve again inside the materialized
+snapshot even though the underlying commit object is present. A bare SHA
+has no such problem -- it resolves against any clone containing its
+object, named ref or not.
+
 Every git subprocess the wrapper runs on the HOST (bundling, cloning,
 reading the dirty/hidden-flag warnings, etc.) forces
 `GIT_NO_LAZY_FETCH=1` and `GIT_NO_REPLACE_OBJECTS=1` in addition to the

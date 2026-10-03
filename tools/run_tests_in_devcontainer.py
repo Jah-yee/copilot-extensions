@@ -499,6 +499,48 @@ def _git_rev_parse(ref: str) -> str | None:
     return res.stdout.strip() if res.returncode == 0 else None
 
 
+def _rewrite_base_to_resolved_sha(passthrough: list[str]) -> list[str]:
+    """Replace any ``--base`` value (bare, ``=value``, or an unambiguous
+    abbreviation -- see `_canonicalize_flag`) in ``passthrough`` with its
+    resolved commit SHA, when it resolves on the host.
+
+    A REF-RELATIVE ``--base`` expression (e.g. ``origin/dev~1``,
+    ``origin/dev@{upstream}``) resolves fine on the HOST, but
+    ``git rev-parse --symbolic-full-name`` returns nothing useful for it
+    (it isn't itself a plain ref), so the materialized bundle clone never
+    gets the NAMED ref such an expression needs to re-resolve the same way
+    inside the container -- the unchanged in-container ``--base`` value
+    would then fail to resolve there even though the underlying commit
+    object IS present (`_materialized_git_dir` always includes it in the
+    bundle's object closure). A bare SHA has no such problem: it resolves
+    against any clone containing its object, named ref or not. Rewriting
+    to the resolved SHA up front avoids needing to special-case every
+    possible ref-relative expression shape, and makes materializing a
+    named ref for this purpose unnecessary entirely. Leaves ``passthrough``
+    unchanged when ``--base`` doesn't resolve locally at all (an
+    already-reported, separately-handled problem via
+    `_materialized_git_dir`'s own fail-loud guard) or isn't present."""
+    resolved_sha = _git_rev_parse(_resolve_base_ref(passthrough))
+    if resolved_sha is None:
+        return passthrough
+    rewritten: list[str] = []
+    skip_next = False
+    for arg in passthrough:
+        if skip_next:
+            rewritten.append(resolved_sha)
+            skip_next = False
+            continue
+        name, eq, _value = arg.partition("=")
+        if "=" not in arg and _canonicalize_flag(arg) == "--base":
+            rewritten.append(arg)
+            skip_next = True
+        elif eq and _canonicalize_flag(name) == "--base":
+            rewritten.append(f"{name}={resolved_sha}")
+        else:
+            rewritten.append(arg)
+    return rewritten
+
+
 # A fresh, credential-free `.git/config` written into every materialized
 # copy (see `_materialized_git_dir` below) -- deliberately NOT a copy of
 # the host's own config, which may embed an authenticated remote URL,
@@ -528,10 +570,13 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     (when it resolves locally) the ``--base`` ref `run-plugin-tests.py
     --changed`` will actually diff against, then ``git clone --bare`` that
     bundle into a fresh directory -- the clone contains exactly the commits
-    reachable from those two tips, nothing else. The base ref is then
-    fetched again under its own fully-qualified name (e.g.
-    ``refs/remotes/origin/dev``) so `--changed`` can resolve it by that
-    name, exactly as it would on the host. The index is then rebuilt from
+    reachable from those two tips, nothing else. ``main`` rewrites
+    `--base`'s own passthrough VALUE to this same resolved commit's SHA
+    before the in-container command is assembled (see
+    `_rewrite_base_to_resolved_sha`), so the bundle clone needs no NAMED
+    ref for it at all -- a bare SHA resolves against any clone containing
+    its object, regardless of which (if any) named ref also points at it.
+    The index is then rebuilt from
     ``HEAD`` itself (``git read-tree HEAD``) rather than copied from the
     host: the host's real index can reference a staged blob that is
     genuinely unreachable from both ``HEAD`` and the base ref (a staged-
@@ -599,21 +644,6 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     )
     if clone_res.returncode != 0:
         raise SystemExit(f"git clone (from bundle) failed: {clone_res.stderr.strip()}")
-
-    if base_resolves:
-        full_name_res = subprocess.run(
-            ["git", "-C", str(REPO), "rev-parse", "--symbolic-full-name", base_ref],
-            capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
-        )
-        full_name = full_name_res.stdout.strip()
-        if full_name_res.returncode == 0 and full_name:
-            fetch_res = subprocess.run(
-                ["git", f"--git-dir={merged}", "fetch", "--quiet", str(bundle_file),
-                 f"{full_name}:{full_name}"],
-                capture_output=True, text=True, timeout=120, env=_scrubbed_git_env(),
-            )
-            if fetch_res.returncode != 0:
-                raise SystemExit(f"git fetch (base ref) failed: {fetch_res.stderr.strip()}")
 
     read_tree_res = subprocess.run(
         ["git", f"--git-dir={merged}", "read-tree", "HEAD"],
@@ -947,6 +977,13 @@ def main(argv: list[str] | None = None) -> int:
     # leading one), since it can appear anywhere in the extras list
     # (e.g. ``--all -- -k some_filter`` leaves it in the MIDDLE).
     passthrough = [arg for arg in passthrough if arg != "--"]
+    # Rewriting `--base` to its resolved SHA here (before EITHER the
+    # snapshot is built or the in-container command is assembled) means
+    # both consistently see and use the SAME resolved commit, including
+    # for a ref-relative expression that would otherwise fail to resolve
+    # again inside the materialized bundle clone -- see
+    # `_rewrite_base_to_resolved_sha`'s own docstring.
+    passthrough = _rewrite_base_to_resolved_sha(passthrough)
 
     instance_label = uuid.uuid4().hex[:12]
     config_path, volume_name = _per_instance_config(instance_label)

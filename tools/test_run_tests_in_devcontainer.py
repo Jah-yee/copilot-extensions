@@ -224,6 +224,37 @@ def test_resolve_base_ref_honors_last_of_repeated_flag() -> None:
     ) == "origin/dev"
 
 
+def test_rewrite_base_to_resolved_sha_replaces_space_and_equals_forms(monkeypatch) -> None:
+    monkeypatch.setattr(wrapper, "_git_rev_parse", lambda ref: "deadbeef" * 5)
+    assert wrapper._rewrite_base_to_resolved_sha(
+        ["--changed", "--base", "origin/main~1"]
+    ) == ["--changed", "--base", "deadbeef" * 5]
+    assert wrapper._rewrite_base_to_resolved_sha(
+        ["--changed", "--base=origin/dev~1"]
+    ) == ["--changed", f"--base={'deadbeef' * 5}"]
+
+
+def test_rewrite_base_to_resolved_sha_recognizes_abbreviated_flag(monkeypatch) -> None:
+    monkeypatch.setattr(wrapper, "_git_rev_parse", lambda ref: "deadbeef" * 5)
+    assert wrapper._rewrite_base_to_resolved_sha(
+        ["--changed", "--bas", "origin/main~1"]
+    ) == ["--changed", "--bas", "deadbeef" * 5]
+
+
+def test_rewrite_base_to_resolved_sha_leaves_passthrough_unchanged_when_unresolvable(monkeypatch) -> None:
+    monkeypatch.setattr(wrapper, "_git_rev_parse", lambda ref: None)
+    original = ["--changed", "--base", "origin/nonexistent"]
+    assert wrapper._rewrite_base_to_resolved_sha(original) == original
+
+
+def test_rewrite_base_to_resolved_sha_leaves_passthrough_unchanged_when_base_absent(monkeypatch) -> None:
+    # The default (`origin/main`) doesn't resolve in a throwaway test repo
+    # with no such remote -- nothing to rewrite, passthrough is untouched.
+    monkeypatch.setattr(wrapper, "_git_rev_parse", lambda ref: None)
+    original = ["agent-worktrees"]
+    assert wrapper._rewrite_base_to_resolved_sha(original) == original
+
+
 def test_changed_mode_active_by_default_with_no_args() -> None:
     # Mirrors run-plugin-tests.py's own `else: targets =
     # changed_plugins(args.base)` fallback -- no --all, no plugin names.
@@ -383,6 +414,75 @@ def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path,
         assert status.returncode == 0
         assert status.stdout == ""
     assert not merged.parent.exists()
+
+
+def test_rewrite_base_to_resolved_sha_fixes_a_ref_relative_expression_end_to_end(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The regression this closes: a REF-RELATIVE `--base` expression (e.g.
+    # `origin/dev~1`) resolves fine on the host, but `git bundle create`
+    # does not preserve a REMOTE-TRACKING ref (`refs/remotes/origin/...`)
+    # as a named ref in the resulting clone (unlike a plain local branch
+    # name, which it does preserve) -- so the unchanged expression would
+    # fail to resolve again inside the materialized bundle clone, even
+    # though the underlying commit object is present. Rewriting `--base`
+    # to its resolved SHA sidesteps this entirely: a bare SHA resolves
+    # against any clone containing its object, no named ref required.
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+
+    (repo / "tracked.txt").write_text("v2\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "intermediate"], check=True)
+
+    (repo / "tracked.txt").write_text("v3\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "head"], check=True)
+    head_sha = _run_git(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Set up a genuine remote-tracking ref (not a plain local branch) so
+    # `origin/dev~1` is actually a ref-relative expression over a
+    # `refs/remotes/...` ref -- the specific case `git bundle create`
+    # does not preserve as a named ref in its resulting clone.
+    _run_git(["git", "-C", str(repo), "remote", "add", "origin", str(repo)], check=True)
+    _run_git(["git", "-C", str(repo), "fetch", "-q", "origin"], check=True)
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    passthrough = wrapper._rewrite_base_to_resolved_sha(["--changed", "--base", "origin/main~1"])
+    assert passthrough[-1] != "origin/main~1"  # genuinely rewritten, not left as-is
+
+    with contextlib.ExitStack() as stack:
+        merged = wrapper._materialized_git_dir(stack, passthrough)
+
+        rp = _run_git(
+            ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert rp.returncode == 0
+        assert rp.stdout.strip() == head_sha
+
+        # The rewritten (resolved-SHA) base must resolve AND diff
+        # correctly inside the bundle clone -- the exact two operations
+        # that would have failed against the unrewritten ref-relative
+        # expression.
+        resolved_base = passthrough[-1]
+        base_rp = _run_git(
+            ["git", f"--git-dir={merged}", "rev-parse", resolved_base],
+            capture_output=True, text=True,
+        )
+        assert base_rp.returncode == 0
+
+        diff = _run_git(
+            ["git", f"--git-dir={merged}", "diff", "--name-only", resolved_base, "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert diff.returncode == 0
+        assert "tracked.txt" in diff.stdout
 
 
 def test_materialized_git_dir_handles_staged_uncommitted_change_at_snapshot_time(

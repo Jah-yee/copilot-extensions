@@ -612,3 +612,39 @@ from 23) passes, and a fresh Docker-backed end-to-end run
 afterward, plus a direct `docker volume inspect` confirming the tmpfs-backed,
 size-bounded volume.
 
+### 2026-10-03 — Review round 4: 2 findings addressed (closes the exfiltration concern for real)
+Automated review on the round-3 push raised two new findings (plus three
+restated stale ones from earlier rounds already fixed, left as-is pending
+their own thread resolution): (1) **HIGH -- round 3's fix was incomplete**.
+Replacing only `config` and `hooks` still copied the ENTIRE common git
+directory's objects/refs wholesale -- every branch, stash, reflog, and
+unreachable object, none of which has anything to do with the plugin suite
+being run, into a container that deliberately keeps outbound networking.
+Fixed properly this time: `_materialized_git_dir` now builds a `git bundle`
+containing only the object closure of `HEAD` and the `--changed` diff base
+(extracted from the passthrough args via `_resolve_base_ref`, falling back
+to `run-plugin-tests.py`'s own `origin/main` default) via `git bundle
+create`, then `git clone --bare` from that bundle into a fresh, minimal git
+directory -- nothing else is reachable. This also fully replaces (and
+simplifies away) round 2's worktree-merge logic: a linked worktree's `.git`
+pointer file is no longer special-cased at all, since the bundle/clone path
+works identically regardless of how the host's `.git` is laid out. A real
+regression test builds an actual tiny git repo with a sibling "secret"
+branch carrying placeholder-secret-shaped content that is never an
+ancestor of `HEAD` or the base ref, and asserts that branch's commit is
+genuinely unresolvable (`git cat-file -e` fails) in the materialized copy
+-- not merely that a specific file/string is absent, but that the object
+itself was never transferred. (2) `_tear_down`'s container-removal
+`subprocess.run` call could itself raise (`TimeoutExpired`/`OSError`)
+before the volume-removal line ever ran, leaking the per-run volume despite
+the teardown contract -- fixed with the same per-step try/except pattern
+already used in `_cleanup_orphan`, so the volume removal is always
+attempted regardless of what happens to the container removal.
+
+All changes re-validated: the full unit test suite (34 tests, up from 29,
+including the new real-git secret-branch-exclusion regression test above)
+passes, and a fresh Docker-backed end-to-end run (`ai-attribution`, 98
+passed / 6 skipped) plus a `--changed --base origin/dev` run were both
+executed from scratch afterward against the new bundle-based snapshot
+path.
+

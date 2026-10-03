@@ -232,23 +232,47 @@ def _tracked_and_untracked_paths() -> list[str]:
     ]
 
 
-def _resolve_git_dirs() -> tuple[Path, Path]:
-    """Return ``(git_dir, common_dir)`` as absolute paths for the host
-    checkout. Equal for a normal checkout; different for a linked worktree
-    (this repo's own required flow), where ``git_dir`` is the per-worktree
-    private metadata dir and ``common_dir`` is the main checkout's shared
-    ``.git`` (objects/refs)."""
-    def _rev_parse(flag: str) -> Path:
-        res = subprocess.run(
-            ["git", "-C", str(REPO), "rev-parse", flag],
-            capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
-        )
-        if res.returncode != 0:
-            raise SystemExit(f"git rev-parse {flag} failed: {res.stderr.strip()}")
-        path = Path(res.stdout.strip())
-        return path if path.is_absolute() else (REPO / path).resolve()
+def _resolve_base_ref(passthrough: list[str]) -> str:
+    """Best-effort extraction of the ``--base`` value a passthrough
+    invocation will use, so ``_materialized_git_dir`` can include exactly
+    that ref's object closure (not the whole repository's history) in the
+    bundled snapshot. Falls back to ``tools/run-plugin-tests.py``'s own
+    ``--base`` default when it isn't present in ``passthrough`` -- mirroring
+    that runner's own argparse default, not guessing at a different one."""
+    for i, arg in enumerate(passthrough):
+        if arg == "--base" and i + 1 < len(passthrough):
+            return passthrough[i + 1]
+        if arg.startswith("--base="):
+            return arg.split("=", 1)[1]
+    return "origin/main"
 
-    return _rev_parse("--git-dir"), _rev_parse("--git-common-dir")
+
+def _git_rev_parse(ref: str) -> str | None:
+    """Resolve ``ref`` to a commit sha via the scrubbed environment.
+    Returns ``None`` (rather than raising) when it doesn't resolve locally
+    -- an unresolvable ``--base`` is a degraded-but-not-fatal condition for
+    the snapshot (the container's own ``--changed`` run will then fail the
+    same way a host run would against a ref nobody fetched)."""
+    res = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--verify", ref],
+        capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
+    )
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def _resolve_git_path(git_path: str) -> Path:
+    """Resolve a repo-relative path git itself names (e.g. ``index``) to an
+    absolute host path, via ``git rev-parse --git-path`` -- correct for
+    both a normal checkout and a linked worktree without this script having
+    to know which kind it is."""
+    res = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--git-path", git_path],
+        capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
+    )
+    if res.returncode != 0:
+        raise SystemExit(f"git rev-parse --git-path {git_path} failed: {res.stderr.strip()}")
+    resolved = Path(res.stdout.strip())
+    return resolved if resolved.is_absolute() else (REPO / resolved).resolve()
 
 
 # A fresh, credential-free `.git/config` written into every materialized
@@ -267,67 +291,94 @@ _MINIMAL_GIT_CONFIG = (
 )
 
 
-def _materialized_git_dir(stack: contextlib.ExitStack) -> Path:
+def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -> Path:
     """Return a path to a self-contained ``.git`` directory to copy into
-    the container.
+    the container, containing ONLY the object closure of ``HEAD`` and the
+    ``--changed`` diff base -- never the full repository history.
 
-    A normal checkout's ``.git`` is a real, self-contained directory
-    already. A linked worktree's ``.git``, however, is a plain pointer FILE
-    (``gitdir: <absolute host path>``) whose target is this HOST's own
-    filesystem layout, meaningless inside the container -- copying it
-    verbatim would leave `git` inside the container pointing at a path
-    that doesn't exist there, so ``run-plugin-tests.py --changed``'s `git
-    diff`/`git status` calls would silently return nothing. For that case,
-    build a merged, self-contained copy in a temp directory instead: the
-    shared common dir's objects/refs (excluding its ``worktrees/`` subdir,
-    which holds every OTHER worktree's unrelated private state) MERGED with
-    (not replaced by -- the per-worktree dir carries its own near-empty
-    ``refs``/``logs`` subdirectories too, and replacing would silently wipe
-    every real branch ref) this worktree's own private files (``HEAD``,
-    ``index``, etc.). Either way, ``config`` is always replaced with a
-    fresh, credential-free one (see ``_MINIMAL_GIT_CONFIG``) and ``hooks``
-    is always dropped, since neither is needed for `diff`/`status`/
+    Copying the full local git database (every branch, stash, reflog, and
+    unreachable object) into a container that deliberately keeps outbound
+    networking would let an adversarial/buggy test enumerate and exfiltrate
+    local-only content having nothing to do with the plugin suite it's
+    meant to run. Instead: ``git bundle create`` with only ``HEAD`` and
+    (when it resolves locally) the ``--base`` ref `run-plugin-tests.py
+    --changed`` will actually diff against, then ``git clone --bare`` that
+    bundle into a fresh directory -- the clone contains exactly the commits
+    reachable from those two tips, nothing else. The base ref is then
+    fetched again under its own fully-qualified name (e.g.
+    ``refs/remotes/origin/dev``) so `--changed`` can resolve it by that
+    name, exactly as it would on the host. The real index is copied in
+    afterward so `git status`/`git diff` against the working tree still
+    reflect any real staged/uncommitted state, and -- as with every
+    materialized copy -- ``config`` is replaced with a fresh,
+    credential-free one (see ``_MINIMAL_GIT_CONFIG``) and ``hooks`` is
+    dropped entirely, since neither is needed for `diff`/`status`/
     `rev-parse` and either could carry credential-bearing or otherwise
     sensitive content."""
-    git_dir, common_dir = _resolve_git_dirs()
     tmp_dir = Path(tempfile.mkdtemp(prefix="devcontainer-test-isolation-git-"))
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
+    bundle_file = tmp_dir / "snapshot.bundle"
     merged = tmp_dir / ".git"
-    if git_dir == common_dir:
-        shutil.copytree(common_dir, merged)
-    else:
-        shutil.copytree(common_dir, merged, ignore=shutil.ignore_patterns("worktrees"))
-        for item in git_dir.iterdir():
-            dest = merged / item.name
-            if item.is_dir():
-                shutil.copytree(item, dest, dirs_exist_ok=True)
-            else:
-                if dest.is_dir():
-                    shutil.rmtree(dest)
-                shutil.copy2(item, dest)
-        (merged / "commondir").unlink(missing_ok=True)
+
+    base_ref = _resolve_base_ref(passthrough)
+    base_resolves = _git_rev_parse(base_ref) is not None
+    bundle_refs = ["HEAD", base_ref] if base_resolves else ["HEAD"]
+
+    bundle_res = subprocess.run(
+        ["git", "-C", str(REPO), "bundle", "create", str(bundle_file), *bundle_refs],
+        capture_output=True, text=True, timeout=300, env=_scrubbed_git_env(),
+    )
+    if bundle_res.returncode != 0:
+        raise SystemExit(f"git bundle create failed: {bundle_res.stderr.strip()}")
+
+    clone_res = subprocess.run(
+        ["git", "clone", "--bare", "--quiet", str(bundle_file), str(merged)],
+        capture_output=True, text=True, timeout=120, env=_scrubbed_git_env(),
+    )
+    if clone_res.returncode != 0:
+        raise SystemExit(f"git clone (from bundle) failed: {clone_res.stderr.strip()}")
+
+    if base_resolves:
+        full_name_res = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "--symbolic-full-name", base_ref],
+            capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
+        )
+        full_name = full_name_res.stdout.strip()
+        if full_name_res.returncode == 0 and full_name:
+            fetch_res = subprocess.run(
+                ["git", f"--git-dir={merged}", "fetch", "--quiet", str(bundle_file),
+                 f"{full_name}:{full_name}"],
+                capture_output=True, text=True, timeout=120, env=_scrubbed_git_env(),
+            )
+            if fetch_res.returncode != 0:
+                raise SystemExit(f"git fetch (base ref) failed: {fetch_res.stderr.strip()}")
+
+    index_path = _resolve_git_path("index")
+    if index_path.exists():
+        shutil.copy2(index_path, merged / "index")
+
     (merged / "config").write_text(_MINIMAL_GIT_CONFIG)
     shutil.rmtree(merged / "hooks", ignore_errors=True)
     return merged
 
 
-def _write_tar_of_repo(dest: Path) -> None:
+def _write_tar_of_repo(dest: Path, passthrough: list[str]) -> None:
     """Write a tarball of the host checkout to ``dest`` on disk (never held
     in memory as one ``bytes`` object -- a checkout with a large object
     store or build artifacts could otherwise need several times its own
     size in process memory, between an in-memory buffer and ``subprocess``'s
     own copy of an ``input=`` payload). Only ever READS the host tree --
     ``.git`` is handled via ``_materialized_git_dir``, which builds a
-    separate, temporary, self-contained copy rather than touching the real
+    separate, temporary, minimal-history copy rather than touching the real
     one; everything else comes from ``_tracked_and_untracked_paths``, so
     gitignored (and potentially secret-bearing) files are never included."""
     with tarfile.open(dest, mode="w") as tar, contextlib.ExitStack() as stack:
-        tar.add(_materialized_git_dir(stack), arcname=".git")
+        tar.add(_materialized_git_dir(stack, passthrough), arcname=".git")
         for rel_path in _tracked_and_untracked_paths():
             tar.add(REPO / rel_path, arcname=rel_path)
 
 
-def _populate_workspace(container_id: str) -> None:
+def _populate_workspace(container_id: str, passthrough: list[str]) -> None:
     """Copy a point-in-time snapshot of the host checkout into the
     container's workspace VOLUME (never a host bind -- see
     ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
@@ -345,7 +396,7 @@ def _populate_workspace(container_id: str) -> None:
     with tempfile.NamedTemporaryFile(
         prefix="devcontainer-test-isolation-snapshot-", suffix=".tar",
     ) as tar_file:
-        _write_tar_of_repo(Path(tar_file.name))
+        _write_tar_of_repo(Path(tar_file.name), passthrough)
         tar_file.seek(0)
         res = subprocess.run(
             [
@@ -386,14 +437,26 @@ def _tear_down(container_id: str, volume_name: str) -> None:
     """Remove the container, then the per-invocation volume it owned --
     both failures are surfaced (never silently swallowed), since a failed
     removal leaves a live container (and any test-spawned descendants it
-    holds) running, or an orphaned volume accumulating on the host."""
+    holds) running, or an orphaned volume accumulating on the host. Each
+    removal is individually guarded against
+    ``subprocess.SubprocessError``/``OSError`` (a ``TimeoutExpired``, or the
+    ``docker`` binary vanishing mid-teardown) so a raised exception from the
+    container removal can never skip the volume removal that follows it --
+    both are always attempted, and any failure (a nonzero exit OR a raised
+    exception) from either is collected and surfaced together."""
     errors: list[str] = []
-    res = subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, text=True, timeout=60)
-    if res.returncode != 0:
-        errors.append(f"failed to remove container {container_id}: {res.stderr.strip()}")
-    vol = subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, text=True, timeout=60)
-    if vol.returncode != 0:
-        errors.append(f"failed to remove volume {volume_name}: {vol.stderr.strip()}")
+    try:
+        res = subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, text=True, timeout=60)
+        if res.returncode != 0:
+            errors.append(f"failed to remove container {container_id}: {res.stderr.strip()}")
+    except (subprocess.SubprocessError, OSError) as exc:
+        errors.append(f"failed to remove container {container_id}: {exc}")
+    try:
+        vol = subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, text=True, timeout=60)
+        if vol.returncode != 0:
+            errors.append(f"failed to remove volume {volume_name}: {vol.stderr.strip()}")
+    except (subprocess.SubprocessError, OSError) as exc:
+        errors.append(f"failed to remove volume {volume_name}: {exc}")
     if errors:
         raise SystemExit("; ".join(errors))
 
@@ -457,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
             _cleanup_orphan(instance_label, volume_name)
             raise
         try:
-            _populate_workspace(container_id)
+            _populate_workspace(container_id, passthrough)
             return _run_tests(container_id, config_path, passthrough)
         finally:
             if not ns.keep:

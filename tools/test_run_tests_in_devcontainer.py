@@ -164,82 +164,158 @@ def test_bring_up_raises_when_container_id_missing_from_output(tmp_path: Path) -
             raise AssertionError("expected SystemExit")
 
 
-def test_resolve_git_dirs_parses_rev_parse_output() -> None:
-    git_dir_result = mock.Mock(returncode=0, stdout="/abs/path/.git/worktrees/w\n", stderr="")
-    common_dir_result = mock.Mock(returncode=0, stdout="/abs/path/.git\n", stderr="")
-    with mock.patch.object(wrapper.subprocess, "run",
-                            side_effect=[git_dir_result, common_dir_result]):
-        git_dir, common_dir = wrapper._resolve_git_dirs()
-    assert git_dir == Path("/abs/path/.git/worktrees/w")
-    assert common_dir == Path("/abs/path/.git")
+def test_resolve_base_ref_defaults_to_origin_main() -> None:
+    assert wrapper._resolve_base_ref(["agent-worktrees"]) == "origin/main"
+    assert wrapper._resolve_base_ref([]) == "origin/main"
 
 
-def test_resolve_git_dirs_raises_on_git_failure() -> None:
-    fail_result = mock.Mock(returncode=128, stdout="", stderr="not a git repository")
-    with mock.patch.object(wrapper.subprocess, "run", return_value=fail_result):
+def test_resolve_base_ref_extracts_space_separated_form() -> None:
+    assert wrapper._resolve_base_ref(["--changed", "--base", "origin/dev"]) == "origin/dev"
+
+
+def test_resolve_base_ref_extracts_equals_form() -> None:
+    assert wrapper._resolve_base_ref(["--changed", "--base=origin/dev"]) == "origin/dev"
+
+
+def test_git_rev_parse_returns_sha_on_success() -> None:
+    fake_result = mock.Mock(returncode=0, stdout="deadbeef\n", stderr="")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
+        result = wrapper._git_rev_parse("origin/dev")
+    assert result == "deadbeef"
+    args, kwargs = run.call_args
+    assert args[0] == ["git", "-C", str(wrapper.REPO), "rev-parse", "--verify", "origin/dev"]
+    assert kwargs["env"] == wrapper._scrubbed_git_env()
+
+
+def test_git_rev_parse_returns_none_when_unresolvable() -> None:
+    fake_result = mock.Mock(returncode=128, stdout="", stderr="unknown revision")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        assert wrapper._git_rev_parse("no-such-ref") is None
+
+
+def test_resolve_git_path_resolves_relative_output_against_repo() -> None:
+    fake_result = mock.Mock(returncode=0, stdout=".git/index\n", stderr="")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        result = wrapper._resolve_git_path("index")
+    assert result == (wrapper.REPO / ".git" / "index").resolve()
+
+
+def test_resolve_git_path_raises_on_git_failure() -> None:
+    fake_result = mock.Mock(returncode=128, stdout="", stderr="not a git repository")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
         try:
-            wrapper._resolve_git_dirs()
+            wrapper._resolve_git_path("index")
         except SystemExit as exc:
             assert "not a git repository" in str(exc)
         else:
             raise AssertionError("expected SystemExit")
 
 
-def test_materialized_git_dir_copies_whole_dir_for_normal_checkout(tmp_path: Path, monkeypatch) -> None:
-    git_dir = tmp_path / "repo" / ".git"
-    (git_dir / "refs" / "heads").mkdir(parents=True)
-    (git_dir / "refs" / "heads" / "main").write_text("deadbeef\n")
-    (git_dir / "hooks").mkdir()
-    (git_dir / "hooks" / "pre-commit.sample").write_text("#!/bin/sh\n")
-    (git_dir / "config").write_text("[remote \"origin\"]\n\turl = https://user:token@example.com/repo\n")
+def _init_repo(path: Path) -> None:
+    import subprocess as real_subprocess
+    real_subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    real_subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+    real_subprocess.run(["git", "-C", str(path), "config", "user.email", "t@example.com"], check=True)
 
-    monkeypatch.setattr(wrapper, "_resolve_git_dirs", lambda: (git_dir, git_dir))
+
+def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as real_subprocess
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+    base_sha = real_subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    real_subprocess.run(["git", "-C", str(repo), "branch", "base-branch"], check=True)
+
+    (repo / "tracked.txt").write_text("v2\n")
+    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "head"], check=True)
+    head_sha = real_subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # A sibling branch with unique, placeholder-secret-shaped content that
+    # is NEVER an ancestor of HEAD or the base ref -- this must NOT survive
+    # into the materialized copy, proving the bundle closure is genuinely
+    # minimal (not the whole repository's history).
+    real_subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "secret-branch", base_sha],
+                         check=True)
+    (repo / "secret.txt").write_text("not-a-real-secret-placeholder\n")
+    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "secret"], check=True)
+    secret_sha = real_subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    real_subprocess.run(["git", "-C", str(repo), "checkout", "-q", head_sha], check=True)
+
+    # A placeholder-credential-shaped remote URL in the real config --
+    # must not survive into the materialized copy.
+    placeholder_remote = "https://" + "not-a-real-credential" + "@example.com/repo.git"
+    real_subprocess.run(
+        ["git", "-C", str(repo), "config", "remote.origin.url", placeholder_remote],
+        check=True,
+    )
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
     with contextlib.ExitStack() as stack:
-        merged = wrapper._materialized_git_dir(stack)
-        assert (merged / "refs" / "heads" / "main").read_text() == "deadbeef\n"
-        # The host's own config (which may embed credentials) must never
-        # survive into the materialized copy.
-        assert merged.joinpath("config").read_text() == wrapper._MINIMAL_GIT_CONFIG
-        assert "token" not in merged.joinpath("config").read_text()
-        # Hooks could carry credential-bearing or otherwise sensitive
-        # custom scripts and are never needed for diff/status/rev-parse.
+        merged = wrapper._materialized_git_dir(stack, ["--base", "base-branch"])
+
+        rp = real_subprocess.run(
+            ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert rp.returncode == 0
+        assert rp.stdout.strip() == head_sha
+
+        diff = real_subprocess.run(
+            ["git", f"--git-dir={merged}", "diff", "--name-only", "base-branch", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert diff.returncode == 0
+        assert "tracked.txt" in diff.stdout
+
+        # The secret branch's commit must be UNRESOLVABLE in the
+        # materialized copy -- its object is simply not present.
+        secret_lookup = real_subprocess.run(
+            ["git", f"--git-dir={merged}", "cat-file", "-e", secret_sha],
+            capture_output=True, text=True,
+        )
+        assert secret_lookup.returncode != 0
+
+        config_text = merged.joinpath("config").read_text()
+        assert config_text == wrapper._MINIMAL_GIT_CONFIG
+        assert "not-a-real-credential" not in config_text
         assert not (merged / "hooks").exists()
     assert not merged.parent.exists()
 
 
-def test_materialized_git_dir_merges_worktree_refs_without_losing_common_refs(tmp_path: Path, monkeypatch) -> None:
-    # Build a minimal common dir (shared branch ref + an unrelated OTHER
-    # worktree's private state) and a per-worktree private dir (its own
-    # near-empty `refs`, matching real git's on-disk layout) and confirm
-    # the merge keeps the common branch ref instead of letting the private
-    # dir's own near-empty `refs` wipe it.
-    common_dir = tmp_path / "common" / ".git"
-    (common_dir / "refs" / "heads").mkdir(parents=True)
-    (common_dir / "refs" / "heads" / "main").write_text("deadbeef\n")
-    (common_dir / "worktrees" / "other-worktree").mkdir(parents=True)
-    (common_dir / "worktrees" / "other-worktree" / "HEAD").write_text("ref: refs/heads/other\n")
-    (common_dir / "objects").mkdir()
-    (common_dir / "config").write_text("[remote \"origin\"]\n\turl = https://user:token@example.com/repo\n")
+def test_materialized_git_dir_skips_base_closure_when_base_unresolvable(tmp_path: Path, monkeypatch) -> None:
+    import subprocess as real_subprocess
 
-    git_dir = common_dir / "worktrees" / "this-worktree"
-    (git_dir / "refs").mkdir(parents=True)
-    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
-    (git_dir / "commondir").write_text("../..\n")
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
+    head_sha = real_subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
 
-    monkeypatch.setattr(wrapper, "_resolve_git_dirs", lambda: (git_dir, common_dir))
+    monkeypatch.setattr(wrapper, "REPO", repo)
     with contextlib.ExitStack() as stack:
-        merged = wrapper._materialized_git_dir(stack)
-        assert (merged / "refs" / "heads" / "main").read_text() == "deadbeef\n"
-        assert (merged / "HEAD").read_text() == "ref: refs/heads/main\n"
-        assert not (merged / "commondir").exists()
-        # The OTHER worktree's own private state must not leak into this
-        # merged, self-contained copy.
-        assert not (merged / "worktrees").exists()
-        # The host's own config (credential-bearing remote URL) must not
-        # survive into the materialized copy.
-        assert merged.joinpath("config").read_text() == wrapper._MINIMAL_GIT_CONFIG
-    # Outside the ExitStack, the temp dir must be cleaned up.
-    assert not merged.parent.exists()
+        # "origin/main" (the default) does not exist in this tiny repo --
+        # must degrade gracefully (HEAD alone), not raise.
+        merged = wrapper._materialized_git_dir(stack, [])
+        rp = real_subprocess.run(
+            ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert rp.returncode == 0
+        assert rp.stdout.strip() == head_sha
 
 
 def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_path: Path, monkeypatch) -> None:
@@ -250,12 +326,12 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
     real_file = tmp_path / "tracked.txt"
     real_file.write_text("hello\n")
 
-    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack: fake_git_dir)
+    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack, passthrough: fake_git_dir)
     monkeypatch.setattr(wrapper, "_tracked_and_untracked_paths", lambda: ["tracked.txt"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
 
     dest = tmp_path / "out.tar"
-    wrapper._write_tar_of_repo(dest)
+    wrapper._write_tar_of_repo(dest, ["agent-worktrees"])
     with tarfile.open(dest) as tar:
         names = set(tar.getnames())
     assert ".git/HEAD" in names
@@ -264,9 +340,11 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
 
 def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:
     written_paths: list[Path] = []
+    written_passthrough: list[list[str]] = []
 
-    def fake_write_tar(dest: Path) -> None:
+    def fake_write_tar(dest: Path, passthrough: list[str]) -> None:
         written_paths.append(dest)
+        written_passthrough.append(passthrough)
         dest.write_bytes(b"not-empty")
 
     monkeypatch.setattr(wrapper, "_write_tar_of_repo", fake_write_tar)
@@ -274,9 +352,10 @@ def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) ->
     chmod_result = mock.Mock(returncode=0, stderr="")
     with mock.patch.object(wrapper.subprocess, "run",
                             side_effect=[tar_result, chmod_result]) as run:
-        wrapper._populate_workspace("container-9")
+        wrapper._populate_workspace("container-9", ["--changed"])
     assert run.call_count == 2
     assert len(written_paths) == 1
+    assert written_passthrough == [["--changed"]]
 
     tar_call = run.call_args_list[0]
     tar_args = tar_call.args[0]
@@ -295,11 +374,11 @@ def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) ->
 
 
 def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> None:
-    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest: dest.write_bytes(b""))
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest, passthrough: dest.write_bytes(b""))
     tar_result = mock.Mock(returncode=1, stderr=b"tar: permission denied")
     with mock.patch.object(wrapper.subprocess, "run", return_value=tar_result):
         try:
-            wrapper._populate_workspace("container-9")
+            wrapper._populate_workspace("container-9", [])
         except SystemExit as exc:
             assert "permission denied" in str(exc)
         else:
@@ -307,12 +386,12 @@ def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> Non
 
 
 def test_populate_workspace_raises_when_chmod_fails(monkeypatch) -> None:
-    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest: dest.write_bytes(b""))
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest, passthrough: dest.write_bytes(b""))
     tar_result = mock.Mock(returncode=0, stderr=b"")
     chmod_result = mock.Mock(returncode=1, stderr="chmod: operation not permitted")
     with mock.patch.object(wrapper.subprocess, "run", side_effect=[tar_result, chmod_result]):
         try:
-            wrapper._populate_workspace("container-9")
+            wrapper._populate_workspace("container-9", [])
         except SystemExit as exc:
             assert "operation not permitted" in str(exc)
         else:
@@ -424,7 +503,7 @@ def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) 
                          lambda label: (Path("/tmp/fake-devcontainer-dir/devcontainer.json"), "fake-volume"))
     monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
     monkeypatch.setattr(wrapper, "_bring_up", lambda label, config_path: "container-1")
-    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id: None)
+    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough: None)
     monkeypatch.setattr(wrapper, "_run_tests",
                          lambda container_id, config_path, passthrough: calls.append(passthrough) or 0)
     monkeypatch.setattr(wrapper, "_tear_down", lambda container_id, volume_name: None)
@@ -457,7 +536,7 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
                          lambda label: (config_path, "fake-volume"))
     monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
     monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-2")
-    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id: None)
+    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough: None)
     monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
     monkeypatch.setattr(
         wrapper, "_tear_down",

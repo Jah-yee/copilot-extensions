@@ -149,18 +149,25 @@ anywhere in the remaining arguments) is passed straight through to
    git-tracked plus untracked-but-not-ignored files, deliberately NOT every
    file physically present under the checkout, so gitignored (and
    potentially secret-bearing) files are never copied into a container that
-   then has outbound network access. `.git` is handled separately: for a
-   normal checkout it's copied as-is; for a linked worktree (this repo's
-   own required flow -- `.git` there is a pointer FILE naming an absolute
-   HOST path, meaningless inside the container) a merged, self-contained
-   copy is materialized from the worktree's private metadata plus the
-   shared common dir instead, so `git` commands (needed by the turn-key
-   runner's own `--changed` mode) work normally inside the container.
-   Either way, `config` is always replaced with a fresh, credential-free
-   minimal one and `hooks` is always dropped (neither is needed for `git
-   diff`/`status`/`rev-parse`, and either could carry credential-bearing or
-   otherwise sensitive content). Every `git` subprocess call here scrubs
-   ambient `GIT_DIR`/`GIT_WORK_TREE`/etc. from its environment first, so a
+   then has outbound network access. `.git` is handled separately and
+   deliberately minimally: rather than copying the real git database
+   wholesale (which would carry every branch, stash, reflog, and
+   unreachable object -- local-only content having nothing to do with the
+   plugin suite being run, into a container that can still reach the
+   network), a `git bundle` containing only the object closure of `HEAD`
+   and the `--changed` diff base (`--base`, or that runner's own
+   `origin/main` default when `--base` isn't passed) is built and cloned
+   into a fresh, minimal git directory instead -- this also transparently
+   handles a linked worktree's `.git` (this repo's own required flow,
+   where `.git` is a pointer FILE naming an absolute HOST path, meaningless
+   inside the container) without needing to special-case it. The real
+   index is copied in afterward so `git status`/`git diff` against the
+   working tree still reflect real staged/uncommitted state. `config` is
+   always replaced with a fresh, credential-free minimal one and `hooks` is
+   always dropped (neither is needed for `git diff`/`status`/`rev-parse`,
+   and either could carry credential-bearing or otherwise sensitive
+   content). Every `git` subprocess call here scrubs ambient
+   `GIT_DIR`/`GIT_WORK_TREE`/etc. from its environment first, so a
    contaminated calling environment can't silently redirect it to the wrong
    repository. The host checkout is only ever **read**, never mutated, by
    anything that happens afterward inside the container.

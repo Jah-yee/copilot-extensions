@@ -799,3 +799,25 @@ as before all still hold on Bookworm, `cat /etc/os-release` confirms
 `VERSION="12 (bookworm)"`, and a real plugin suite (`ai-attribution`, 98
 passed / 6 skipped) still runs to completion end-to-end.
 
+### 2026-10-03 — Review round 10: 1 finding addressed (documented a residual exposure)
+Automated review raised one item, correctly pointing out an unqualified
+claim rather than a code bug: the tracked-files-only default (round 5) is a
+boundary on which PATHS are copied, not which BYTES -- the content read for
+a tracked path is the live on-disk file (so an uncommitted edit you're
+actively testing is included), not the last-committed blob. A secret
+pasted directly into an otherwise-tracked, ordinarily-safe file (e.g. a
+config example) and never committed would therefore still be copied in. A
+clean CI checkout has no such dirty state; a contributor's local checkout
+might. Rather than changing default behavior (making ordinary, modified-
+but-tracked files require an opt-in flag would defeat the wrapper's whole
+purpose -- testing in-progress, uncommitted changes), this is now
+explicitly documented as a known, accepted residual exposure in both
+`_tracked_paths`'s own docstring and `TESTING.md`: "tracked" means "this
+path isn't the kind of thing that normally carries secrets," never "every
+byte currently in it is safe."
+
+No code behavior changed this round -- re-validated with the full unit
+test suite (41 tests) and a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) regardless, to confirm the
+doc-only change didn't introduce a syntax or import regression.
+

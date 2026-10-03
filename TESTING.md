@@ -211,7 +211,16 @@ uncommitted MODIFICATION to a tracked file is included (the copy reads the
 working tree's current on-disk content at invocation time, not the
 committed blob) -- but a new, never-committed file is NOT included unless
 `--include-untracked` is passed, per the tracked-files-by-default policy
-above. A fresh, per-invocation volume means no state (including prior test
+above. **Known, accepted residual exposure**: the tracked-files boundary is
+about which PATHS are copied, not which bytes -- a secret pasted directly
+into an otherwise-tracked file (e.g. a config example) and never committed
+is still copied in, since the content read is the live on-disk file, not
+the last-committed blob. A clean CI checkout has no such dirty state; a
+contributor's local checkout might. This is a deliberate tradeoff (the
+wrapper's whole point is testing in-progress, uncommitted changes), not an
+oversight -- "tracked" means "this path isn't the kind of thing that
+normally carries secrets," never "every byte currently in it is safe." A
+fresh, per-invocation volume means no state (including prior test
 artifacts) carries over between runs.
 
 

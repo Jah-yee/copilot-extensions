@@ -217,11 +217,26 @@ def _tracked_paths(*, include_untracked: bool) -> list[str]:
     untracked-but-not-ignored secret file sitting in the working tree would
     otherwise still be copied into a container that has outbound network
     access, letting an adversarial/buggy test exfiltrate it -- tracked
-    files are the only set contributors and CI already trust as safe to
-    share. ``include_untracked=True`` (the wrapper's own ``--include-
-    untracked`` flag) additionally includes untracked-but-not-gitignored
-    files via ``--others --exclude-standard``, for the deliberate, opt-in
-    case of testing new, not-yet-committed files -- never the default."""
+    files are the set contributors and CI already trust to keep secrets
+    OUT OF THE REPOSITORY. ``include_untracked=True`` (the wrapper's own
+    ``--include-untracked`` flag) additionally includes
+    untracked-but-not-gitignored files via ``--others --exclude-standard``,
+    for the deliberate, opt-in case of testing new, not-yet-committed files
+    -- never the default.
+
+    Known, accepted residual exposure: this boundary is about which PATHS
+    are copied, not which bytes -- the content read for a tracked path is
+    the CURRENT on-disk file (so uncommitted edits you're actively testing
+    are included; see ``_write_tar_of_repo``), not the last-committed blob.
+    A secret pasted directly into an otherwise-tracked, ordinarily-safe
+    file (e.g. a config example) and never committed is therefore still
+    copied in. A clean CI checkout has no such dirty state; a contributor's
+    local checkout might. This is a deliberate tradeoff (the tool's whole
+    point is testing in-progress, uncommitted changes), not an oversight --
+    but "tracked" must never be read as "every byte in it is safe,"
+    only as "this path itself isn't the kind of thing that normally
+    carries secrets."
+    """
     args = ["git", "-C", str(REPO), "ls-files", "-z", "--cached"]
     if include_untracked:
         args += ["--others", "--exclude-standard"]

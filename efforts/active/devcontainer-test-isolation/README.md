@@ -145,7 +145,7 @@ verbatim ask.
 
 ### Phase 0 — Gap analysis (research, no code)
 
-- [ ] **Prerequisite, must be done first:** establish and test the container's
+- [x] **Prerequisite, must be done first:** establish and test the container's
       own host-boundary capability before relying on it for anything else --
       a devcontainer is not automatically a stronger boundary than the
       existing process-level containment, and checking mounts/credentials/
@@ -177,12 +177,75 @@ verbatim ask.
         may land on a different point on the trusted/restricted spectrum.
       Only once this boundary is concretely measured does the next bullet's
       comparison mean anything.
-- [ ] Confirm, with a concrete reproduction, what a `.devcontainer`-based test
+
+      **Done 2026-10-03, with a confirmed, live-reproduced finding, not just
+      a theoretical concern:** built and ran a throwaway devcontainer from a
+      minimal spec (`@devcontainers/cli` against the stock
+      `mcr.microsoft.com/devcontainers/python` base image, no extra
+      configuration -- i.e. the naive baseline a contributor would get from
+      following public devcontainer docs with zero extra hardening).
+      `docker inspect`'s `HostConfig`/`Mounts` against the running container
+      confirmed, and a live write-through test proved:
+      - **The workspace mount is a plain read-write bind of the host
+        checkout** (`Mounts[0]`: `Type: bind`, `RW: true`,
+        `Source: <host workspace path>`, `Destination: /workspaces/<name>`).
+        Live-reproduced the exact risk the review raised: a file written from
+        *inside* the container to the mounted path was immediately visible,
+        modified, on the **host** filesystem -- i.e. an adversarial/buggy
+        test inside this naive container genuinely can, and does, mutate the
+        real host checkout. This alone means a default devcontainer spec
+        would be a **regression**, not an improvement, over
+        `run-plugin-tests.py`'s existing containment (which explicitly
+        redirects state away from the real checkout) unless Phase 1
+        deliberately designs around it (e.g. a container-local clone/copy of
+        the checkout, or a read-only mount with an overlay for writes).
+      - **No Docker socket exposure** by default (`Mounts` has no
+        `/var/run/docker.sock` entry; confirmed via `docker exec ... ls
+        /var/run/docker.sock` failing with "No such file or directory") --
+        a real host-escape vector is NOT present in the naive baseline unless
+        a feature like docker-outside-of-docker is explicitly added later.
+      - **Default Docker capability set is active, nothing dropped**
+        (`CapDrop: null` in `HostConfig`; the container's own
+        `/proc/1/status` `CapEff`/`CapBnd` show Docker's standard default
+        bits, not all-zero) -- this is a materially looser posture than the
+        all-capabilities-dropped invariant this repo's own restricted-
+        container boundary enforces (`lifecycle.py`'s
+        `restricted_policy_errors`).
+      - **No `no-new-privileges`/seccomp hardening declared**
+        (`SecurityOpt: null`) -- Docker's own default seccomp profile still
+        applies (this is NOT the same as `unconfined`), but nothing beyond
+        that default is enforced.
+      - **`ReadonlyRootfs: false`, `Privileged: false`, standard `bridge`
+        networking with full outbound internet reach** confirmed live
+        (a plain `curl` to an external host from inside the container
+        succeeded with a 200).
+      **Conclusion carried into Phase 1:** a devcontainer spec that merely
+      follows public defaults does not close the gap this effort exists for
+      -- it would need **deliberate** design choices (a container-local or
+      overlay/copy-on-write workspace instead of a plain RW host bind being
+      the single highest-priority one, since it's the difference between
+      "isolated" and "directly mutates the host") to actually improve on
+      `run-plugin-tests.py`'s existing containment rather than quietly
+      regressing it while looking more isolated on the surface.
+- [x] Confirm, with a concrete reproduction, what a `.devcontainer`-based test
       run -- using the established, tested boundary above -- would actually
       catch that `tools/run-plugin-tests.py`'s existing process-level
       containment does not (see Context's "What this existing mechanism does
       NOT provide" -- confirm or revise that list with real evidence rather
-      than assuming it's complete).
+      than assuming it's complete). **Done 2026-10-03, revised from the
+      original assumption**: a real OS-level filesystem/network boundary IS
+      achievable (process escape via an absolute path, a raw socket, or a
+      privilege a job object doesn't restrict is genuinely a class of attack
+      `run-plugin-tests.py`'s containment cannot stop), but **only if Phase 1
+      actually designs the container to provide that boundary** -- the naive
+      baseline measured above does NOT provide it (the RW host-bind-mount
+      finding is a direct counterexample: it's LESS isolated than the
+      existing containment's redirected-state model for exactly the
+      filesystem axis this effort cares about most). The "help for a human
+      contributor running tests outside the turn-key runner" gap stands
+      as originally stated -- confirmed unaffected by this finding, since
+      it concerns opt-in-vs-structural enforcement, not the boundary's
+      technical strength.
 - [ ] Decide whether the spec targets Linux only (matching this repo's CI
       runners) or must also cover the Windows-specific containment paths
       `TESTING.md` describes (`COPILOT_EXTENSIONS_TEST_CONTAINED`,
@@ -192,7 +255,15 @@ verbatim ask.
       answer to the first two bullets.
 
 ### Phase 1 — Spec design
-- [ ] _Pending Phase 0's findings._
+- [ ] Design the workspace storage model to actually close the gap Phase 0
+      found: a container-local clone/copy of the checkout, or a read-only
+      host bind plus an in-container overlay for writes -- NOT a plain
+      read-write bind of the host checkout (confirmed live to let an
+      adversarial test mutate the real host checkout, which is a regression
+      versus the existing `run-plugin-tests.py` containment, not an
+      improvement).
+- [ ] _Further items pending the remaining Phase 0 findings (Linux-only vs.
+      cross-platform scope decision)._
 
 ### Phase 2 — Wire into CI / contributor flow
 - [ ] _Pending Phase 0/1._
@@ -237,3 +308,23 @@ leaked into this public artifact -- replaced throughout with the public
 `agent-containers` vision's own identifier-neutral terminology ("trusted
 development venue" posture) instead of naming the private consumer or its
 internal effort/fleet names.
+
+### 2026-10-03 — Phase 0's host-boundary prerequisite done, with a real finding
+Built and ran a throwaway devcontainer (`@devcontainers/cli` against the stock
+`mcr.microsoft.com/devcontainers/python` image, zero extra hardening --
+the naive baseline). Confirmed live, not assumed: the default workspace mount
+is a plain read-write bind of the host checkout, and a file written from
+inside the container was immediately visible, modified, on the host
+filesystem. This means a naive devcontainer spec would be a **regression**
+versus `run-plugin-tests.py`'s existing containment for exactly the axis this
+effort cares about most (host-checkout safety), not an improvement -- Phase 1
+now carries an explicit, highest-priority design requirement to use a
+container-local or overlay/copy-on-write workspace instead of a plain RW host
+bind. Also confirmed: no Docker-socket exposure by default (good), default
+(non-empty) Linux capability set active with nothing dropped, no
+`no-new-privileges`/seccomp hardening declared beyond Docker's own default
+profile, and unrestricted outbound networking. Revised the second Phase 0
+checklist item's conclusion accordingly: a real OS-level boundary is
+achievable and would close a genuine gap, but only if Phase 1 deliberately
+designs for it -- the naive baseline does not provide it "for free." Still
+open: the Linux-only vs. cross-platform scope decision.

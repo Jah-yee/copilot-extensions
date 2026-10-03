@@ -188,6 +188,18 @@ def test_resolve_base_ref_extracts_equals_form() -> None:
     assert wrapper._resolve_base_ref(["--changed", "--base=origin/dev"]) == "origin/dev"
 
 
+def test_resolve_base_ref_honors_last_of_repeated_flag() -> None:
+    # Mirrors argparse's own last-occurrence-wins behavior for a repeated
+    # flag -- the snapshot and the in-container runner must agree on which
+    # `--base` is actually in effect.
+    assert wrapper._resolve_base_ref(
+        ["--base", "origin/main", "--base", "origin/dev"]
+    ) == "origin/dev"
+    assert wrapper._resolve_base_ref(
+        ["--base=origin/main", "--base=origin/dev"]
+    ) == "origin/dev"
+
+
 def test_git_rev_parse_returns_sha_on_success() -> None:
     fake_result = mock.Mock(returncode=0, stdout="deadbeef\n", stderr="")
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
@@ -202,24 +214,6 @@ def test_git_rev_parse_returns_none_when_unresolvable() -> None:
     fake_result = mock.Mock(returncode=128, stdout="", stderr="unknown revision")
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
         assert wrapper._git_rev_parse("no-such-ref") is None
-
-
-def test_resolve_git_path_resolves_relative_output_against_repo() -> None:
-    fake_result = mock.Mock(returncode=0, stdout=".git/index\n", stderr="")
-    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
-        result = wrapper._resolve_git_path("index")
-    assert result == (wrapper.REPO / ".git" / "index").resolve()
-
-
-def test_resolve_git_path_raises_on_git_failure() -> None:
-    fake_result = mock.Mock(returncode=128, stdout="", stderr="not a git repository")
-    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
-        try:
-            wrapper._resolve_git_path("index")
-        except SystemExit as exc:
-            assert "not a git repository" in str(exc)
-        else:
-            raise AssertionError("expected SystemExit")
 
 
 def _init_repo(path: Path) -> None:
@@ -301,7 +295,53 @@ def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path,
         assert config_text == wrapper._MINIMAL_GIT_CONFIG
         assert "not-a-real-credential" not in config_text
         assert not (merged / "hooks").exists()
+
+        # The rebuilt index (`git read-tree HEAD`) must exactly match
+        # HEAD's tree -- no spurious staged differences.
+        status = real_subprocess.run(
+            ["git", f"--git-dir={merged}", f"--work-tree={repo}", "status", "--short"],
+            capture_output=True, text=True,
+        )
+        assert status.returncode == 0
+        assert status.stdout == ""
     assert not merged.parent.exists()
+
+
+def test_materialized_git_dir_handles_staged_uncommitted_change_at_snapshot_time(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # A staged (but not yet committed) new file's blob is reachable from
+    # neither HEAD nor the base ref -- copying the real index verbatim
+    # would reference that now-missing blob and break `git diff`/`status`
+    # outright. Rebuilding the index from HEAD instead must not crash, even
+    # though the staged state itself is not preserved as "staged".
+    import subprocess as real_subprocess
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
+
+    # Stage a brand-new file whose blob is genuinely unreachable from HEAD.
+    (repo / "staged-new.txt").write_text("staged content\n")
+    real_subprocess.run(["git", "-C", str(repo), "add", "staged-new.txt"], check=True)
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    with contextlib.ExitStack() as stack:
+        merged = wrapper._materialized_git_dir(stack, [])
+        status = real_subprocess.run(
+            ["git", f"--git-dir={merged}", f"--work-tree={repo}", "status", "--short"],
+            capture_output=True, text=True,
+        )
+        # Must not crash (a copied-index approach referencing the missing
+        # staged blob would fail here). The staged-new file's actual content
+        # is still visible -- just reported as an ordinary untracked file
+        # rather than "staged", since the rebuilt index exactly matches
+        # HEAD (no entry for it) instead of preserving the real staging
+        # state.
+        assert status.returncode == 0
+        assert status.stdout == "?? staged-new.txt\n"
 
 
 def test_materialized_git_dir_skips_base_closure_when_base_unresolvable(tmp_path: Path, monkeypatch) -> None:
@@ -373,6 +413,35 @@ def test_write_tar_of_repo_skips_tracked_path_deleted_from_working_tree(tmp_path
         names = set(tar.getnames())
     assert "present.txt" in names
     assert "deleted.txt" not in names
+
+
+def test_write_tar_of_repo_does_not_recurse_into_submodule_directory(tmp_path: Path, monkeypatch) -> None:
+    # `git ls-files` lists an initialized submodule as a single path that
+    # happens to be a real DIRECTORY on disk. `tarfile.add` recursively
+    # archives directories by default -- that would copy the submodule's
+    # entire working tree (including its own untracked/ignored files and
+    # `.git` metadata) wholesale, defeating the tracked-files-only
+    # boundary. `recursive=False` must keep the directory entry itself
+    # from being expanded.
+    fake_git_dir = tmp_path / "fake-git"
+    fake_git_dir.mkdir()
+    (fake_git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    submodule_dir = tmp_path / "vendor" / "some-submodule"
+    submodule_dir.mkdir(parents=True)
+    (submodule_dir / "secret-inside-submodule.txt").write_text("should not be archived\n")
+
+    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack, passthrough: fake_git_dir)
+    monkeypatch.setattr(wrapper, "_tracked_paths",
+                         lambda *, include_untracked: ["vendor/some-submodule"])
+    monkeypatch.setattr(wrapper, "REPO", tmp_path)
+
+    dest = tmp_path / "out.tar"
+    wrapper._write_tar_of_repo(dest, [], include_untracked=False)
+    with tarfile.open(dest) as tar:
+        names = set(tar.getnames())
+    assert "vendor/some-submodule" in names
+    assert "vendor/some-submodule/secret-inside-submodule.txt" not in names
 
 
 def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:
@@ -595,6 +664,64 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
                          lambda label: (config_path, "fake-volume"))
     wrapper.main(["--keep", "agent-worktrees"])
     assert torn_down == []
+
+
+def test_main_raises_teardown_failure_when_primary_path_succeeded(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "cfgdir3" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+
+    monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-3")
+    monkeypatch.setattr(wrapper, "_populate_workspace",
+                         lambda container_id, passthrough, *, include_untracked: None)
+    monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
+
+    def failing_tear_down(container_id: str, volume_name: str) -> None:
+        raise SystemExit("teardown failed: boom")
+
+    monkeypatch.setattr(wrapper, "_tear_down", failing_tear_down)
+
+    # The primary test path succeeded (exit 0) -- teardown's own failure
+    # must surface directly (nothing to preserve over it).
+    try:
+        wrapper.main(["agent-worktrees"])
+    except SystemExit as exc:
+        assert "boom" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit from the failed teardown")
+
+
+def test_main_preserves_primary_exception_when_teardown_also_fails(monkeypatch, tmp_path: Path, capsys) -> None:
+    config_path = tmp_path / "cfgdir4" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+
+    monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-4")
+
+    def failing_populate(container_id: str, passthrough: list[str], *, include_untracked: bool) -> None:
+        raise SystemExit("primary failure: real test problem")
+
+    def failing_tear_down(container_id: str, volume_name: str) -> None:
+        raise SystemExit("secondary teardown failure")
+
+    monkeypatch.setattr(wrapper, "_populate_workspace", failing_populate)
+    monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
+    monkeypatch.setattr(wrapper, "_tear_down", failing_tear_down)
+
+    # The PRIMARY failure must win -- a `_tear_down` failure in the
+    # `finally` must not silently replace it.
+    try:
+        wrapper.main(["agent-worktrees"])
+    except SystemExit as exc:
+        assert "primary failure" in str(exc)
+    else:
+        raise AssertionError("expected the primary SystemExit to propagate")
+    # The secondary teardown failure is still reported, just not raised.
+    assert "secondary teardown failure" in capsys.readouterr().err
 
 
 def test_main_cleans_up_orphan_and_reraises_when_bring_up_fails(monkeypatch, tmp_path: Path) -> None:

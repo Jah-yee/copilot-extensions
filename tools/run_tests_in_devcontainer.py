@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import uuid
@@ -243,13 +244,17 @@ def _resolve_base_ref(passthrough: list[str]) -> str:
     that ref's object closure (not the whole repository's history) in the
     bundled snapshot. Falls back to ``tools/run-plugin-tests.py``'s own
     ``--base`` default when it isn't present in ``passthrough`` -- mirroring
-    that runner's own argparse default, not guessing at a different one."""
+    that runner's own argparse default, not guessing at a different one.
+    Mirrors argparse's own last-occurrence-wins behavior for a repeated
+    flag -- keeps scanning instead of returning on the first match, since
+    `run-plugin-tests.py`'s own argparse would use the LAST ``--base``."""
+    resolved = "origin/main"
     for i, arg in enumerate(passthrough):
         if arg == "--base" and i + 1 < len(passthrough):
-            return passthrough[i + 1]
-        if arg.startswith("--base="):
-            return arg.split("=", 1)[1]
-    return "origin/main"
+            resolved = passthrough[i + 1]
+        elif arg.startswith("--base="):
+            resolved = arg.split("=", 1)[1]
+    return resolved
 
 
 def _git_rev_parse(ref: str) -> str | None:
@@ -263,21 +268,6 @@ def _git_rev_parse(ref: str) -> str | None:
         capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
     )
     return res.stdout.strip() if res.returncode == 0 else None
-
-
-def _resolve_git_path(git_path: str) -> Path:
-    """Resolve a repo-relative path git itself names (e.g. ``index``) to an
-    absolute host path, via ``git rev-parse --git-path`` -- correct for
-    both a normal checkout and a linked worktree without this script having
-    to know which kind it is."""
-    res = subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", "--git-path", git_path],
-        capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
-    )
-    if res.returncode != 0:
-        raise SystemExit(f"git rev-parse --git-path {git_path} failed: {res.stderr.strip()}")
-    resolved = Path(res.stdout.strip())
-    return resolved if resolved.is_absolute() else (REPO / resolved).resolve()
 
 
 # A fresh, credential-free `.git/config` written into every materialized
@@ -312,10 +302,18 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     reachable from those two tips, nothing else. The base ref is then
     fetched again under its own fully-qualified name (e.g.
     ``refs/remotes/origin/dev``) so `--changed`` can resolve it by that
-    name, exactly as it would on the host. The real index is copied in
-    afterward so `git status`/`git diff` against the working tree still
-    reflect any real staged/uncommitted state, and -- as with every
-    materialized copy -- ``config`` is replaced with a fresh,
+    name, exactly as it would on the host. The index is then rebuilt from
+    ``HEAD`` itself (``git read-tree HEAD``) rather than copied from the
+    host: the host's real index can reference a staged blob that is
+    genuinely unreachable from both ``HEAD`` and the base ref (a staged-
+    but-uncommitted new/modified file), which the bundle would then be
+    missing entirely -- a copied index pointing at a missing object breaks
+    `git diff`/`status` outright. Rebuilding from `HEAD` instead means
+    staging state isn't preserved as "staged" inside the container, but
+    every modification (staged or not) is still visible as an ordinary
+    working-tree difference, since the modified file's actual CURRENT
+    on-disk content is what `_tracked_paths` copies in regardless. As with
+    every materialized copy, ``config`` is replaced with a fresh,
     credential-free one (see ``_MINIMAL_GIT_CONFIG``) and ``hooks`` is
     dropped entirely, since neither is needed for `diff`/`status`/
     `rev-parse` and either could carry credential-bearing or otherwise
@@ -358,9 +356,12 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
             if fetch_res.returncode != 0:
                 raise SystemExit(f"git fetch (base ref) failed: {fetch_res.stderr.strip()}")
 
-    index_path = _resolve_git_path("index")
-    if index_path.exists():
-        shutil.copy2(index_path, merged / "index")
+    read_tree_res = subprocess.run(
+        ["git", f"--git-dir={merged}", "read-tree", "HEAD"],
+        capture_output=True, text=True, timeout=60, env=_scrubbed_git_env(),
+    )
+    if read_tree_res.returncode != 0:
+        raise SystemExit(f"git read-tree HEAD failed: {read_tree_res.stderr.strip()}")
 
     (merged / "config").write_text(_MINIMAL_GIT_CONFIG)
     shutil.rmtree(merged / "hooks", ignore_errors=True)
@@ -385,16 +386,28 @@ def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked:
     ``os.path.lexists`` (not a symlink-following ``Path.exists()``, which
     would wrongly skip an intact symlink whose target happens to be
     missing) before being archived; a path absent from the working tree is
-    silently skipped rather than raising. The copied index (see
-    ``_materialized_git_dir``) already represents that deletion correctly
-    for `git status`/`git diff` -- only the physical tar entry is skipped.
+    silently skipped rather than raising. The rebuilt index (see
+    ``_materialized_git_dir``'s ``git read-tree HEAD``) already represents
+    that deletion correctly for `git status`/`git diff` -- only the
+    physical tar entry is skipped.
+
+    ``git ls-files`` also lists an initialized submodule as a single
+    ``160000``-mode path that happens to be a real DIRECTORY on disk --
+    ``tarfile.add`` recursively archives directories by default, which
+    would copy that submodule's entire working tree (including its own
+    ignored/untracked files and `.git` metadata) wholesale, defeating the
+    tracked-files-only boundary this function exists to enforce.
+    ``recursive=False`` below means a submodule path is still added (as an
+    empty directory entry), but never its contents -- this repository has
+    no submodules today, but the guard costs nothing and must not regress
+    silently if one is ever added.
     """
     with tarfile.open(dest, mode="w") as tar, contextlib.ExitStack() as stack:
         tar.add(_materialized_git_dir(stack, passthrough), arcname=".git")
         for rel_path in _tracked_paths(include_untracked=include_untracked):
             abs_path = REPO / rel_path
             if os.path.lexists(abs_path):
-                tar.add(abs_path, arcname=rel_path)
+                tar.add(abs_path, arcname=rel_path, recursive=False)
 
 
 def _populate_workspace(container_id: str, passthrough: list[str], *, include_untracked: bool) -> None:
@@ -545,12 +558,30 @@ def main(argv: list[str] | None = None) -> int:
         except BaseException:
             _cleanup_orphan(instance_label, volume_name)
             raise
+        # The primary test path's own exception (if any) must win over a
+        # secondary teardown failure -- a raised `_tear_down` SystemExit in
+        # a bare `finally` would otherwise silently replace it, discarding
+        # both the real failure and its traceback. `result`/`primary_exc`
+        # let the `finally` below tell which case it's in: report (but
+        # don't re-raise) a teardown failure when the primary path already
+        # failed; raise it directly only when the primary path succeeded.
+        result: int | None = None
+        primary_exc: BaseException | None = None
         try:
             _populate_workspace(container_id, passthrough, include_untracked=ns.include_untracked)
-            return _run_tests(container_id, config_path, passthrough)
+            result = _run_tests(container_id, config_path, passthrough)
+        except BaseException as exc:
+            primary_exc = exc
+            raise
         finally:
             if not ns.keep:
-                _tear_down(container_id, volume_name)
+                try:
+                    _tear_down(container_id, volume_name)
+                except BaseException as teardown_exc:
+                    if primary_exc is None:
+                        raise
+                    print(f"warning: teardown also failed: {teardown_exc}", file=sys.stderr)
+        return result
     finally:
         shutil.rmtree(config_path.parent, ignore_errors=True)
 

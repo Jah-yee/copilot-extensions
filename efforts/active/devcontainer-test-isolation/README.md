@@ -715,3 +715,41 @@ end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms the fixed
 real deleted-then-restored tracked file (`docs/architecture.md`) confirms
 the deletion-handling fix works live, not merely in the mocked unit test.
 
+### 2026-10-03 — Review round 7: 4 findings addressed (removed the copied-index approach entirely)
+Automated review raised four more items: (1) **HIGH**: `git ls-files`
+reports an initialized submodule as a single path that is a real DIRECTORY
+on disk, and `tarfile.add` recursively archives directories by default --
+this repo has no submodules today, but the bug would have silently copied
+an entire submodule's working tree (including its own untracked/ignored
+files and `.git` metadata) wholesale the day one was added, defeating the
+tracked-files-only boundary entirely. Fixed with `recursive=False` on every
+`tar.add` call in `_write_tar_of_repo` -- a submodule path still gets
+archived as an empty directory entry, never its contents; ordinary tracked
+files are unaffected (they were never directories to begin with). (2)
+`_resolve_base_ref` returned the FIRST `--base` occurrence, not argparse's
+own last-occurrence-wins behavior for a repeated flag -- fixed to keep
+scanning and return the last match. (3) round 4's "copy the real index"
+step was itself unsound: a staged-but-uncommitted new/modified file's blob
+is genuinely unreachable from both `HEAD` and the base ref, so the bundle
+wouldn't contain it while the copied index still referenced it -- `git
+diff`/`status` could fail outright for a valid staged checkout. Fixed by
+removing the index-copy step entirely and instead rebuilding the index from
+`HEAD` (`git read-tree HEAD`) -- the tradeoff (documented) is that staged
+state is no longer distinguished from unstaged inside the container, since
+every modification (staged or not) is simply visible as an ordinary
+working-tree difference, backed by the actual on-disk file content
+`_tracked_paths` already copies in regardless. (4) a failed `_tear_down` in
+`main()`'s bare `finally` would silently replace the PRIMARY failure (and
+its traceback) when both the test run and teardown failed -- fixed by
+tracking whether a primary exception is already in flight and, if so,
+reporting (but not re-raising) a secondary teardown failure instead of
+letting it override; teardown's own failure still raises directly when the
+primary path succeeded.
+
+Re-validated end-to-end: the full unit test suite (39 tests, including new
+coverage for the submodule-recursion guard, the repeated-`--base` fix, the
+staged-uncommitted-file edge case, and both exception-masking branches)
+passes, and a fresh Docker-backed end-to-end run (`ai-attribution`, 98
+passed / 6 skipped) confirms the removed index-copy step doesn't break the
+common case.
+

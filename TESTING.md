@@ -171,12 +171,18 @@ arguments) is passed straight through to `tools/run-plugin-tests.py`
    into a fresh, minimal git directory instead -- this also transparently
    handles a linked worktree's `.git` (this repo's own required flow,
    where `.git` is a pointer FILE naming an absolute HOST path, meaningless
-   inside the container) without needing to special-case it. The real
-   index is copied in afterward so `git status`/`git diff` against the
-   working tree still reflect real staged/uncommitted state. `config` is
-   always replaced with a fresh, credential-free minimal one and `hooks` is
-   always dropped (neither is needed for `git diff`/`status`/`rev-parse`,
-   and either could carry credential-bearing or otherwise sensitive
+   inside the container) without needing to special-case it. The index is
+   then rebuilt from `HEAD` (`git read-tree HEAD`) rather than copied from
+   the host -- a copied index can reference a staged-but-uncommitted
+   blob that is unreachable from both `HEAD` and the base ref, which the
+   bundle would then be missing entirely. The tradeoff: staged state isn't
+   preserved as "staged" inside the container, but every modification
+   (staged or not) is still visible as an ordinary working-tree difference,
+   since the modified file's actual current on-disk content is what gets
+   copied in regardless. `config` is always replaced with a fresh,
+   credential-free minimal one and `hooks` is always dropped (neither is
+   needed for `git diff`/`status`/`rev-parse`, and either could carry
+   credential-bearing or otherwise sensitive
    content). Every `git` subprocess call here scrubs ambient
    `GIT_DIR`/`GIT_WORK_TREE`/etc. from its environment first, so a
    contaminated calling environment can't silently redirect it to the wrong

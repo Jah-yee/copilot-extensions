@@ -1172,3 +1172,32 @@ BOTH signals) passes; a fresh Docker-backed end-to-end run
 (`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
 works; Docker cleanup and host `git status --short` reconfirmed clean of
 anything beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (yet another pass, continued): 2 findings addressed (record-and-replay instead of discard, stale docstring)
+A seventh review pass of the same round confirmed the journal-trim fix
+resolved and raised two more. MEDIUM: `_sigterm_deferred`'s `SIG_IGN`
+approach doesn't DEFER a signal, it DISCARDS it outright -- for the
+NORMAL (non-exceptional) post-success teardown path specifically, a
+cancellation signal arriving in that window would be silently swallowed,
+cleanup would complete normally, and `main` would return `0`, making a
+cancelled invocation misreport success. Fixed by replacing `SIG_IGN` with
+a handler that RECORDS receipt instead, then -- after restoring the
+previous handlers once cleanup finishes -- re-raises
+`_TerminationRequested` if a signal was recorded, so cleanup still runs
+to completion uninterrupted while the cancellation itself is never
+silently dropped. LOW (previously missed, against code unchanged this
+round): `_git_rev_parse`'s docstring described the superseded
+"degraded-but-not-fatal" framing from before round 14's fail-loud fix --
+reworded to describe the current caller-dependent behavior
+(`_materialized_git_dir` treats an unresolvable ref as fatal only when
+changed-selection mode is active).
+
+Re-validated end-to-end: the full unit test suite (70 tests, including 2
+new `_sigterm_deferred` tests for the record-and-replay behavior and a
+new integration-style test confirming `main` propagates a signal
+received during successful teardown instead of returning 0, plus updated
+assertions in the existing teardown-signal-deferral test for the new
+non-`SIG_IGN` handler shape) passes; a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
+works; Docker cleanup and host `git status --short` reconfirmed clean of
+anything beyond this round's own diff.

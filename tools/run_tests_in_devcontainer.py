@@ -484,9 +484,14 @@ def _changed_mode_active(passthrough: list[str]) -> bool:
 def _git_rev_parse(ref: str) -> str | None:
     """Resolve ``ref`` to a commit sha via the scrubbed environment.
     Returns ``None`` (rather than raising) when it doesn't resolve locally
-    -- an unresolvable ``--base`` is a degraded-but-not-fatal condition for
-    the snapshot (the container's own ``--changed`` run will then fail the
-    same way a host run would against a ref nobody fetched)."""
+    -- this function's own contract is never to fail outright on an
+    unresolvable ref. Whether that's actually tolerable is the CALLER's
+    decision: `_materialized_git_dir` treats it as fatal (`SystemExit`)
+    when changed-selection mode is active (since
+    `tools/run-plugin-tests.py`'s own `changed_plugins()` would otherwise
+    silently report "no plugin suites to run" instead of the real
+    problem), but tolerates it (falling back to a `HEAD`-only bundle) when
+    changed-selection isn't in play at all."""
     res = subprocess.run(
         ["git", "-C", str(REPO), "rev-parse", "--verify", ref],
         capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
@@ -878,26 +883,38 @@ _CLEANUP_DEFERRED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 @contextlib.contextmanager
 def _sigterm_deferred():
-    """Temporarily ignore both `_CLEANUP_DEFERRED_SIGNALS` for the
-    duration of a cleanup step (``_tear_down``/``_cleanup_orphan``),
-    restoring whatever handlers were previously installed afterward.
-    Without this, a SECOND ``SIGTERM`` (or a second Ctrl-C/``SIGINT``)
-    arriving WHILE cleanup is already running (e.g. between removing the
-    container and removing its volume in `_tear_down`, two separate
-    sequential subprocess calls) would raise an exception again right
-    there -- `_tear_down`/`_cleanup_orphan` only catch
-    `subprocess.SubprocessError`/`OSError`, so that second exception
-    escapes immediately and can skip whichever removal step hadn't run
-    yet, reopening the exact leak `_raise_on_sigterm` exists to prevent.
+    """Defer both `_CLEANUP_DEFERRED_SIGNALS` for the duration of a
+    cleanup step (``_tear_down``/``_cleanup_orphan``): RECORD receipt of
+    either signal instead of acting on it immediately, restore whatever
+    handlers were previously installed once cleanup finishes, and THEN
+    raise `_TerminationRequested` if one was recorded. ``signal.SIG_IGN``
+    alone would be insufficient here -- it doesn't defer a signal, it
+    DISCARDS it outright, with nothing delivered or queued later. That
+    matters most for the ordinary (non-exceptional) teardown path: if the
+    FIRST SIGTERM/Ctrl-C of a run arrives while a successful run's
+    post-test cleanup is in its deferred window, `SIG_IGN` would silently
+    swallow it, cleanup would complete normally, and `main` would return
+    0 -- a cancelled invocation reporting success. Recording and
+    replaying it afterward instead means cleanup still runs to completion
+    uninterrupted (closing the original leak `_raise_on_sigterm` exists to
+    prevent), while the cancellation itself is never silently dropped.
     Kept under its original ``SIGTERM``-only name for historical
     continuity across this PR's own review rounds -- the function itself
     now covers both signals."""
-    previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in _CLEANUP_DEFERRED_SIGNALS}
+    received: list[int] = []
+    previous = {
+        sig: signal.signal(sig, lambda signum, frame: received.append(signum))
+        for sig in _CLEANUP_DEFERRED_SIGNALS
+    }
     try:
         yield
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+        if received:
+            raise _TerminationRequested(
+                f"received signal {received[0]} during cleanup"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -947,24 +947,59 @@ def test_main_installs_a_sigterm_handler(monkeypatch) -> None:
     assert registered_handler is wrapper._raise_on_sigterm
 
 
-def test_sigterm_deferred_ignores_then_restores_the_previous_handler() -> None:
+def test_sigterm_deferred_records_signals_instead_of_ignoring_them(monkeypatch) -> None:
+    # `SIG_IGN` would DISCARD a signal outright (nothing delivered or
+    # queued later) -- this context manager must instead install a
+    # handler that RECORDS receipt, so a signal arriving mid-cleanup can
+    # still be acted on (re-raised) once cleanup finishes, rather than
+    # silently vanishing.
     sentinel_handler = object()
-    with mock.patch.object(wrapper.signal, "signal",
-                            return_value=sentinel_handler) as signal_mock:
+    installed_handlers: dict[int, object] = {}
+
+    def fake_signal(sig, handler):
+        previous = installed_handlers.get(sig, sentinel_handler)
+        installed_handlers[sig] = handler
+        return previous
+
+    with mock.patch.object(wrapper.signal, "signal", side_effect=fake_signal):
         with wrapper._sigterm_deferred():
-            # Inside the context, BOTH SIGINT and SIGTERM must be set to
-            # SIG_IGN -- a second SIGTERM, or a second Ctrl-C, arriving
-            # mid-cleanup (e.g. between removing a container and removing
-            # its volume) must not interrupt the cleanup step partway.
-            ignore_calls = {call.args[0]: call.args[1] for call in signal_mock.call_args_list}
-            assert ignore_calls[wrapper.signal.SIGTERM] == wrapper.signal.SIG_IGN
-            assert ignore_calls[wrapper.signal.SIGINT] == wrapper.signal.SIG_IGN
-    # On exit, the PREVIOUS handlers (whatever `signal.signal` returned
-    # when first called here) must be restored, not left as SIG_IGN.
-    restore_calls = signal_mock.call_args_list[-2:]
-    restored = {call.args[0]: call.args[1] for call in restore_calls}
-    assert restored[wrapper.signal.SIGTERM] == sentinel_handler
-    assert restored[wrapper.signal.SIGINT] == sentinel_handler
+            sigterm_handler = installed_handlers[wrapper.signal.SIGTERM]
+            sigint_handler = installed_handlers[wrapper.signal.SIGINT]
+            assert sigterm_handler is not wrapper.signal.SIG_IGN
+            assert sigint_handler is not wrapper.signal.SIG_IGN
+            assert callable(sigterm_handler) and callable(sigint_handler)
+    # No signal was delivered -- the context must exit cleanly, restoring
+    # the previous (sentinel) handlers, with nothing raised.
+    assert installed_handlers[wrapper.signal.SIGTERM] is sentinel_handler
+    assert installed_handlers[wrapper.signal.SIGINT] is sentinel_handler
+
+
+def test_sigterm_deferred_replays_a_signal_received_during_cleanup() -> None:
+    # The exact gap a bare `SIG_IGN` would leave open: a signal arriving
+    # while NORMAL (non-exceptional) cleanup is running must not be
+    # silently discarded, or a cancelled invocation could report success.
+    # It must still be raised (as `_TerminationRequested`) once cleanup
+    # itself has finished running to completion uninterrupted.
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    try:
+        try:
+            with wrapper._sigterm_deferred():
+                # Simulate a signal arriving mid-cleanup by invoking the
+                # now-installed handler directly, exactly as the OS would.
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                # Cleanup "completes" normally despite the signal -- it
+                # must not have been interrupted by it.
+        except wrapper._TerminationRequested as exc:
+            assert "signal" in str(exc).lower()
+        else:
+            raise AssertionError("expected _TerminationRequested to be replayed")
+        # The previous handlers must still be restored despite the raise.
+        assert signal.getsignal(signal.SIGTERM) == previous_sigterm
+        assert signal.getsignal(signal.SIGINT) == previous_sigint
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:
@@ -1029,9 +1064,10 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
 def test_main_defers_sigterm_during_the_teardown_call(monkeypatch, tmp_path: Path) -> None:
     # A real second SIGTERM (or Ctrl-C) arriving mid-`_tear_down` must not
     # interrupt it between removing the container and removing its
-    # volume -- the OS-level handler must genuinely be SIG_IGN for the
-    # call's duration, not merely wrapped in a try/except that happens to
-    # catch the resulting exception.
+    # volume -- the OS-level handler must genuinely have been swapped to
+    # a recording (not immediately-raising) handler for the call's
+    # duration, not merely wrapped in a try/except that happens to catch
+    # a resulting exception.
     config_path = tmp_path / "cfgdir-sigterm" / "devcontainer.json"
     config_path.parent.mkdir()
     config_path.write_text("{}")
@@ -1056,7 +1092,50 @@ def test_main_defers_sigterm_during_the_teardown_call(monkeypatch, tmp_path: Pat
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
-    assert observed_handlers_during_teardown == [(signal.SIG_IGN, signal.SIG_IGN)]
+    assert len(observed_handlers_during_teardown) == 1
+    sigterm_handler, sigint_handler = observed_handlers_during_teardown[0]
+    assert sigterm_handler not in (signal.SIG_IGN, signal.SIG_DFL, wrapper._raise_on_sigterm)
+    assert sigint_handler not in (signal.SIG_IGN, signal.SIG_DFL)
+    assert callable(sigterm_handler) and callable(sigint_handler)
+
+
+def test_main_propagates_a_signal_received_during_successful_teardown(monkeypatch, tmp_path: Path) -> None:
+    # The exact scenario the bare-`SIG_IGN` design would have gotten
+    # wrong: a cancellation signal arriving during NORMAL (non-
+    # exceptional) post-success teardown must not be silently discarded
+    # -- `main` must propagate it rather than returning 0, or a cancelled
+    # invocation would misreport success.
+    config_path = tmp_path / "cfgdir-sigterm-success" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+
+    def fake_tear_down(container_id: str, volume_name: str) -> None:
+        # Simulate a signal arriving mid-teardown by invoking the
+        # now-installed (recording) handler directly, then let teardown
+        # finish normally -- it must not be interrupted by this.
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+    monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-sigterm-success")
+    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough, *, include_untracked: None)
+    monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
+    monkeypatch.setattr(wrapper, "_tear_down", fake_tear_down)
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    try:
+        try:
+            wrapper.main(["agent-worktrees"])
+        except wrapper._TerminationRequested:
+            pass
+        else:
+            raise AssertionError(
+                "expected main() to propagate the signal instead of returning 0"
+            )
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 def test_main_raises_teardown_failure_when_primary_path_succeeded(monkeypatch, tmp_path: Path) -> None:

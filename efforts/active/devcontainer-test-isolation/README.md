@@ -493,3 +493,36 @@ resolution and test execution currently share one container lifetime and
 haven't been split into network-enabled/network-disconnected passes --
 recorded as a named Phase 2 candidate and a Validation Plan item, not
 dropped. Phase 2 (CI/contributor-flow wiring) is next.
+
+### 2026-10-03 — Review round 1: 6 findings addressed
+Automated review on the PR (#5058) raised six real findings, all addressed:
+(1) the fixed named workspace volume was reused across every invocation --
+files deleted on the host or artifacts left by a prior run would stay
+visible, and concurrent runs would mutate the same volume -- fixed by
+generating a per-invocation devcontainer config with the volume name made
+unique (`_per_instance_config`), and removing that exact volume (not just
+the container) at teardown; (2) excluding `.git` from the copied snapshot
+silently broke `--changed` mode (`git diff`/`git status` inside the
+container would fail, and their unchecked empty output would produce an
+empty, not erroring, target set) -- fixed by including `.git` in the copy
+instead of trying to resolve changed targets on the host; (3) the
+privileged workspace-population path (`_populate_workspace`) had no
+automated coverage at all -- added three subprocess-mocked tests covering
+the root tar-extraction command, the follow-up chmod, and both commands'
+failure branches; (4) a failed `docker rm -f` at teardown was silently
+discarded, so a failed removal could leave a container (and anything it
+spawned) running while the overall run still reported success -- `_tear_down`
+now checks both the container and volume removal results and raises if
+either fails; (5) the `--` passthrough separator was only stripped when it
+was the very first extra argument, so the documented
+`--all -- -k some_filter` invocation silently dropped the `-k` filter (the
+inner runner's argparse treated it as a positional) -- fixed to strip every
+`--` occurrence from the passthrough list, not just a leading one; (6) one
+test's assertion allowed a regression that drops the final passthrough
+argument to pass anyway (an overly permissive either/or check) -- narrowed
+to assert the complete expected suffix only. All six fixes are
+live-re-validated by the full unit test suite; the real
+Docker-backed end-to-end run was not re-executed for this specific round,
+since the fixes are either additive (new assertions) or narrowly scoped
+(volume/separator/teardown-result handling) relative to the Phase 1
+end-to-end run already recorded above.

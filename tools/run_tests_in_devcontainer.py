@@ -21,18 +21,21 @@ Usage::
     python tools/run_tests_in_devcontainer.py --changed
     python tools/run_tests_in_devcontainer.py --all -- -k some_filter
 
-Everything after the recognized flags below (or after a literal ``--``) is
-passed straight through to ``tools/run-plugin-tests.py`` inside the
-container, so this wrapper's own CLI surface stays intentionally small.
+Everything after the recognized flags below (or a literal ``--`` anywhere in
+the remaining arguments) is passed straight through to
+``tools/run-plugin-tests.py`` inside the container, so this wrapper's own
+CLI surface stays intentionally small.
 """
 
 from __future__ import annotations
 
 import argparse
 import io
+import json
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -40,16 +43,23 @@ REPO = Path(__file__).resolve().parents[1]
 DEVCONTAINER_CONFIG = REPO / ".devcontainer" / "devcontainer.json"
 CONTAINER_WORKSPACE = "/workspaces/copilot-extensions"
 
+# Must match the literal volume name baked into ``.devcontainer/
+# devcontainer.json``'s ``workspaceMount`` -- ``_per_instance_config``
+# below rewrites this to a unique, per-invocation name so concurrent and
+# successive runs each get their own isolated, fresh workspace volume
+# instead of silently sharing (and accumulating state in) one fixed volume.
+BASE_VOLUME_NAME = "copilot-extensions-test-isolation-ws"
+
 # Excluded from the point-in-time copy made into the container: large or
 # host-specific artifacts the test run inside the container does not need
-# and should not reproduce (cached venvs are platform/arch-specific and are
-# rebuilt fresh inside the container anyway; `.git` is excluded because the
-# copy is a plain tarball, not a repository, and no test suite in this repo
-# depends on it being present -- see the effort README's known-limitations
-# note for the one tracked exception, copilot-extensions#5050's
-# provenance-SHA check).
+# and should not reproduce. Cached venvs are platform/arch-specific and are
+# rebuilt fresh inside the container anyway. ``.git`` IS included (despite
+# being large) because ``tools/run-plugin-tests.py --changed`` shells out to
+# ``git diff``/``git status`` to resolve its target set -- without it,
+# those commands fail, their (unchecked) empty output yields an empty
+# target set, and the runner would silently report "no plugin suites to
+# run" instead of actually running anything.
 EXCLUDED_TOP_LEVEL = {
-    ".git",
     ".test-venvs",
     ".devcontainer",
     "node_modules",
@@ -66,13 +76,38 @@ def _devcontainer_exe() -> str:
     return exe
 
 
-def _bring_up(instance_label: str) -> str:
+def _per_instance_config(instance_label: str) -> tuple[Path, str]:
+    """Write a copy of ``DEVCONTAINER_CONFIG`` with its workspace volume
+    name made unique to this invocation, so each run gets its own fresh,
+    isolated workspace instead of reusing (and accumulating state in) one
+    fixed, shared volume across every invocation. Returns the temp config
+    path and the volume name it declares, so the caller can remove that
+    exact volume at teardown.
+
+    Written into a fresh temp DIRECTORY as literally ``devcontainer.json``
+    (not a uniquely-named temp file) -- the devcontainer CLI rejects any
+    ``--config`` path whose basename isn't ``devcontainer.json`` or
+    ``.devcontainer.json``."""
+    volume_name = f"{BASE_VOLUME_NAME}-{instance_label}"
+    text = DEVCONTAINER_CONFIG.read_text()
+    if BASE_VOLUME_NAME not in text:
+        raise SystemExit(
+            f"expected volume name '{BASE_VOLUME_NAME}' not found in {DEVCONTAINER_CONFIG}"
+        )
+    text = text.replace(BASE_VOLUME_NAME, volume_name)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="devcontainer-test-isolation-"))
+    config_path = tmp_dir / "devcontainer.json"
+    config_path.write_text(text)
+    return config_path, volume_name
+
+
+def _bring_up(instance_label: str, config_path: Path) -> str:
     """Run ``devcontainer up`` and return the resulting container id."""
     exe = _devcontainer_exe()
     args = [
         exe, "up",
         "--workspace-folder", str(REPO),
-        "--config", str(DEVCONTAINER_CONFIG),
+        "--config", str(config_path),
         "--id-label", f"devcontainer-test-isolation.instance={instance_label}",
     ]
     res = subprocess.run(args, capture_output=True, text=True, timeout=1800)
@@ -83,8 +118,6 @@ def _bring_up(instance_label: str) -> str:
         line = line.strip()
         if not line.startswith("{"):
             continue
-        import json
-
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -146,12 +179,12 @@ def _populate_workspace(container_id: str) -> None:
         raise SystemExit(f"failed to open up container workspace permissions: {chmod.stderr.strip()}")
 
 
-def _run_tests(container_id: str, passthrough: list[str]) -> int:
+def _run_tests(container_id: str, config_path: Path, passthrough: list[str]) -> int:
     exe = _devcontainer_exe()
     args = [
         exe, "exec",
         "--workspace-folder", str(REPO),
-        "--config", str(DEVCONTAINER_CONFIG),
+        "--config", str(config_path),
         "--container-id", container_id,
         "--", "python", "tools/run-plugin-tests.py", *passthrough,
     ]
@@ -159,8 +192,20 @@ def _run_tests(container_id: str, passthrough: list[str]) -> int:
     return res.returncode
 
 
-def _tear_down(container_id: str) -> None:
-    subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=60)
+def _tear_down(container_id: str, volume_name: str) -> None:
+    """Remove the container, then the per-invocation volume it owned --
+    both failures are surfaced (never silently swallowed), since a failed
+    removal leaves a live container (and any test-spawned descendants it
+    holds) running, or an orphaned volume accumulating on the host."""
+    errors: list[str] = []
+    res = subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, text=True, timeout=60)
+    if res.returncode != 0:
+        errors.append(f"failed to remove container {container_id}: {res.stderr.strip()}")
+    vol = subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, text=True, timeout=60)
+    if vol.returncode != 0:
+        errors.append(f"failed to remove volume {volume_name}: {vol.stderr.strip()}")
+    if errors:
+        raise SystemExit("; ".join(errors))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -172,18 +217,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", action="store_true",
                      help="leave the container running after the test run (debugging)")
     ns, passthrough = ap.parse_known_args(argv)
-    if passthrough and passthrough[0] == "--":
-        passthrough = passthrough[1:]
+    # "--" is argparse's own flags/positionals separator, not a real
+    # run-plugin-tests.py argument -- strip every occurrence (not just a
+    # leading one), since it can appear anywhere in the extras list
+    # (e.g. ``--all -- -k some_filter`` leaves it in the MIDDLE).
+    passthrough = [arg for arg in passthrough if arg != "--"]
 
     instance_label = uuid.uuid4().hex[:12]
-    container_id = _bring_up(instance_label)
+    config_path, volume_name = _per_instance_config(instance_label)
     try:
-        _populate_workspace(container_id)
-        return _run_tests(container_id, passthrough)
+        container_id = _bring_up(instance_label, config_path)
+        try:
+            _populate_workspace(container_id)
+            return _run_tests(container_id, config_path, passthrough)
+        finally:
+            if not ns.keep:
+                _tear_down(container_id, volume_name)
     finally:
-        if not ns.keep:
-            _tear_down(container_id)
+        shutil.rmtree(config_path.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

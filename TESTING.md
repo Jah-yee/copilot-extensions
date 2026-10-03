@@ -134,21 +134,26 @@ python tools/run_tests_in_devcontainer.py --changed
 python tools/run_tests_in_devcontainer.py --all -- -k some_filter
 ```
 
-Everything after the wrapper's own small flag set (or after a literal `--`)
-is passed straight through to `tools/run-plugin-tests.py` *inside* the
-container. The wrapper:
+Everything after the wrapper's own small flag set (or a literal `--`
+anywhere in the remaining arguments) is passed straight through to
+`tools/run-plugin-tests.py` *inside* the container. The wrapper:
 
-1. Brings up `.devcontainer/devcontainer.json` via `devcontainer up` --
-   **never** a bind mount of the host checkout; the workspace is a
-   container-local Docker volume.
+1. Writes a per-invocation copy of `.devcontainer/devcontainer.json` with
+   its workspace volume name made unique to this run, then brings it up via
+   `devcontainer up` -- **never** a bind mount of the host checkout; the
+   workspace is a fresh, container-local Docker volume every run, never a
+   shared fixed one.
 2. Copies a point-in-time snapshot of the host checkout into that volume
-   (a `tar` pipe through `docker exec`, excluding `.git`, `.test-venvs`, and
-   other host-only artifacts) -- the host checkout is only ever **read**,
-   never mutated, by anything that happens afterward inside the container.
+   (a `tar` pipe through `docker exec`, excluding `.test-venvs` and other
+   host-only artifacts, but including `.git` -- the turn-key runner's own
+   `--changed` mode needs real repository metadata) -- the host checkout is
+   only ever **read**, never mutated, by anything that happens afterward
+   inside the container.
 3. Runs `tools/run-plugin-tests.py` inside the container via
    `devcontainer exec` and propagates its exit code.
-4. Tears the container down afterward (pass `--keep` to leave it running
-   for debugging).
+4. Tears the container AND its per-invocation volume down afterward (pass
+   `--keep` to leave both running for debugging); a failed removal raises
+   rather than silently reporting success.
 
 The container itself runs with every Linux capability dropped
 (`--cap-drop=ALL`), `no-new-privileges`, and a read-only root filesystem
@@ -160,9 +165,10 @@ a real container, not merely asserted.
 
 Because the workspace is a fresh copy rather than the live checkout, an
 uncommitted change you're actively testing is included (the copy happens at
-invocation time from the working tree, not from a commit), but `.git` itself
-is **not** copied in -- a test that needs real git history or a `git` CLI
-inside the container is out of scope for this wrapper today.
+invocation time from the working tree, not from a commit), and a fresh,
+per-invocation volume means no state (including prior test artifacts)
+carries over between runs.
+
 
 ## Local Windows SSH proxy regression
 

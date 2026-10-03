@@ -697,8 +697,12 @@ def test_backlog_triager_verification_checks_repo_specific_label_schema_and_effo
         "    'body': 'Active effort: `efforts/active/example/README.md`',\n"
         "  },\n"
         "  18: {\n"
-        "    'labels': ['bug', 'triage:accepted'],\n"
+        "    'labels': ['bug', 'triage:accepted', 'priority:high'],\n"
         "    'body': 'triaged, but no effort linked yet',\n"
+        "  },\n"
+        "  19: {\n"
+        "    'labels': ['triage:duplicate'],\n"
+        "    'body': 'duplicate of #17; no effort link needed',\n"
         "  },\n"
         "}\n"
         "task = json.load(sys.stdin)['task']\n"
@@ -708,10 +712,12 @@ def test_backlog_triager_verification_checks_repo_specific_label_schema_and_effo
         "for number in numbers:\n"
         "    issue = fixtures[number]\n"
         "    labels = set(issue['labels'])\n"
+        "    active_bug = 'triage:accepted' in labels and 'bug' in labels\n"
+        "    if not active_bug:\n"
+        "        continue\n"
         "    has_priority = any(label.startswith('priority:') for label in labels)\n"
-        "    has_triage = 'triage:accepted' in labels\n"
         "    has_effort = 'efforts/active/' in issue['body'] and '/README.md' in issue['body']\n"
-        "    if not (has_priority and has_triage and has_effort):\n"
+        "    if not (has_priority and has_effort):\n"
         "        json.dump({'decision': 'noop', 'reason': 'triage schema incomplete'}, sys.stdout)\n"
         "        break\n"
         "else:\n"
@@ -733,14 +739,24 @@ def test_backlog_triager_verification_checks_repo_specific_label_schema_and_effo
         evaluator_ref="backlog-triager",
         payload_inline='{"repository_issue_loop":{"resource_keys":["forge:github:repository:example/project:issue:18"]}}',
     )
+    duplicate_id = _submitted_task(
+        queue,
+        "duplicate report closed without effort link",
+        require_verification=True,
+        evaluator_ref="backlog-triager",
+        payload_inline='{"repository_issue_loop":{"resource_keys":["forge:github:repository:example/project:issue:19"]}}',
+    )
 
     good = evaluate_submitted_task(queue, good_id, trigger="submitted")
     incomplete = evaluate_submitted_task(queue, incomplete_id, trigger="submitted")
+    duplicate = evaluate_submitted_task(queue, duplicate_id, trigger="submitted")
 
     assert good["applied"][0]["decision"] == "complete"
     assert queue.get(good_id).status == Status.COMPLETED
     assert incomplete["applied"][0]["decision"] == "noop"
     assert queue.get(incomplete_id).status == Status.SUBMITTED
+    assert duplicate["applied"][0]["decision"] == "complete"
+    assert queue.get(duplicate_id).status == Status.COMPLETED
 
 
 def test_future_scheduled_verification_uses_idle_interval_not_retry_interval(tmp_path):

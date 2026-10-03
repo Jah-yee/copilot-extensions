@@ -24,13 +24,17 @@ uses comments, checklists, or structured body markers in addition to labels,
 apply the complete schema the repository expects rather than only a partial
 label subset.
 
-Ensure the issue is attached to tracked effort work before you consider the
-triage complete. In repositories that manage efforts in-tree, use the
-repository's normal same-repo effort-linking convention (for example a direct
-reference to `efforts/active/<slug>/README.md`, never a cross-repo path the
-issue cannot resolve). If no appropriate tracked effort exists yet, create or
-escalate that gap through the repository's normal effort-planning flow rather
-than silently leaving the issue unassigned.
+For a legitimate active bug, ensure the issue is attached to tracked effort
+work before you consider the triage complete. In repositories that manage
+efforts in-tree, use the repository's normal same-repo effort-linking
+convention (for example a direct reference to
+`efforts/active/<slug>/README.md`, never a cross-repo path the issue cannot
+resolve). If no appropriate tracked effort exists yet, create or escalate that
+gap through the repository's normal effort-planning flow rather than silently
+leaving the issue unassigned. A duplicate, already-fixed report, question, or
+other non-bug/non-active outcome does **not** need an effort marker merely to
+satisfy this identity; it needs the repository's normal durable resolution for
+that non-active state.
 
 Because the exact triage schema and effort-assignment convention are
 repository-specific, the matching trusted evaluator registration is the source

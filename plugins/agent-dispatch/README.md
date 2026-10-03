@@ -775,6 +775,15 @@ pool:
     agent: repository-issue-worker
 ```
 
+An optional top-level `task_contract:` mapping lets a declaration replace
+the created task's `title`, `goal`, `done_criteria`, and/or `prompt`
+templates without changing the issue-discovery/reservation engine itself.
+Each field is a string template with the placeholders
+`{issue_numbers}`, `{issues_bullets}`, `{self_config_clause}`, and
+`{worker_guidance}`. This is how `global:backlog-triager` keeps the same
+repository-issue-loop forge/emitter mechanism while swapping in a triage-only
+task contract instead of the default implementation-through-merge one.
+
 The emitter may tick more frequently than the configured cadence, but each
 occurrence is anchored to the Unix epoch. A completed task suppresses a replay
 of its occurrence after restart, and any nonterminal loop task backpressures

@@ -976,8 +976,14 @@ def test_global_backlog_triager_drives_through_the_generic_issue_loop(tmp_path):
     assert provider.list_calls == 1
     assert task["require_verification"] is True
     assert task["evaluator_ref"] == "backlog-triager"
+    assert task["title"] == "Triage repository issues #17"
+    assert task["goal"] == "Classify and triage repository issues #17"
+    assert "Legitimate active bugs must" in task["prompt"]
+    assert "Do not turn this triage task into an implementation lane" in task["prompt"]
+    assert "return immediately to triage/dispositioning" in task["prompt"]
+    assert "implementation, required checks, review, merge, and issue closure" not in task["prompt"]
     assert "classify it" in task["prompt"]
-    assert "tracked effort work" in task["prompt"]
+    assert "attached to tracked effort" in task["prompt"]
 
 
 def test_proposed_task_retries_transient_approve_failure():
@@ -1719,6 +1725,7 @@ def test_claim_does_not_reuse_a_different_loops_comment():
         ({"batch_size": 0}, "batch_size"),
         ({"forge": {"provider": "other"}}, "only \\['azure-devops', 'github'\\]"),
         ({"forge": {"provider": "github"}}, "producer_login"),
+        ({"task_contract": False}, "task_contract: expected a mapping"),
         ({"reservation": {"label": "x", "comment": False}}, "must be true"),
         ({"pool": {"max_active_processes": 2}}, "concurrency must be 1"),
         ({"pool": {"body": {"type": "embody"}}}, "must be 'headless'"),

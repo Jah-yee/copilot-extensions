@@ -2627,14 +2627,22 @@ assumed. Presented two options: give a local `dev` checkout its own
 distinct non-release version identity, or route ordinary numbered
 install/update flows through a generated preview/dev slot instead of ever
 installing the raw repo-tree `plugin.json` directly. **Operator chose the
-preview/dev-slot route** — a numbered install now always materializes a
-real, content-distinct hypothetical version via `preview_release.py` first
-(already being extended in this phase for the same seeding/propagation
-model as promotion), then installs that generated slot, so the raw
-`"0.0.0"` placeholder is never what actually gets installed. The existing
-mutable `dev`-slot editable-install path is unaffected and keeps installing
-straight from the worktree exactly as today. Folded into the Plan, Design
-points, and Validation Plan.
+preview/dev-slot route** — once implemented, a numbered install will
+always materialize a real, content-distinct hypothetical version via
+`preview_release.py` first (already planned to be extended in this phase
+for the same seeding/propagation model as promotion), then install that
+generated slot, so the raw `"0.0.0"` placeholder is never what actually
+gets installed. The existing mutable `dev`-slot editable-install path is
+unaffected and will keep installing straight from the worktree exactly as
+today. Folded into the Plan, Design points, and Validation Plan — none of
+this is implemented yet.
+
+The remaining preview-identity edge cases (precedence-safe build identity
+vs. PEP 440/runtime-sorter comparators, validating persisted payload paths
+rather than only Git provenance) were deliberately left as
+implementation-time decisions with required validation coverage rather
+than fully pre-solved in the plan — operator direction: land the plan now
+and resolve those with tests during implementation.
 
 Phase 7 implementation can now begin.
 

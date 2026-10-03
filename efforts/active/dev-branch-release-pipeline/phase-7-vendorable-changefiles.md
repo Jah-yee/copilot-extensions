@@ -252,13 +252,25 @@ changefiles and auto-bumps."
       overwrite an existing immutable slot and break rollback/concurrent-
       process safety, the exact thing numbered immutability exists to
       prevent. The preview route must therefore mint a **content-distinct**
-      identity for every numbered-install preview build (e.g. a semver
-      build-metadata suffix derived from a content/dirty-tree hash,
-      `X.Y.Z-devN+<hash>`, which doesn't affect version precedence but
-      guarantees two different builds never collide on one slot) rather
-      than reusing the bare computed version as-is. A rebuild against
-      truly unchanged content (identical hash) may still reuse its own
-      slot; anything else always mints a new one.
+      identity for every numbered-install preview build rather than reusing
+      the bare computed version as-is; a rebuild against truly unchanged
+      content (identical hash) may still reuse its own slot, anything else
+      always mints a new one. The exact identity scheme is an
+      implementation-time decision, not a plan-time one: a naive
+      build-metadata suffix (`X.Y.Z-devN+<hash>`) is **not** safe as-is —
+      `agent_worktrees.reconcile._version_lt`'s PEP 440 ordering sorts
+      `1.2.3.dev1+abc` *after* bare `1.2.3.dev1`, which can make a later
+      real promoted build look like a downgrade and get skipped, and the
+      canonical runtime sorter (`libs/versioned-runtime/versioned_runtime.py:
+      135-149`) only recognizes `X.Y.Z[-devN]`, dropping any suffixed form
+      into its unsupported fallback bucket. Implementation must either pick
+      an identity scheme proven precedence-neutral against both of those
+      comparators (e.g. keeping the installed *slot* id distinct from the
+      *version* string the comparators read) or update both comparators
+      alongside it, and the Validation Plan item below requires proving the
+      real promoted build supersedes an installed preview across
+      reconciliation, downgrade guards, and runtime fallback/GC before this
+      is considered done.
 - [ ] Extend the placeholder-conversion inventory and migration to cover
       every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       every real copy), not just per-plugin manifests and hook-owned
@@ -354,7 +366,14 @@ changefiles and auto-bumps."
 - [ ] The install contract's recorded source identity (commit/branch/
       dirty-state provenance) after a preview-routed numbered install still
       reflects the originating checkout, not `preview_release.py`'s scratch
-      tree path.
+      tree path — and the persisted `source.path`/payload-dir the install
+      contract actually points at is itself the originating checkout's
+      durable location, not the preview's temporary directory, since those
+      paths are later dereferenced for runtime operations and
+      self-provisioning (e.g. `loop_governance.py:69-78`,
+      `agent-bridge/scripts/install.sh:1307-1319`). Validate the persisted
+      payload location directly, not just the recorded commit/branch/dirty
+      fields.
 - [ ] Two numbered-install preview builds with the SAME computed base
       version but DIFFERENT content (e.g. two dirty checkouts sharing a
       pending changefile set) mint two distinct numbered slots, never

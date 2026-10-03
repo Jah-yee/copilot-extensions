@@ -109,6 +109,61 @@ coverage. When splitting an existing oversized test module, assign one
 contract per resulting file as you go; retrofitting the marker onto
 already-small, single-contract files is not required.
 
+## Optional devcontainer-based isolation (Linux)
+
+`tools/run_tests_in_devcontainer.py` is an opt-in wrapper around the turn-key
+runner above that additionally runs it inside a hardened, ephemeral
+devcontainer (`.devcontainer/devcontainer.json`) -- a real OS-level
+filesystem/network boundary on top of (not instead of) the turn-key runner's
+own process-level containment. It exists for the case the turn-key runner
+cannot cover on its own: a buggy or adversarial test that escapes
+process-level containment via an absolute path write, a raw socket, or a
+privilege a job object doesn't restrict. See
+`efforts/active/devcontainer-test-isolation/README.md` for the full design
+rationale and the live-validated findings (Phase 0) that shaped it.
+
+Requires the [devcontainers CLI](https://github.com/devcontainers/cli)
+(`npm i -g @devcontainers/cli`) and a working Docker daemon. Linux only --
+this repo's CI already runs a dedicated `windows-latest` job covering the
+Windows-specific containment paths described above, so a devcontainer adds
+nothing there.
+
+```bash
+python tools/run_tests_in_devcontainer.py agent-worktrees
+python tools/run_tests_in_devcontainer.py --changed
+python tools/run_tests_in_devcontainer.py --all -- -k some_filter
+```
+
+Everything after the wrapper's own small flag set (or after a literal `--`)
+is passed straight through to `tools/run-plugin-tests.py` *inside* the
+container. The wrapper:
+
+1. Brings up `.devcontainer/devcontainer.json` via `devcontainer up` --
+   **never** a bind mount of the host checkout; the workspace is a
+   container-local Docker volume.
+2. Copies a point-in-time snapshot of the host checkout into that volume
+   (a `tar` pipe through `docker exec`, excluding `.git`, `.test-venvs`, and
+   other host-only artifacts) -- the host checkout is only ever **read**,
+   never mutated, by anything that happens afterward inside the container.
+3. Runs `tools/run-plugin-tests.py` inside the container via
+   `devcontainer exec` and propagates its exit code.
+4. Tears the container down afterward (pass `--keep` to leave it running
+   for debugging).
+
+The container itself runs with every Linux capability dropped
+(`--cap-drop=ALL`), `no-new-privileges`, and a read-only root filesystem
+with only `/tmp`, `/run`, `$HOME`, and the workspace volume writable -- no
+Docker socket is ever mounted in. Outbound networking is currently left at
+Docker's default bridge (a known, named, open design gap -- see the effort
+README's Phase 1 journal); everything else above was live-validated against
+a real container, not merely asserted.
+
+Because the workspace is a fresh copy rather than the live checkout, an
+uncommitted change you're actively testing is included (the copy happens at
+invocation time from the working tree, not from a commit), but `.git` itself
+is **not** copied in -- a test that needs real git history or a `git` CLI
+inside the container is out of scope for this wrapper today.
+
 ## Local Windows SSH proxy regression
 
 After preparing the isolated `agent-bridge` test environment with the turn-key

@@ -378,12 +378,12 @@ win grows with build complexity.
   `artifact_id` omitted the wheels' own digests (now included); and two
   documentation-process findings (keep the Phase 2 plan item open until
   pipeline-wired; add the required Documentation impact statement).
-- 29 unit tests (`tools/test_build_python_artifacts.py`), all green;
+- 33 unit tests (`tools/test_build_python_artifacts.py`), all green;
   confirmed zero regressions against the rest of `tools/`'s suite (the only
   failures in a full `pytest tools/` run are 45 pre-existing,
   environment-specific `clean-room`/WSL-bash failures unrelated to this
-  change). Smoke-tested for real against `agent-bridge` both before and
-  after the review fixes: built all 10 wheels (the plugin + its 9 vendored
+  change). Smoke-tested for real against `agent-bridge` repeatedly across
+  every review round: built all 10 wheels (the plugin + its 9 vendored
   libs), every one reporting `setuptools (84.0.0)` as its actual generator,
   manifest written correctly.
 - A second review round found 2 more issues (1 real, 1 stale): `build_wheel`'s
@@ -399,6 +399,30 @@ win grows with build complexity.
   round -- the review tooling diffs file content, not the PR body, so it
   could not see that fix; left as a reviewer-visible non-issue rather than
   a code change.
+- A third review round found 3 more issues: the payload-hash serialization
+  joined `"path:digest"` strings with a plain separator, which is
+  ambiguous for pathological filenames (two different `(path, digest)` sets
+  can serialize identically) -- fixed with a shared `_hash_fields` helper
+  that length-prefixes every field before hashing, applied consistently to
+  `directory_content_hash`, `compute_payload_hash`, and `artifact_id`
+  itself (which also now folds in every wheel's filename+digest the same
+  unambiguous way); `payload_hash` was computed AFTER every wheel had
+  already been built, so a build backend leaving residue inside the source
+  tree (e.g. setuptools' `build_meta` creating a `*.egg-info` directory
+  alongside the sources) would be folded into the identity of the very
+  input that produced it -- fixed by computing it before the first build,
+  with a regression test simulating exactly that residue; and
+  `read_wheel_generator` decoded `dist-info/WHEEL` with `errors="replace"`,
+  which would silently accept corrupt metadata as a known toolchain --
+  fixed to fail closed on invalid UTF-8. The stale "Documentation impact"
+  finding and a stale test-count note recurred across rounds for the same
+  PR-body-vs-file-diff reason noted above; both are now also reflected in
+  this Journal entry's own diff.
+  **Documentation impact:** this effort doc is the sole documentation
+  surface for `tools/build_python_artifacts.py` (a new, standalone tool);
+  no other repository documentation describes it, and `TESTING.md` does
+  not enumerate individual `tools/test_*.py` files, so it remains accurate
+  without changes.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

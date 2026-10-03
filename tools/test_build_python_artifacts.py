@@ -133,6 +133,17 @@ def test_read_wheel_generator_missing_dist_info_raises(tmp_path: Path):
         bpa.read_wheel_generator(wheel)
 
 
+def test_read_wheel_generator_invalid_utf8_raises(tmp_path: Path):
+    # Regression: errors="replace" would silently accept corrupt metadata
+    # and record a replacement-character Generator as if the real toolchain
+    # were known -- the opposite of fail-closed.
+    wheel = tmp_path / "fake_pkg-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as zf:
+        zf.writestr("fake_pkg-1.0.dist-info/WHEEL", b"Generator: \xff\xfe bad\n")
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.read_wheel_generator(wheel)
+
+
 # --- sha256_file -----------------------------------------------------------
 
 
@@ -270,6 +281,13 @@ def test_directory_content_hash_stable_for_unchanged_content(tmp_path: Path):
     d.mkdir()
     (d / "a.py").write_text("x = 1\n", encoding="utf-8")
     assert bpa.directory_content_hash(d) == bpa.directory_content_hash(d)
+
+
+def test_hash_fields_no_concatenation_ambiguity():
+    # Regression: naively joining fields with a plain separator lets two
+    # DIFFERENT field sequences serialize identically (e.g. "ab"+"c" ==
+    # "a"+"bc" == "abc"); length-prefixing must keep them distinct.
+    assert bpa._hash_fields("ab", "c") != bpa._hash_fields("a", "bc")
 
 
 def test_directory_content_hash_changes_with_content(tmp_path: Path):
@@ -441,6 +459,34 @@ def test_build_plugin_artifacts_end_to_end(
     manifest_path = out_dir / "demo-0.1.0-manifest.json"
     assert manifest_path.is_file()
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+
+
+def test_build_plugin_artifacts_payload_hash_excludes_build_residue(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression: payload_hash must reflect the PRE-build source tree, not
+    # whatever a build backend happens to leave behind inside it (e.g.
+    # setuptools' build_meta creating a *.egg-info directory alongside the
+    # sources even for an isolated wheel build).
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_pyproject(plugin_dir)
+    expected_hash = bpa.compute_payload_hash([plugin_dir])
+    out_dir = fake_repo / "dist"
+
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+        (source_dir / "demo.egg-info").mkdir(exist_ok=True)
+        (source_dir / "demo.egg-info" / "PKG-INFO").write_text(
+            "build residue", encoding="utf-8"
+        )
+        out.mkdir(parents=True, exist_ok=True)
+        wheel = out / "demo-0.1.0-py3-none-any.whl"
+        _make_fake_wheel(wheel, generator="setuptools (84.1.0)")
+        return wheel
+
+    monkeypatch.setattr(bpa, "build_wheel", fake_build_wheel)
+    manifest = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+
+    assert manifest["payload_hash"] == expected_hash
 
 
 def test_build_plugin_artifacts_artifact_id_changes_with_wheel_bytes(

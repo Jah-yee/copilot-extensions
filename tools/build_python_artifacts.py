@@ -128,16 +128,36 @@ _PAYLOAD_IGNORE_DIR_NAMES = {
 _PAYLOAD_IGNORE_SUFFIXES = (".pyc", ".pyo")
 
 
+def _hash_fields(*fields: str) -> str:
+    """Hashes an ordered sequence of string fields unambiguously: each
+    field is length-prefixed before its UTF-8 bytes, so no delimiter choice
+    can let two DIFFERENT field sequences serialize to the same digest
+    (e.g. joining `"rel:hash"` pairs with a plain separator lets a crafted
+    filename or digest absorb the separator and collide with a
+    differently-split pair -- length-prefixing makes that impossible)."""
+    h = hashlib.sha256()
+    for field in fields:
+        data = field.encode("utf-8")
+        h.update(len(data).to_bytes(8, "big"))
+        h.update(data)
+    return h.hexdigest()
+
+
 def directory_content_hash(d: Path) -> str:
     """A hex digest over every regular file's relative path and content
     under ``d`` (skipping VCS/cache/build-artifact noise), sorted so
     traversal order never affects the result. This hashes the actual
-    working tree `build_wheel` is about to read -- never `git HEAD` --
-    because promotion builds from a scratch tree already mutated by
-    version bumps and materialization: the bytes a build actually consumes
-    can differ from `HEAD` even when both nominally describe the same
-    commit, and the payload hash must track what was really built."""
-    entries = []
+    working tree -- never `git HEAD` -- because promotion builds from a
+    scratch tree already mutated by version bumps and materialization: the
+    bytes a build actually consumes can differ from `HEAD` even when both
+    nominally describe the same commit, and the payload hash must track
+    what was really built. Must be called BEFORE building anything from
+    ``d`` -- a build backend (even one invoked with build isolation) can
+    leave residue inside the source tree itself (e.g. a `*.egg-info`
+    directory setuptools' `build_meta` creates alongside the sources), and
+    hashing after the fact would fold build output into the identity of
+    the very input that produced it."""
+    entries: list[tuple[str, str]] = []
     for p in sorted(d.rglob("*")):
         if not p.is_file():
             continue
@@ -147,8 +167,9 @@ def directory_content_hash(d: Path) -> str:
         if p.suffix in _PAYLOAD_IGNORE_SUFFIXES:
             continue
         rel = p.relative_to(d).as_posix()
-        entries.append(f"{rel}:{hashlib.sha256(p.read_bytes()).hexdigest()}")
-    return hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
+        entries.append((rel, hashlib.sha256(p.read_bytes()).hexdigest()))
+    flattened = [field for pair in sorted(entries) for field in pair]
+    return _hash_fields(*flattened)
 
 
 def compute_payload_hash(dirs: list[Path]) -> str:
@@ -156,13 +177,15 @@ def compute_payload_hash(dirs: list[Path]) -> str:
     libs), each identified by its repo-relative path and its own working-
     tree content hash (`directory_content_hash`). Sorted so key order never
     affects the hash, and the relative path is included so swapping which
-    lib lives at which path is itself a change (not just the content)."""
-    parts = [
-        f"{d.resolve().relative_to(REPO).as_posix()}={directory_content_hash(d)}"
+    lib lives at which path is itself a change (not just the content). Must
+    be called BEFORE building any wheel from ``dirs`` -- see
+    `directory_content_hash`'s own docstring."""
+    pairs = [
+        (d.resolve().relative_to(REPO).as_posix(), directory_content_hash(d))
         for d in dirs
     ]
-    digest = hashlib.sha256("\n".join(sorted(parts)).encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
+    flattened = [field for pair in sorted(pairs) for field in pair]
+    return f"sha256:{_hash_fields(*flattened)}"
 
 
 def parse_wheel_filename(path: Path) -> dict[str, str]:
@@ -262,7 +285,16 @@ def read_wheel_generator(wheel_path: Path) -> str:
         ]
         if not wheel_meta_names:
             raise ArtifactBuildError(f"{wheel_path}: no dist-info/WHEEL entry found")
-        text = zf.read(wheel_meta_names[0]).decode("utf-8", errors="replace")
+        raw = zf.read(wheel_meta_names[0])
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # `errors="replace"` would silently accept corrupt metadata and let
+        # a replacement-character "Generator" be recorded as if the real
+        # toolchain were known -- the opposite of fail-closed.
+        raise ArtifactBuildError(
+            f"{wheel_path}: dist-info/WHEEL is not valid UTF-8: {exc}"
+        ) from exc
     m = _GENERATOR_RE.search(text)
     if not m:
         raise ArtifactBuildError(
@@ -333,10 +365,17 @@ def build_plugin_artifacts(
     vendored_libs = resolve_vendored_libs(plugin_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Computed BEFORE any build runs: a build backend can leave residue
+    # inside the source tree itself (e.g. setuptools' build_meta creating a
+    # *.egg-info directory alongside the sources even for an isolated
+    # wheel build), and hashing after the fact would fold build output into
+    # the identity of the very input that produced it.
+    all_dirs = [plugin_dir] + [d for _name, d in vendored_libs]
+    payload_hash = compute_payload_hash(all_dirs)
+
     entries: list[dict] = []
     wheel_infos: list[dict[str, str]] = []
     generators: set[str] = set()
-    all_dirs = [plugin_dir] + [d for _name, d in vendored_libs]
 
     plugin_wheel = build_wheel(plugin_dir, out_dir, python=python)
     plugin_info = parse_wheel_filename(plugin_wheel)
@@ -373,24 +412,20 @@ def build_plugin_artifacts(
         )
 
     identity_tags = overall_identity_tags(wheel_infos)
-    payload_hash = compute_payload_hash(all_dirs)
     toolchain = sorted(generators)
-    wheel_digest_input = "\n".join(
-        sorted(f"{e['filename']}={e['sha256']}" for e in entries)
+    wheel_fields = [
+        field
+        for e in sorted(entries, key=lambda e: e["filename"])
+        for field in (e["filename"], e["sha256"])
+    ]
+    artifact_id = "sha256:" + _hash_fields(
+        payload_hash,
+        identity_tags["python_tag"],
+        identity_tags["abi_tag"],
+        identity_tags["platform_tag"],
+        ",".join(toolchain),
+        *wheel_fields,
     )
-    artifact_id_input = "|".join(
-        [
-            payload_hash,
-            identity_tags["python_tag"],
-            identity_tags["abi_tag"],
-            identity_tags["platform_tag"],
-            ",".join(toolchain),
-            wheel_digest_input,
-        ]
-    )
-    artifact_id = "sha256:" + hashlib.sha256(
-        artifact_id_input.encode("utf-8")
-    ).hexdigest()
 
     manifest = {
         "schema": MANIFEST_SCHEMA,

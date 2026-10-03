@@ -75,6 +75,7 @@ MANIFEST_SCHEMA_VERSION = 1
 
 _GENERATOR_RE = re.compile(r"^Generator:\s*(.+?)\s*$", re.MULTILINE)
 _BUILD_TAG_RE = re.compile(r"^[0-9][^-]*$")
+_VERSION_LIKE_RE = re.compile(r"^[0-9]")
 
 # Tags considered "universal" (compatible everywhere) -- any other tag is
 # strictly more specific and wins when picking the artifact set's own
@@ -497,29 +498,38 @@ def compute_payload_hash(dirs: list[Path]) -> str:
 def parse_wheel_filename(path: Path) -> dict[str, str]:
     """Parses a wheel filename's identity components by tokenizing from the
     RIGHT (PEP 427's own grammar: `{name}-{version}(-{build tag})?-{python
-    tag}-{abi tag}-{platform tag}.whl`), rather than a single greedy regex:
-    a regex's leftmost-longest backtracking prefers absorbing the optional
-    numeric build tag into an over-long `name`/`version` match whenever
-    that also happens to satisfy the pattern, silently mis-parsing a wheel
-    that legitimately carries one (e.g. `demo_pkg-1.2.3-1-py3-none-any.whl`
-    would report `version="1"` instead of `"1.2.3"`). The three
-    compatibility tags never contain hyphens, so they are unambiguously the
-    last three '-'-delimited tokens; an optional build tag (if present) is
-    exactly the token before them, and must start with a digit."""
+    tag}-{abi tag}-{platform tag}.whl`). A well-formed wheel's distribution
+    `name` is ALWAYS exactly one `-`-delimited token (PEP 427 normalizes
+    `-`/`_`/`.` runs in the distribution name to a single `_`, specifically
+    so this split is never ambiguous) -- it is never reconstructed by
+    rejoining multiple tokens, which would silently accept a malformed,
+    non-normalized name (e.g. `demo-pkg-1.2.3-py3-none-any.whl`, whose
+    unnormalized `demo-pkg` literally contains the separator) and misparse
+    it as `name="demo", version="pkg"`. The three compatibility tags never
+    contain hyphens, so they are unambiguously the last three tokens; the
+    single token between `name` and those three tags is `version`, or --
+    if there are two such tokens -- `version` then an optional numeric
+    build tag. `version` is additionally required to look like a real
+    version (start with a digit, per PEP 440), closing the case above
+    where the naive split would otherwise accept a non-version token."""
     if not path.name.endswith(".whl"):
         raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
     tokens = path.name[: -len(".whl")].split("-")
     if len(tokens) < 5:
         raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
     platform_tag, abi_tag, python_tag = tokens[-1], tokens[-2], tokens[-3]
-    rest = tokens[:-3]
-    if len(rest) >= 3 and _BUILD_TAG_RE.match(rest[-1]):
-        rest = rest[:-1]
-    if len(rest) < 2:
-        raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
-    name = "-".join(rest[:-1])
-    version = rest[-1]
-    if not name or not version:
+    name = tokens[0]
+    middle = tokens[1:-3]
+    if len(middle) == 1:
+        version = middle[0]
+    elif len(middle) == 2 and _BUILD_TAG_RE.match(middle[1]):
+        version = middle[0]
+    else:
+        raise ArtifactBuildError(
+            f"{path}: not a well-formed wheel filename (ambiguous "
+            "distribution/version/build-tag split)"
+        )
+    if not name or not _VERSION_LIKE_RE.match(version):
         raise ArtifactBuildError(f"{path}: not a well-formed wheel filename")
     return {
         "name": name,

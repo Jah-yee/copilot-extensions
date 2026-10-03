@@ -59,6 +59,16 @@ def test_parse_wheel_filename_malformed_raises():
         bpa.parse_wheel_filename(Path("not-a-wheel.txt"))
 
 
+def test_parse_wheel_filename_non_normalized_name_raises():
+    # Regression: a well-formed wheel's distribution name is always
+    # exactly one token (PEP 427 normalizes '-'/'_'/'.' runs to a single
+    # '_' specifically so this split is unambiguous). A hyphenated,
+    # non-normalized name like "demo-pkg" must not be silently accepted by
+    # reinterpreting one of its own tokens as the version.
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.parse_wheel_filename(Path("demo-pkg-1.2.3-py3-none-any.whl"))
+
+
 # --- overall_identity_tags -----------------------------------------------
 
 

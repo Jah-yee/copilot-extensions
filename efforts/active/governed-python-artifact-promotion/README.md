@@ -596,10 +596,22 @@ win grows with build complexity.
   checking it was a table, raising an uncaught `AttributeError` on a
   malformed-but-TOML-valid manifest -- fixed identically to
   `_read_sources_table`'s own prior fix, with a regression test. 63 unit
-  tests now; re-verified both plugins build correctly. This slice has now
-  gone through 11 automated review rounds, each finding genuine,
-  progressively narrower issues -- a pattern consistent with this effort's
-  own documented review history on its original design PR.
+  tests now; re-verified both plugins build correctly.
+- A twelfth review round found `parse_wheel_filename` could still misparse
+  a non-normalized wheel name: PEP 427 normalizes a distribution's own
+  `-`/`_`/`.` runs to a single `_` specifically so the filename split is
+  unambiguous, but the parser reconstructed `name` by rejoining multiple
+  tokens with `-` whenever more than one remained, so a malformed,
+  unnormalized name like `demo-pkg` in `demo-pkg-1.2.3-py3-none-any.whl`
+  was silently accepted as `name="demo", version="pkg"`. Fixed by treating
+  `name` as always exactly the first token (never rejoined) and requiring
+  `version` to look like a real version (start with a digit, per PEP 440)
+  -- both properties a well-formed wheel always has, closing the
+  ambiguity rather than guessing. 64 unit tests now; re-verified both
+  plugins build correctly. This slice has now gone through 12 automated
+  review rounds, each finding genuine, progressively narrower issues -- a
+  pattern consistent with this effort's own documented review history on
+  its original design PR.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

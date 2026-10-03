@@ -738,6 +738,10 @@ def cmd_detach(
                 refs_delivered = "seed"
             elif seed_needs_bridge and seed_delivery_status == "bridge":
                 refs_delivered = "message"
+            elif seed_unconfirmed:
+                # The lost attempt's seed already carried this note (maybe
+                # submitted, maybe still a draft): resending it could repeat it.
+                refs_delivered = "unconfirmed"
             elif not created:
                 refs_delivered = (
                     "message" if deliver_note(session_id, refs_note_text, **alias_floor) else "failed"

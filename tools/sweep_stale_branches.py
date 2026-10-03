@@ -33,8 +33,19 @@ convention:
   check-then-act GET+DELETE, which a transient GET failure or a race
   between the two calls could silently bypass (fail open). A rejected lease
   (the branch moved between planning and deleting) is treated as a safe
-  skip, never a forced delete. A fork-originated PR's `headRefName` never
-  denotes a branch on this repo at all and is excluded entirely.
+  skip ONLY when it is the lease's own stale-info rejection -- any other
+  push rejection (a protected-branch hook declining the delete, a
+  permission error, etc.) is a real failure. A fork-originated PR's
+  `headRefName` never denotes a branch on this repo at all and is excluded
+  entirely. When a branch name has been reused across more than one
+  separately-merged PR over time, the **newest** merge (by `mergedAt`)
+  determines the expected OID, never an arbitrary one.
+- `--execute` refuses to push a deletion through a local git remote that
+  doesn't resolve to the exact `--repo` host+path (`github.com` plus an
+  exact owner/repo match, not a mere suffix), and scrubs ambient
+  `GIT_DIR`/`GIT_WORK_TREE`/etc. environment variables before every git
+  call so an inherited repository-selection variable can't silently
+  redirect it.
 - Never touches a protected branch (the repo's configured default branch,
   plus `dev` for this repo's own `main`+`dev` pair -- see
   ``DEFAULT_PROTECTED_EXTRA``).
@@ -43,7 +54,9 @@ convention:
   (``worktree/*``, ``feature/*``, ``pr/*``) -- those need per-case human/agent
   judgment (the one-time sweep found genuinely live, minutes-old branches
   among them). Instead it opens/updates a single tracking issue listing them
-  for triage, exactly as cautious as leaving them alone.
+  for triage, exactly as cautious as leaving them alone, and closes that
+  same issue again once a later run finds nothing left to flag -- so it
+  never lingers with a stale branch list.
 - Refuses to classify anything -- deletable or flagged -- from a PR-history
   query it cannot prove is complete: a branch absent from a truncated
   ``gh pr list`` result is indistinguishable from a branch with no PR record
@@ -70,8 +83,11 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
+import re
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 
 DEFAULT_REPO = "ThomasMichon/copilot-extensions"
@@ -86,6 +102,53 @@ TRACKING_LABEL = "stale-branch-triage"
 # every record.
 DEFAULT_LIMIT = 20000
 
+#: Ambient Git repository-selection variables that must never leak into a
+#: `git` subprocess here -- if the calling environment has e.g. `GIT_DIR` or
+#: `GIT_WORK_TREE` set, it silently overrides this script's intended target
+#: (the current working directory's checkout), so a remote lookup or push
+#: could act against an entirely different repository/configuration than
+#: the one actually checked out. Mirrors
+#: `tools/coverage_guided_selection/ancestor_resolution.py`'s
+#: `_REPOSITORY_CONTEXT_ENV`/`scrubbed_git_env()` (kept as an independent
+#: copy by that module's own documented convention -- each consumer stays
+#: dependency-free rather than importing a sibling tool module).
+_REPOSITORY_CONTEXT_ENV = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+})
+
+
+def _scrubbed_git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in list(env):
+        upper = name.upper()
+        if (
+            upper in _REPOSITORY_CONTEXT_ENV
+            or upper.startswith("GIT_CONFIG_KEY_")
+            or upper.startswith("GIT_CONFIG_VALUE_")
+        ):
+            env.pop(name, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
 
 @dataclass(frozen=True)
 class PullRequestHead:
@@ -93,6 +156,29 @@ class PullRequestHead:
     head_oid: str
     same_repo: bool
     state: str  # "OPEN", "CLOSED", or "MERGED" (gh's own GraphQL enum casing)
+    merged_at: str  # ISO8601 (gh's own format, lexically sortable); "" if never merged
+
+
+def _newest_merged_heads(pull_requests: list[PullRequestHead]) -> dict[str, str]:
+    """Same-repo, MERGED PRs' head branch name -> the **newest** (by
+    ``merged_at``) such PR's head OID.
+
+    A branch name can be reused across multiple, separately-merged PRs over
+    a repo's history (delete, recreate, merge again). Picking an arbitrary
+    one (e.g. whichever `gh pr list` happens to return first) risks
+    comparing a still-present branch's current OID against a STALE older
+    merged PR's OID instead of the most recent one, so a genuinely
+    up-to-date, safely-deletable branch would never match and would be
+    silently skipped forever.
+    """
+    newest: dict[str, tuple[str, str]] = {}  # branch -> (merged_at, head_oid)
+    for pr in pull_requests:
+        if not (pr.same_repo and pr.state == "MERGED" and pr.head_oid):
+            continue
+        current = newest.get(pr.branch)
+        if current is None or pr.merged_at > current[0]:
+            newest[pr.branch] = (pr.merged_at, pr.head_oid)
+    return {branch: head_oid for branch, (_merged_at, head_oid) in newest.items()}
 
 
 def plan_sweep(
@@ -183,7 +269,7 @@ def _pull_requests(repo: str, limit: int) -> list[PullRequestHead]:
     rows = _gh_json(
         [
             "pr", "list", "--repo", repo, "--state", "all",
-            "--json", "headRefName,headRefOid,isCrossRepository,state",
+            "--json", "headRefName,headRefOid,isCrossRepository,state,mergedAt",
             "--limit", str(limit),
         ]
     )
@@ -199,6 +285,7 @@ def _pull_requests(repo: str, limit: int) -> list[PullRequestHead]:
             head_oid=row["headRefOid"],
             same_repo=not row["isCrossRepository"],
             state=row["state"],
+            merged_at=row.get("mergedAt") or "",
         )
         for row in rows
     ]
@@ -243,19 +330,51 @@ def _remote_branches(repo: str, limit: int) -> dict[str, str]:
     return branches
 
 
+GITHUB_HOST = "github.com"
+_SCP_STYLE_RE = re.compile(r"^(?:[^@]+@)?(?P<host>[^:/]+):(?P<path>.+)$")
+
+
+def _parse_git_remote_owner_repo(url: str) -> tuple[str, str] | None:
+    """Return ``(host, "owner/repo")`` for a git remote URL (https, ssh://,
+    or scp-style ``git@host:owner/repo``), or ``None`` if it can't be
+    parsed. Always an exact host + exact two-segment path -- never a mere
+    suffix match, which a URL like ``https://example.invalid/owner/repo``
+    would otherwise pass against a careless ``str.endswith`` check."""
+    url = url.strip()
+    if url.endswith(".git"):
+        url = url[: -len(".git")]
+    scp_match = _SCP_STYLE_RE.match(url) if "://" not in url else None
+    if scp_match:
+        host = scp_match.group("host")
+        path = scp_match.group("path")
+    else:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or ""
+        path = parsed.path
+    segments = [segment for segment in path.strip("/").split("/") if segment]
+    if not host or len(segments) != 2:
+        return None
+    return host.lower(), f"{segments[0]}/{segments[1]}"
+
+
 def _verify_remote_matches_repo(remote: str, repo: str) -> None:
     """Refuse to push a deletion through a local ``remote`` that isn't
     actually this ``repo`` -- a mismatched local checkout (e.g. ``--repo``
     pointed elsewhere than the directory this script happens to run in)
-    must never result in deleting branches on the wrong repository."""
-    out = subprocess.run(["git", "remote", "get-url", remote], capture_output=True, text=True)
+    must never result in deleting branches on the wrong repository. Checks
+    both the host (must be ``github.com``) and an EXACT owner/repo path --
+    never a suffix match, which a lookalike host would otherwise pass."""
+    out = subprocess.run(
+        ["git", "remote", "get-url", remote], capture_output=True, text=True, env=_scrubbed_git_env()
+    )
     if out.returncode != 0:
         raise GhCallFailed(f"git remote get-url {remote} failed: {out.stderr.strip()}")
-    url = out.stdout.strip().rstrip("/")
-    if url.endswith(".git"):
-        url = url[: -len(".git")]
-    normalized = url.replace(":", "/").lower()
-    if not normalized.endswith(f"/{repo.lower()}"):
+    url = out.stdout.strip()
+    parsed = _parse_git_remote_owner_repo(url)
+    if parsed is None:
+        raise GhCallFailed(f"git remote '{remote}' ({url}) could not be parsed as an owner/repo URL -- refusing to push deletions.")
+    host, owner_repo = parsed
+    if host != GITHUB_HOST or owner_repo != repo.lower():
         raise GhCallFailed(
             f"git remote '{remote}' ({url}) does not match --repo {repo} -- refusing to "
             "push deletions against a mismatched local checkout."
@@ -273,15 +392,22 @@ def _delete_branch(remote: str, branch: str, expected_oid: str) -> bool:
         ["git", "push", remote, f"--force-with-lease={lease}", f":refs/heads/{branch}"],
         capture_output=True,
         text=True,
+        env=_scrubbed_git_env(),
     )
     if out.returncode == 0:
         print(f"[OK] deleted {branch}")
         return True
     combined = out.stdout + out.stderr
-    if "remote ref does not exist" in combined or "unable to delete" in combined and "does not exist" in combined:
+    if "remote ref does not exist" in combined or ("unable to delete" in combined and "does not exist" in combined):
         print(f"[OK] {branch} already gone -- nothing to do.")
         return True
-    if "stale info" in combined or "rejected" in combined:
+    # Only the lease's own stale-info rejection is a safe "someone else
+    # already moved this ref" outcome. ANY other rejection (a protected-
+    # branch hook declining the delete, a permission error reported as a
+    # push rejection, etc.) is a real failure and must not be swallowed --
+    # treating every "rejected" as a skip would let the branch silently
+    # survive while this job still reports success.
+    if "(stale info)" in combined:
         print(f"[SKIP] {branch} lease rejected (moved since planning) -- not deleting.")
         return True
     print(f"[ERROR] failed to delete {branch}: {combined.strip()}", file=sys.stderr)
@@ -347,6 +473,29 @@ def _file_or_update_tracking_issue(repo: str, flagged: list[str]) -> bool:
     return True
 
 
+def _clear_tracking_issue(repo: str) -> bool:
+    """Close the existing no-PR-record tracking issue, if any, when a run
+    finds nothing left to flag -- otherwise an already-filed issue's branch
+    list silently goes stale forever (the branches it named may since have
+    been deleted or gained a real PR)."""
+    existing = _existing_tracking_issue(repo)
+    if existing is None:
+        return True
+    out = subprocess.run(
+        [
+            "gh", "issue", "close", str(existing), "--repo", repo,
+            "--comment", "No branches currently match the no-PR-record criteria -- closing (the stale-branch sweep re-files/reopens this automatically if that changes).",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        print(f"[ERROR] failed to close tracking issue #{existing}: {out.stderr.strip()}", file=sys.stderr)
+        return False
+    print(f"[OK] closed tracking issue #{existing} (nothing left to flag)")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", default=DEFAULT_REPO, help=f"owner/name to sweep (default {DEFAULT_REPO})")
@@ -375,11 +524,7 @@ def main() -> int:
         print(f"[ERROR] {error}", file=sys.stderr)
         return 1
 
-    merged_heads = {
-        pr.branch: pr.head_oid
-        for pr in pull_requests
-        if pr.same_repo and pr.state == "MERGED" and pr.head_oid
-    }
+    merged_heads = _newest_merged_heads(pull_requests)
     open_branch_names = {pr.branch for pr in pull_requests if pr.state == "OPEN"}
     # "Has any PR record at all" must still count a fork-originated PR (its
     # branch isn't deletable here -- it isn't this repo's branch -- but a
@@ -411,8 +556,8 @@ def main() -> int:
     if flagged:
         if not _file_or_update_tracking_issue(args.repo, flagged):
             failed = True
-    else:
-        print("[OK] nothing to flag for triage.")
+    elif not _clear_tracking_issue(args.repo):
+        failed = True
 
     return 1 if failed else 0
 

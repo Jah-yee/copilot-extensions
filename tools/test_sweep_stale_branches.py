@@ -37,8 +37,11 @@ def sweep():
     return _load_sweep()
 
 
-def _pr(sweep, branch, head_oid, *, same_repo=True, state="MERGED"):
-    return sweep.PullRequestHead(branch=branch, head_oid=head_oid, same_repo=same_repo, state=state)
+def _pr(sweep, branch, head_oid, *, same_repo=True, state="MERGED", merged_at="2026-01-01T00:00:00Z"):
+    return sweep.PullRequestHead(
+        branch=branch, head_oid=head_oid, same_repo=same_repo, state=state,
+        merged_at=merged_at if state == "MERGED" else "",
+    )
 
 
 # --- plan_sweep (pure decision logic) ---------------------------------
@@ -187,6 +190,45 @@ def test_pull_requests_raises_truncated_result_when_row_count_hits_the_limit(swe
         sweep._pull_requests("owner/repo", limit=3)
 
 
+def test_pull_requests_preserves_merged_at(sweep, monkeypatch):
+    rows = [
+        {"headRefName": "pr/merged", "headRefOid": "sha1", "isCrossRepository": False, "state": "MERGED", "mergedAt": "2026-02-01T00:00:00Z"},
+        {"headRefName": "pr/open", "headRefOid": "sha2", "isCrossRepository": False, "state": "OPEN", "mergedAt": None},
+    ]
+    monkeypatch.setattr(sweep, "_gh_json", lambda args: rows)
+
+    prs = sweep._pull_requests("owner/repo", limit=100)
+
+    assert {p.branch: p.merged_at for p in prs} == {"pr/merged": "2026-02-01T00:00:00Z", "pr/open": ""}
+
+
+# --- _newest_merged_heads -------------------------------------------------
+
+
+def test_newest_merged_heads_keeps_the_most_recently_merged_pr_for_a_reused_branch_name(sweep):
+    # Regression: a branch name reused across two separately-merged PRs
+    # over time must resolve to the NEWEST merge's head OID, not whichever
+    # happened to come first in `gh pr list`'s own ordering.
+    pull_requests = [
+        sweep.PullRequestHead(branch="pr/reused", head_oid="old-sha", same_repo=True, state="MERGED", merged_at="2026-01-01T00:00:00Z"),
+        sweep.PullRequestHead(branch="pr/reused", head_oid="new-sha", same_repo=True, state="MERGED", merged_at="2026-02-01T00:00:00Z"),
+    ]
+
+    merged_heads = sweep._newest_merged_heads(pull_requests)
+
+    assert merged_heads == {"pr/reused": "new-sha"}
+
+
+def test_newest_merged_heads_excludes_cross_repo_and_non_merged_prs(sweep):
+    pull_requests = [
+        sweep.PullRequestHead(branch="pr/fork", head_oid="sha1", same_repo=False, state="MERGED", merged_at="2026-01-01T00:00:00Z"),
+        sweep.PullRequestHead(branch="pr/open", head_oid="sha2", same_repo=True, state="OPEN", merged_at=""),
+        sweep.PullRequestHead(branch="pr/closed", head_oid="sha3", same_repo=True, state="CLOSED", merged_at=""),
+    ]
+
+    assert sweep._newest_merged_heads(pull_requests) == {}
+
+
 # --- _remote_branches ----------------------------------------------------
 
 
@@ -275,6 +317,41 @@ def test_verify_remote_matches_repo_rejects_a_mismatched_remote(sweep, monkeypat
         sweep._verify_remote_matches_repo("origin", "owner/repo")
 
 
+def test_verify_remote_matches_repo_rejects_a_lookalike_host(sweep, monkeypatch):
+    # Regression: a careless suffix-only check would let
+    # "https://example.invalid/owner/repo" pass because its PATH happens to
+    # end with "/owner/repo" -- the host must be checked too.
+    class _Result:
+        returncode = 0
+        stdout = "https://example.invalid/owner/repo.git\n"
+        stderr = ""
+
+    monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **k: _Result())
+
+    with pytest.raises(sweep.GhCallFailed):
+        sweep._verify_remote_matches_repo("origin", "owner/repo")
+
+
+def test_verify_remote_matches_repo_scrubs_git_env(sweep, monkeypatch):
+    captured_env = {}
+
+    class _Result:
+        returncode = 0
+        stdout = "https://github.com/owner/repo.git\n"
+        stderr = ""
+
+    def _fake_run(*_args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _Result()
+
+    monkeypatch.setattr(sweep.subprocess, "run", _fake_run)
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+
+    sweep._verify_remote_matches_repo("origin", "owner/repo")
+
+    assert "GIT_DIR" not in captured_env
+
+
 # --- _delete_branch (atomic compare-and-delete lease) -------------------
 
 
@@ -297,6 +374,27 @@ def test_delete_branch_uses_force_with_lease_with_the_expected_oid(sweep, monkey
     assert ":refs/heads/pr/done" in captured_args[0]
 
 
+def test_delete_branch_scrubs_git_env(sweep, monkeypatch):
+    captured_env = {}
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(*_args, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return _Result()
+
+    monkeypatch.setattr(sweep.subprocess, "run", _fake_run)
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+
+    sweep._delete_branch("origin", "pr/done", "expected-sha")
+
+    assert "GIT_WORK_TREE" not in captured_env
+
+
+
 def test_delete_branch_treats_a_rejected_lease_as_a_safe_skip(sweep, monkeypatch):
     class _Rejected:
         returncode = 1
@@ -306,6 +404,22 @@ def test_delete_branch_treats_a_rejected_lease_as_a_safe_skip(sweep, monkeypatch
     monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **k: _Rejected())
 
     assert sweep._delete_branch("origin", "pr/moved", "old-sha") is True
+
+
+def test_delete_branch_treats_a_non_lease_rejection_as_a_real_failure(sweep, monkeypatch, capsys):
+    # Regression: a protected-branch hook declining the delete, or any other
+    # non-lease rejection, must NOT be swallowed as a safe skip just because
+    # the word "rejected" appears -- only the lease's own "(stale info)"
+    # marker means "someone else already moved this ref".
+    class _HookDeclined:
+        returncode = 1
+        stdout = ""
+        stderr = "! [remote rejected] refs/heads/pr/blocked (protected branch hook declined)"
+
+    monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **k: _HookDeclined())
+
+    assert sweep._delete_branch("origin", "pr/blocked", "expected-sha") is False
+    assert "failed to delete" in capsys.readouterr().err
 
 
 def test_delete_branch_treats_already_gone_as_success(sweep, monkeypatch):
@@ -329,6 +443,53 @@ def test_delete_branch_reports_failure_on_a_real_error(sweep, monkeypatch, capsy
 
     assert sweep._delete_branch("origin", "pr/blocked", "expected-sha") is False
     assert "failed to delete" in capsys.readouterr().err
+
+
+# --- _clear_tracking_issue -------------------------------------------------
+
+
+def test_clear_tracking_issue_is_a_noop_when_none_exists(sweep, monkeypatch):
+    monkeypatch.setattr(sweep, "_existing_tracking_issue", lambda repo: None)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("must not call gh issue close when no tracking issue exists")
+
+    monkeypatch.setattr(sweep.subprocess, "run", _boom)
+
+    assert sweep._clear_tracking_issue("owner/repo") is True
+
+
+def test_clear_tracking_issue_closes_an_existing_issue(sweep, monkeypatch):
+    captured_args = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args, **_kwargs):
+        captured_args.append(args)
+        return _Result()
+
+    monkeypatch.setattr(sweep, "_existing_tracking_issue", lambda repo: 42)
+    monkeypatch.setattr(sweep.subprocess, "run", _fake_run)
+
+    assert sweep._clear_tracking_issue("owner/repo") is True
+    assert captured_args[0][:3] == ["gh", "issue", "close"]
+    assert "42" in captured_args[0]
+
+
+def test_clear_tracking_issue_reports_failure_on_a_real_error(sweep, monkeypatch, capsys):
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "some gh error"
+
+    monkeypatch.setattr(sweep, "_existing_tracking_issue", lambda repo: 42)
+    monkeypatch.setattr(sweep.subprocess, "run", lambda *a, **k: _Failed())
+
+    assert sweep._clear_tracking_issue("owner/repo") is False
+    assert "failed to close" in capsys.readouterr().err
 
 
 # --- _gh_json ------------------------------------------------------------
@@ -388,7 +549,7 @@ def test_main_never_deletes_a_branch_whose_pr_is_merely_open(sweep, monkeypatch)
         raise AssertionError("must never delete a branch backing a still-open PR")
 
     monkeypatch.setattr(sweep, "_delete_branch", _boom)
-    monkeypatch.setattr(sweep, "_file_or_update_tracking_issue", lambda repo, flagged: True)
+    monkeypatch.setattr(sweep, "_clear_tracking_issue", lambda repo: True)
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--execute"])
 
     assert sweep.main() == 0
@@ -449,9 +610,23 @@ def test_main_execute_files_tracking_issue_only_when_something_is_flagged(sweep,
     monkeypatch.setattr(sweep, "_verify_remote_matches_repo", lambda remote, repo: None)
 
     def _boom(*_args, **_kwargs):
-        raise AssertionError("must not file a tracking issue when nothing is flagged")
+        raise AssertionError("must not file a new tracking issue when nothing is flagged")
 
     monkeypatch.setattr(sweep, "_file_or_update_tracking_issue", _boom)
+    monkeypatch.setattr(sweep, "_clear_tracking_issue", lambda repo: True)
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--execute"])
 
     assert sweep.main() == 0
+
+
+def test_main_execute_returns_nonzero_when_clearing_the_tracking_issue_fails(sweep, monkeypatch):
+    # Regression: an empty flagged list must still propagate a real failure
+    # from clearing the existing tracking issue, not silently report success.
+    monkeypatch.setattr(sweep, "_pull_requests", lambda repo, limit: [])
+    monkeypatch.setattr(sweep, "_remote_branches", lambda repo, limit: {"main": "sha1"})
+    monkeypatch.setattr(sweep, "_default_branch", lambda repo: "main")
+    monkeypatch.setattr(sweep, "_verify_remote_matches_repo", lambda remote, repo: None)
+    monkeypatch.setattr(sweep, "_clear_tracking_issue", lambda repo: False)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--execute"])
+
+    assert sweep.main() == 1

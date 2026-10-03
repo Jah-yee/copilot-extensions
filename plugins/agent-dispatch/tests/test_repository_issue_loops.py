@@ -936,6 +936,50 @@ def test_repository_issue_loop_stamps_evaluator_ref():
     assert result["created"][0]["evaluator_ref"] == "review-loop"
 
 
+def test_global_backlog_triager_drives_through_the_generic_issue_loop(tmp_path):
+    import json as _json
+
+    path = tmp_path / "triager.json"
+    path.write_text(
+        _json.dumps(
+            {
+                "extends": "global:backlog-triager",
+                "name": "triage-backlog",
+                "repo": "example/project",
+                "source": "triage-backlog",
+                "cadence_seconds": 3600,
+                "task_label": "backlog-triage",
+                "forge": {"provider": "github", "producer_login": "triage-bot"},
+                "reservation": {"label": "triage-reserved", "comment": True},
+                "pool": {
+                    "max_active_processes": 1,
+                    "body": {"agent": "triage-worker"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    declarations = read_declaration_file_set(path)
+    source = next(d for d in declarations if d.name == "triage-backlog-source")
+    config = source.spec["repository_issue_loop"]
+    provider = FakeProvider([_issue(17, labels=("bug", "needs-triage"))])
+
+    result = run_tick(
+        FakeClient(),
+        config,
+        provider=provider,
+        clock=lambda: 10_000,
+    )
+
+    task = result["created"][0]
+    assert provider.list_calls == 1
+    assert task["require_verification"] is True
+    assert task["evaluator_ref"] == "backlog-triager"
+    assert "classify it" in task["prompt"]
+    assert "tracked effort work" in task["prompt"]
+
+
 def test_proposed_task_retries_transient_approve_failure():
     provider = FakeProvider([_issue(1)])
     client = FakeClient(fail_approve_once=True)

@@ -101,6 +101,22 @@ GLOBAL_RECIPES: dict[str, Mapping[str, Any]] = {
         "worker_identity": "goal-driven",
         "pool": {"body": {"type": "headless"}},
     },
+    # Shared/global half only: the acting shape ("classify, confirm
+    # legitimacy, assign priority, attach the repo's own triage markers, and
+    # ensure an effort link exists") is generic, so the shipped recipe fixes
+    # the identity plus `require_verification: true`. The *exact* label/marker
+    # schema and what counts as "assigned to an effort" are repo-specific, so
+    # a consuming repo supplies its own trusted evaluator registration under
+    # this opaque evaluator_ref rather than this package hardcoding one repo's
+    # convention into every adopter.
+    "backlog-triager": {
+        "kind": "repository-issue-loop",
+        "exclude_labels": list(_COMMON_EXCLUDE_LABELS),
+        "worker_identity": "backlog-triager",
+        "require_verification": True,
+        "evaluator_ref": "backlog-triager",
+        "pool": {"body": {"type": "headless"}},
+    },
     "reviewer": {
         "kind": "reviewer-loop",
         "pool": {"body": {"type": "headless", "charter": _REVIEWER_CHARTER}},

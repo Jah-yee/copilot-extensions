@@ -273,6 +273,183 @@ def test_resolve_vendored_libs_missing_canonical_dir_raises(fake_repo: Path):
         bpa.resolve_vendored_libs(plugin_dir)
 
 
+# --- find_in_tree_lib_sources / in-tree vendored-copy discovery -----------
+#
+# Regression: the ONLY shape discoverable before this fix was the escaping
+# dev-branch `uv`-editable form. An ordinary in-tree vendored copy (no
+# `editable` marker, path resolves WITHIN the consumer's own `libs/`) is a
+# separate, real, already-shipped shape some plugins use permanently (e.g.
+# agent-worktrees' own `libs/plugin-resolve`), and is the ONLY shape left
+# once `materialize_main.py` has rewritten every escaping reference into
+# exactly this local form -- the real state promotion actually builds
+# against.
+
+
+def _write_in_tree_pyproject(path: Path, *, sources: dict[str, str]) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    lines = ['[project]', 'name = "whatever"', 'version = "0.1.0"', "", "[tool.uv.sources]"]
+    for name, rel in sources.items():
+        lines.append(f'{name} = {{ path = "{rel}" }}')
+    (path / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _seed_in_tree_lib(consumer_dir: Path, lib: str) -> Path:
+    """A `consumer_dir/libs/<lib>` in-tree vendored copy that passes
+    `_validate_in_tree_lib_dir` on its own."""
+    lib_dir = consumer_dir / "libs" / lib
+    pkg = lib.replace("-", "_")
+    (lib_dir / "src" / pkg).mkdir(parents=True, exist_ok=True)
+    (lib_dir / "src" / pkg / "__init__.py").write_text("", encoding="utf-8")
+    _write_pyproject(lib_dir)
+    return lib_dir
+
+
+def test_find_in_tree_lib_sources_direct(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_dir = _seed_in_tree_lib(plugin_dir, "widget")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
+
+    found = bpa.find_in_tree_lib_sources(plugin_dir)
+
+    assert found == [("demo-widget", "libs/widget", "widget")]
+    assert (plugin_dir / "libs" / "widget").resolve() == lib_dir.resolve()
+
+
+def test_find_in_tree_lib_sources_ignores_escaping_entries(fake_repo: Path):
+    # An escaping entry is find_uv_editable_refs's own job -- this function
+    # must not also report it, or resolve_vendored_libs would validate it
+    # twice under two different (incompatible) acceptance rules.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _seed_valid_lib(fake_repo, "widget")
+    _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
+
+    assert bpa.find_in_tree_lib_sources(plugin_dir) == []
+
+
+def test_resolve_vendored_libs_discovers_in_tree_only_consumer(fake_repo: Path):
+    # Simulates a plugin that vendors its libs in-tree by design (e.g.
+    # agent-worktrees), with no escaping `uv`-editable reference at all.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_dir = _seed_in_tree_lib(plugin_dir, "widget")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
+
+    libs = bpa.resolve_vendored_libs(plugin_dir)
+
+    assert libs == [("widget", lib_dir.resolve())]
+
+
+def test_resolve_vendored_libs_discovers_post_materialization_form(fake_repo: Path):
+    # Simulates the REAL state build_python_artifacts actually runs against
+    # during promotion: materialize_main.py has already rewritten the
+    # escaping dev-branch reference into the local, non-editable
+    # `{ path = "libs/<lib>" }` form. Before this fix, resolve_vendored_libs
+    # would silently discover NOTHING here.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_dir = _seed_in_tree_lib(plugin_dir, "widget")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
+
+    libs = bpa.resolve_vendored_libs(plugin_dir)
+
+    assert libs == [("widget", lib_dir.resolve())]
+
+
+def test_resolve_vendored_libs_in_tree_recurses_nested(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_a = _seed_in_tree_lib(plugin_dir, "a")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-a": "libs/a"})
+    lib_b = _seed_in_tree_lib(lib_a, "b")
+    _write_in_tree_pyproject(lib_a, sources={"demo-b": "libs/b"})
+
+    libs = dict(bpa.resolve_vendored_libs(plugin_dir))
+
+    assert set(libs) == {"a", "b"}
+    assert libs["b"] == lib_b.resolve()
+
+
+def test_resolve_vendored_libs_sibling_cross_reference(fake_repo: Path):
+    # Regression (found via a real smoke test against agent-worktrees):
+    # plugins/agent-worktrees/libs/plugin-activation depends on its SIBLING
+    # plugins/agent-worktrees/libs/dropin-registry via a plain
+    # `{ path = "../dropin-registry" }` entry -- no `editable` marker, and
+    # escaping plugin-activation's OWN root (though not the plugin's).
+    # Before this fix, uv_editable_problems (applied to every recursed-into
+    # node) wrongly rejected this as a broken top-level canonical
+    # reference missing `editable = true`.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_a = _seed_in_tree_lib(plugin_dir, "a")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-a": "libs/a"})
+    lib_b = _seed_in_tree_lib(plugin_dir, "b")  # sibling of lib_a, same libs/ level
+    _write_in_tree_pyproject(lib_a, sources={"demo-b": "../b"})
+
+    libs = dict(bpa.resolve_vendored_libs(plugin_dir))
+
+    assert set(libs) == {"a", "b"}
+    assert libs["b"] == lib_b.resolve()
+
+
+def test_resolve_vendored_libs_in_tree_missing_src_raises(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_dir = plugin_dir / "libs" / "widget"
+    lib_dir.mkdir(parents=True)
+    _write_pyproject(lib_dir)  # no src/ directory
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
+def test_resolve_vendored_libs_in_tree_symlink_raises(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    real_lib = _seed_in_tree_lib(fake_repo, "widget")  # elsewhere, irrelevant path
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    link = plugin_dir / "libs" / "widget"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(real_lib, target_is_directory=True)
+        link.resolve(strict=True)
+    except OSError:
+        # Either symlink creation isn't permitted in this environment, or
+        # (some sandboxed/locked-down hosts) path resolution THROUGH a
+        # freshly created symlink is itself blocked -- both are
+        # environment limitations unrelated to the behavior under test.
+        pytest.skip("symlinks are not fully usable in this environment")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
+# --- read_project_version / version correspondence -------------------------
+
+
+def test_read_project_version(fake_repo: Path):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_pyproject(plugin_dir)
+    assert bpa.read_project_version(plugin_dir) == "0.1.0"
+
+
+def test_read_project_version_missing_raises(tmp_path: Path):
+    d = tmp_path / "demo"
+    d.mkdir()
+    (d / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.read_project_version(d)
+
+
+def test_assert_version_corresponds_accepts_hyphen_normalization():
+    # No exception means acceptance.
+    bpa._assert_version_corresponds(
+        raw_version="0.4.1-dev3", wheel_version="0.4.1.dev3", label="demo"
+    )
+
+
+def test_assert_version_corresponds_rejects_real_mismatch():
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa._assert_version_corresponds(
+            raw_version="0.4.1-dev3", wheel_version="9.9.9", label="demo"
+        )
+
+
 # --- directory_content_hash / compute_payload_hash -------------------------
 
 
@@ -548,6 +725,67 @@ def test_build_plugin_artifacts_artifact_id_changes_with_wheel_bytes(
     assert manifest1["payload_hash"] == manifest2["payload_hash"]
     assert manifest1["wheels"][0]["sha256"] != manifest2["wheels"][0]["sha256"]
     assert manifest1["artifact_id"] != manifest2["artifact_id"]
+
+
+def test_build_plugin_artifacts_rejects_out_dir_nested_in_source(
+    fake_repo: Path,
+):
+    # Regression: an out_dir nested under a hashed source directory would
+    # be created and populated with wheels/manifest BEFORE a retry's own
+    # payload_hash computation, folding a prior run's own output into its
+    # own identity.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_pyproject(plugin_dir)
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.build_plugin_artifacts("demo", out_dir=plugin_dir / "artifacts")
+
+
+def test_build_plugin_artifacts_preserves_raw_version(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Regression: the manifest's version (and filename) must be the raw
+    # declared version ("0.4.1-dev3"-shaped), not the wheel's PEP 440
+    # normalization ("0.4.1.dev3"), so it exactly matches the
+    # <plugin>-v<version> release-tag identity this effort documents.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.4.1-dev3"\n', encoding="utf-8"
+    )
+    out_dir = fake_repo / "dist"
+
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+        out.mkdir(parents=True, exist_ok=True)
+        wheel = out / "demo-0.4.1.dev3-py3-none-any.whl"
+        _make_fake_wheel(wheel, generator="setuptools (84.1.0)")
+        return wheel
+
+    monkeypatch.setattr(bpa, "build_wheel", fake_build_wheel)
+    manifest = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+
+    assert manifest["version"] == "0.4.1-dev3"
+    assert (out_dir / "demo-0.4.1-dev3-manifest.json").is_file()
+
+
+def test_build_plugin_artifacts_rejects_real_version_mismatch(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.4.1-dev3"\n', encoding="utf-8"
+    )
+    out_dir = fake_repo / "dist"
+
+    def fake_build_wheel(source_dir: Path, out: Path, *, python=None):  # noqa: ARG001
+        out.mkdir(parents=True, exist_ok=True)
+        wheel = out / "demo-9.9.9-py3-none-any.whl"
+        _make_fake_wheel(wheel, generator="setuptools (84.1.0)")
+        return wheel
+
+    monkeypatch.setattr(bpa, "build_wheel", fake_build_wheel)
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.build_plugin_artifacts("demo", out_dir=out_dir)
 
 
 def test_build_plugin_artifacts_unknown_plugin_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

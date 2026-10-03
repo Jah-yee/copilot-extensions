@@ -456,6 +456,41 @@ win grows with build complexity.
   new, named Open Design Question above rather than solved speculatively,
   matching this effort's own established pattern for genuinely deferred
   work.
+- A fifth review round found the most substantial gap yet, confirmed by a
+  direct smoke test against `agent-worktrees` (not just `agent-bridge`):
+  discovery only ever looked for the dev-branch LIVE, escaping,
+  `editable = true` canonical-reference form -- so it found nothing at all
+  for a plugin that vendors libs in-tree by design, AND would find nothing
+  for ANY plugin once promotion's own `materialize_main.py` has rewritten
+  every live reference into exactly that in-tree form (the actual state
+  this tool runs against during real promotion). Fixed by classifying each
+  `[tool.uv.sources]` entry by its `editable` marker rather than by whether
+  it escapes the immediate consumer's own directory: an `editable = true`
+  entry is the dev-branch live form (`find_uv_editable_refs`, validated
+  against the real top-level plugin only); anything else whose path
+  resolves into a `libs/<lib>` directory is an in-tree vendored copy
+  (`find_in_tree_lib_sources`, validated with lighter, direction-neutral
+  structural checks). The smoke test against `agent-worktrees` additionally
+  surfaced a THIRD real shape neither form alone covered: a vendored lib
+  cross-referencing a SIBLING vendored lib one level up without
+  `editable = true` (`plugins/agent-worktrees/libs/plugin-activation`
+  depending on `../dropin-registry`) -- resolved by applying
+  `uv_editable_problems`'s strict escaping-form validation ONLY to the
+  originally requested top-level plugin, never while recursing into an
+  already-discovered vendored lib's own manifest, where a sibling in-tree
+  cross-reference is legitimate. Two more real, lower-severity findings
+  from this round fixed in the same pass: an out-of-tree `--out-dir` nested
+  inside a hashed source directory would fold a prior run's own output
+  into the NEXT run's payload hash (now rejected explicitly before
+  building); and the manifest's `version` field used the wheel's PEP
+  440-normalized spelling (`"0.4.1.dev3"`) instead of the raw declared one
+  (`"0.4.1-dev3"`), which would never exactly match the `<plugin>-v<version>`
+  release-tag identity this effort documents (now reads the raw version
+  from `pyproject.toml` directly, with a sanity check that it still
+  corresponds to the wheel's own normalized version). 49 unit tests now
+  (`tools/test_build_python_artifacts.py`), including one derived directly
+  from the real `agent-worktrees` cross-reference bug the smoke test found;
+  re-verified `agent-bridge` and `agent-worktrees` both build correctly.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Build promotion-time, content-addressed Python artifacts for one plugin:
 its own wheel plus a wheel for every vendored `libs/<lib>` dependency it
-resolves through the `uv`-editable canonical-reference form (see
-`uv_editable_ref.find_uv_editable_refs`), recursing into a vendored lib's own
-nested references the same way `materialize_main.py` does. This is Phase 2
+needs, discovered recursively in BOTH shapes a consumer's `pyproject.toml`
+can carry: the dev-branch live, escaping `uv`-editable canonical-reference
+form (`uv_editable_ref.find_uv_editable_refs`) and an ordinary, non-escaping
+in-tree vendored copy (`find_in_tree_lib_sources`) -- the form every
+reference becomes once `materialize_main.py` has run, which is the real
+state this tool actually builds against during promotion. This is Phase 2
 of the `governed-python-artifact-promotion` effort
 (`efforts/active/governed-python-artifact-promotion/README.md`) -- the first
 implementation slice: wheel + manifest generation. Publication (a GitHub
@@ -58,6 +61,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import uv_editable_ref as uer  # noqa: E402
 
+try:  # tomllib is stdlib on 3.11+; tomli backports it for this repo's
+    # 3.10 support floor -- mirrors uv_editable_ref's own identical fallback.
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on 3.10
+    import tomli as tomllib
+
 REPO = Path(__file__).resolve().parent.parent
 PLUGINS_DIR = REPO / "plugins"
 LIBS_DIR = REPO / "libs"
@@ -79,42 +88,165 @@ class ArtifactBuildError(Exception):
     must fail closed rather than emit a manifest describing a guess."""
 
 
+def _read_sources_table(consumer_dir: Path) -> dict:
+    """The raw ``[tool.uv.sources]`` table from ``consumer_dir``'s
+    `pyproject.toml` (``{}`` if the file is absent or symlinked -- a valid
+    no-op, mirroring `uv_editable_ref.find_uv_editable_refs`'s own identical
+    cases). Raises `ArtifactBuildError` when the manifest exists but cannot
+    be read/parsed, or the table is structurally malformed, rather than
+    silently returning no entries."""
+    pyproject = consumer_dir / "pyproject.toml"
+    if pyproject.is_symlink() or not pyproject.is_file():
+        return {}
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ArtifactBuildError(f"{pyproject}: could not read/parse: {exc}") from exc
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    if not isinstance(sources, dict):
+        raise ArtifactBuildError(f"{pyproject}: [tool.uv.sources] is not a table")
+    return sources
+
+
+def find_in_tree_lib_sources(consumer_dir: Path) -> list[tuple[str, str, str]]:
+    """Every NON-editable ``[tool.uv.sources]`` entry in ``consumer_dir``'s
+    `pyproject.toml` whose `path` resolves to a directory literally named
+    `libs/<lib>` -- an ordinary, already-vendored/materialized copy, the
+    complement of `uv_editable_ref.find_uv_editable_refs`'s editable-only
+    scope (an entry is classified by its `editable` marker, not by whether
+    it escapes ``consumer_dir``'s own tree): this covers BOTH a plugin's
+    own `libs/<lib>` (nested within its root) AND a vendored lib
+    cross-referencing a SIBLING vendored lib one level up (e.g.
+    `plugins/agent-worktrees/libs/plugin-activation` depending on
+    `../dropin-registry`, which escapes `plugin-activation`'s own root but
+    is still an ordinary frozen copy, not a dev-branch live reference).
+    This is the ONLY shape left to discover once promotion's own
+    `materialize_main.py` has rewritten every plugin's live editable
+    reference into exactly this local, in-tree form; some plugins (e.g.
+    `agent-worktrees`) also use it permanently, by design, even on `dev`.
+    Returns ``(name, raw_path, lib)`` tuples."""
+    sources = _read_sources_table(consumer_dir)
+    out: list[tuple[str, str, str]] = []
+    for name, entry in sources.items():
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        if entry.get("editable") is True:
+            continue  # the dev-branch live canonical form is
+            # find_uv_editable_refs's own job -- never double-classified.
+        raw_path = entry["path"]
+        if not isinstance(raw_path, str):
+            raise ArtifactBuildError(
+                f"{consumer_dir}: [tool.uv.sources] {name!r}'s path is not a string"
+            )
+        candidate = (consumer_dir / raw_path).resolve()
+        if candidate.parent.name != "libs":
+            continue
+        out.append((name, raw_path, candidate.name))
+    return out
+
+
+def _validate_in_tree_lib_dir(label: str, unresolved: Path) -> Path:
+    """Structural acceptance check for an in-tree vendored `libs/<lib>`
+    directory -- deliberately lighter than
+    `uv_editable_ref.uv_editable_problems` (which enforces the ESCAPING
+    dev-branch form's own requirements: `editable = true` and a path that
+    escapes the consumer root -- both of which a correct in-tree vendored
+    copy must NOT have). Still refuses a missing directory, a missing
+    `src/`/`pyproject.toml`, or a symlink, so this script can never build
+    or describe a source a real materialization would consider incomplete.
+    Takes the UNRESOLVED candidate path and checks `.is_symlink()` on it
+    directly -- `Path.resolve()` follows symlinks, so checking a path
+    that's already been resolved can never detect one; this must run
+    before resolving. Returns the resolved canonical directory."""
+    if unresolved.is_symlink():
+        raise ArtifactBuildError(f"{label}: {unresolved} is a symlink -- refusing")
+    canonical = unresolved.resolve()
+    if not canonical.is_dir():
+        raise ArtifactBuildError(f"{label}: {canonical} does not exist")
+    if not (canonical / "src").is_dir():
+        raise ArtifactBuildError(f"{label}: {canonical}/src does not exist")
+    if not (canonical / "pyproject.toml").is_file():
+        raise ArtifactBuildError(f"{label}: {canonical}/pyproject.toml is missing")
+    return canonical
+
+
 def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
-    """Every vendored lib ``consumer_dir`` needs, recursively: each
-    `[tool.uv.sources]` escaping entry (`uv_editable_ref.find_uv_editable_refs`),
-    resolved to its canonical `libs/<lib>` directory, then the same lookup
-    repeated on that lib's own `pyproject.toml` -- mirrors
-    `materialize_main.py`'s own recursion so promotion's artifact set and
-    its materialized-tree enumeration never disagree. Each discovered
-    consumer directory is validated with `uv_editable_ref.uv_editable_problems`
-    -- the same acceptance check `materialize_main.py` applies before
-    trusting a reference (rejects a missing `editable = true`, a path
-    resolving outside canonical `libs/<lib>`, a missing/incomplete
-    directory, or a symlinked tree) -- so this script can never build or
-    describe a source a real materialization would have refused. Returns
+    """Every vendored lib ``consumer_dir`` needs, recursively, discovering
+    BOTH known `[tool.uv.sources]` shapes: the dev-branch live, escaping,
+    `editable = true` canonical-reference form
+    (`uv_editable_ref.find_uv_editable_refs`) AND an ordinary, non-editable
+    in-tree vendored copy (`find_in_tree_lib_sources`, validated with
+    `_validate_in_tree_lib_dir`) -- classified by the entry's `editable`
+    marker, not by whether its path escapes the immediate consumer's own
+    directory. Discovering only the editable form would miss every plugin
+    that vendors its libs in-tree by design (e.g. `agent-worktrees`), AND
+    find nothing at all once promotion's own materialization step has
+    rewritten every reference into exactly that in-tree form -- the real
+    state this tool actually runs against during promotion.
+
+    `uv_editable_ref.uv_editable_problems` -- the same acceptance check
+    `materialize_main.py` applies -- is run ONLY against the originally
+    requested ``consumer_dir`` (the plugin itself), where its "must escape
+    to the literal top-level `libs/<lib>` with `editable = true`" rule is
+    the correct, established contract. It is deliberately NOT re-applied
+    while recursing into an already-discovered vendored lib's own
+    `pyproject.toml`: a vendored lib legitimately cross-references a
+    SIBLING vendored lib one level up without `editable = true` (e.g.
+    `plugins/agent-worktrees/libs/plugin-activation` depending on
+    `../dropin-registry`) -- a real, already-shipped pattern that
+    `uv_editable_problems` was never designed to validate and would
+    otherwise wrongly reject as a broken canonical reference.
+
+    Recurses into each discovered lib's own `pyproject.toml` the same way
+    `materialize_main.py` does, so promotion's artifact set and its
+    materialized-tree enumeration never disagree. Returns
     ``(lib_name, canonical_dir)`` pairs, each lib listed once (by name) even
     if more than one consumer along the walk references it."""
     out: dict[str, Path] = {}
     pending = [consumer_dir]
     seen_dirs: set[Path] = set()
+    is_top_level = True
     while pending:
         current = pending.pop()
         current_r = current.resolve()
         if current_r in seen_dirs:
             continue
         seen_dirs.add(current_r)
-        consumer_label = current_r.name
-        problems = uer.uv_editable_problems(consumer_label, current)
-        if problems:
-            raise ArtifactBuildError(
-                f"{current}: rejected by uv_editable_problems: {'; '.join(problems)}"
-            )
+        if is_top_level:
+            consumer_label = current_r.name
+            problems = uer.uv_editable_problems(consumer_label, current)
+            if problems:
+                raise ArtifactBuildError(
+                    f"{current}: rejected by uv_editable_problems: "
+                    f"{'; '.join(problems)}"
+                )
+            is_top_level = False
+
         try:
-            refs = uer.find_uv_editable_refs(current)
+            escaping_refs = uer.find_uv_editable_refs(current)
         except uer.ManifestUnreadable as exc:
             raise ArtifactBuildError(str(exc)) from exc
-        for _name, raw_path, lib, _editable in refs:
+        for _name, raw_path, lib, editable in escaping_refs:
+            if not editable:
+                # Not the dev-branch live canonical form -- a sibling
+                # in-tree cross-reference, handled by the in-tree branch
+                # below instead (its own `find_in_tree_lib_sources` scan
+                # of this same `current` will pick it up).
+                continue
             canonical = (current / raw_path).resolve()
+            if lib not in out:
+                out[lib] = canonical
+                pending.append(canonical)
+
+        for name, raw_path, lib in find_in_tree_lib_sources(current):
+            if not uer.is_safe_lib_name(lib):
+                raise ArtifactBuildError(
+                    f"{current}: unsafe in-tree vendored-lib name {lib!r} "
+                    f"(from {name!r})"
+                )
+            canonical = _validate_in_tree_lib_dir(
+                f"{current}:{name}", current / raw_path
+            )
             if lib not in out:
                 out[lib] = canonical
                 pending.append(canonical)
@@ -363,6 +495,46 @@ def build_wheel(source_dir: Path, out_dir: Path, *, python: str | None = None) -
         return dest
 
 
+def read_project_version(project_dir: Path) -> str:
+    """The raw, declared version string from ``project_dir``'s
+    `pyproject.toml` (`[project].version`) -- NOT a wheel's PEP 440-
+    normalized spelling (e.g. this repo declares `"0.4.1-dev3"`, which a
+    built wheel's filename normalizes to `"0.4.1.dev3"`) -- so the
+    manifest's `version` field and release-tag identity exactly match the
+    `<plugin>-v<version>` form this effort's Publication channel resolution
+    documents, rather than a normalized variant with no other exact match
+    anywhere in the repository."""
+    pyproject = project_dir / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ArtifactBuildError(f"{pyproject}: could not read/parse: {exc}") from exc
+    version = data.get("project", {}).get("version")
+    if not isinstance(version, str) or not version:
+        raise ArtifactBuildError(
+            f"{pyproject}: [project].version is missing or not a string"
+        )
+    return version
+
+
+def _assert_version_corresponds(
+    *, raw_version: str, wheel_version: str, label: str
+) -> None:
+    """A light sanity check that the wheel's PEP 440-normalized version
+    still corresponds to the raw, declared one -- this repo's one actual
+    convention is a hyphen before a pre/dev/post segment (e.g.
+    `"0.4.1-dev3"` -> `"0.4.1.dev3"`); anything that doesn't match even
+    that simple substitution indicates the two have genuinely diverged
+    (not just a normalization spelling difference), which must fail closed
+    rather than silently ship a manifest whose `version` field doesn't
+    actually correspond to what was built."""
+    if raw_version.replace("-", ".") != wheel_version:
+        raise ArtifactBuildError(
+            f"{label}: declared version {raw_version!r} does not correspond "
+            f"to the built wheel's version {wheel_version!r}"
+        )
+
+
 def build_plugin_artifacts(
     plugin: str, *, out_dir: Path, python: str | None = None
 ) -> dict:
@@ -374,7 +546,6 @@ def build_plugin_artifacts(
         raise ArtifactBuildError(f"{plugin_dir}: no pyproject.toml -- not a plugin")
 
     vendored_libs = resolve_vendored_libs(plugin_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Computed BEFORE any build runs: a build backend can leave residue
     # inside the source tree itself (e.g. setuptools' build_meta creating a
@@ -382,7 +553,20 @@ def build_plugin_artifacts(
     # wheel build), and hashing after the fact would fold build output into
     # the identity of the very input that produced it.
     all_dirs = [plugin_dir] + [d for _name, d in vendored_libs]
+
+    out_dir_r = out_dir.resolve()
+    for d in all_dirs:
+        d_r = d.resolve()
+        if out_dir_r == d_r or d_r in out_dir_r.parents:
+            raise ArtifactBuildError(
+                f"--out-dir {out_dir} is nested inside hashed source "
+                f"directory {d} -- a build's own output (wheels, manifest) "
+                "would then be part of its own payload hash on any retry. "
+                "Choose an output directory outside every hashed source tree."
+            )
+
     payload_hash = compute_payload_hash(all_dirs)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     entries: list[dict] = []
     wheel_infos: list[dict[str, str]] = []
@@ -390,6 +574,10 @@ def build_plugin_artifacts(
 
     plugin_wheel = build_wheel(plugin_dir, out_dir, python=python)
     plugin_info = parse_wheel_filename(plugin_wheel)
+    raw_version = read_project_version(plugin_dir)
+    _assert_version_corresponds(
+        raw_version=raw_version, wheel_version=plugin_info["version"], label=plugin_dir
+    )
     plugin_generator = read_wheel_generator(plugin_wheel)
     generators.add(plugin_generator)
     wheel_infos.append(plugin_info)
@@ -442,7 +630,7 @@ def build_plugin_artifacts(
         "schema": MANIFEST_SCHEMA,
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "plugin": plugin,
-        "version": plugin_info["version"],
+        "version": raw_version,
         "python_tag": identity_tags["python_tag"],
         "abi_tag": identity_tags["abi_tag"],
         "platform_tag": identity_tags["platform_tag"],
@@ -451,7 +639,7 @@ def build_plugin_artifacts(
         "artifact_id": artifact_id,
         "wheels": entries,
     }
-    manifest_path = out_dir / f"{plugin}-{plugin_info['version']}-manifest.json"
+    manifest_path = out_dir / f"{plugin}-{raw_version}-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
 

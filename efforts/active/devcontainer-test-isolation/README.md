@@ -273,84 +273,86 @@ verbatim ask.
       read-write bind of the host checkout (confirmed live to let an
       adversarial test mutate the real host checkout, which is a regression
       versus the existing `run-plugin-tests.py` containment, not an
-      improvement). **Done 2026-10-03, live-validated**: `.devcontainer/
-      devcontainer.json`'s `workspaceMount` overrides the default bind
-      entirely with a container-local Docker VOLUME -- the host checkout is
-      never mounted into the container at all, in any form. The new
-      `tools/run_tests_in_devcontainer.py` wrapper populates that volume
-      from a point-in-time COPY of the host checkout (a `tar` pipe through
-      `docker exec`, mirroring the already-reviewed `docker cp`-based repo
-      materialization `agent-containers`' own `devcontainer_launch.py` uses
-      for its `devcontainer_path` fleet backend) after the container is up.
-      Live-reproduced the fix this time: a file written from inside the
+      improvement). `.devcontainer/devcontainer.json`'s `workspaceMount`
+      overrides the default bind entirely with a container-local, size-
+      bounded Docker VOLUME -- the host checkout is never mounted into the
+      container at all, in any form. `tools/run_tests_in_devcontainer.py`
+      populates that volume from a point-in-time COPY of the host checkout
+      (a `tar` pipe through `docker exec`, mirroring the repo-
+      materialization pattern `agent-containers`' own
+      `devcontainer_launch.py` uses for its `devcontainer_path` fleet
+      backend) after the container is up. A file written from inside the
       container never appears on the host, and `git status` on the host
-      checkout stayed clean across multiple real container runs.
+      checkout stays clean across every real container run.
 - [x] Design the runtime-posture hardening the naive baseline lacked: drop
       all Linux capabilities (add back only what the test suite genuinely
-      needs), enforce `no-new-privileges`, decide on Docker-socket exclusion
-      (default -- no feature should add it back without a deliberate,
-      documented reason), and scope networking to what tests actually
-      require rather than leaving the default bridge's full outbound reach.
-      **Done 2026-10-03, live-validated against real `docker inspect`
-      output**: `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and
-      `--read-only` root filesystem, deliberately mirroring the
-      already-reviewed restricted-fleet invariants
-      `agent-containers`' own `lifecycle.py` (`restricted_policy_errors`)
-      checks for its dispatched-development containers -- including that
-      policy's own fixed writable-surface set, `{workspace, home, /tmp,
-      /run}`, reproduced here as the workspace volume plus three bounded
-      `tmpfs` mounts. No Docker-socket mount is present (confirmed via
-      `docker inspect`'s `Mounts`). **Two real runtime-posture pitfalls
-      live validation actually caught, not merely anticipated:** (1) a bare
-      tmpfs mount is `root:root 0755` by default, which the non-root
-      `vscode` remote user cannot write into at all -- without an explicit
-      `mode=1777` on the `$HOME` and `/run` tmpfs, the devcontainer CLI's
-      own lifecycle-hook bookkeeping (a marker file under `$HOME`) silently
-      failed, which in turn silently skipped `onCreateCommand` entirely;
-      (2) Docker's tmpfs default additionally bakes in `noexec`, which
-      blocks executing the installed `uv` binary from `$HOME/.local/bin`
-      ("Permission denied") until explicitly overridden with `exec` on the
-      `$HOME` and `/tmp` tmpfs (`/run` has no such need and stays
-      `noexec`). **Networking is the one item left as a deliberate, named
-      residual gap, not closed**: left at Docker's default bridge network
-      with full outbound reach, because dependency resolution (`uv sync`,
+      needs), enforce `no-new-privileges`, and decide on Docker-socket
+      exclusion (default -- no feature should add it back without a
+      deliberate, documented reason). `--cap-drop=ALL`,
+      `--security-opt=no-new-privileges`, and `--read-only` root
+      filesystem mirror the restricted-fleet invariants `agent-containers`'
+      own `lifecycle.py` (`restricted_policy_errors`) checks for its
+      dispatched-development containers -- including that policy's own
+      fixed writable-surface set, `{workspace, home, /tmp, /run}`,
+      reproduced here as the workspace volume plus three bounded `tmpfs`
+      mounts, each confirmed via real `docker inspect` output. No
+      Docker-socket mount is present (confirmed via `docker inspect`'s
+      `Mounts`). Two real runtime-posture pitfalls surfaced during live
+      validation: (1) a bare tmpfs mount is `root:root 0755` by default,
+      which the non-root `vscode` remote user cannot write into at all --
+      an explicit `mode=1777` on the `$HOME` and `/run` tmpfs is required,
+      or the devcontainer CLI's own lifecycle-hook bookkeeping (a marker
+      file under `$HOME`) silently fails, which in turn silently skips
+      `onCreateCommand`; (2) Docker's tmpfs default additionally bakes in
+      `noexec`, which blocks executing the installed `uv` binary from
+      `$HOME/.local/bin` ("Permission denied") unless explicitly overridden
+      with `exec` on the `$HOME` and `/tmp` tmpfs (`/run` has no such need
+      and stays `noexec`). **Networking scoping is split into its own item
+      below, not folded into this one** -- see that item for why it's still
+      open.
+- [ ] Scope networking to what tests actually require, rather than leaving
+      the default bridge's full outbound reach. **Still open, a deliberate,
+      named residual gap**: left at Docker's default bridge network with
+      full outbound reach, because dependency resolution (`uv sync`,
       invoked transparently inside `tools/run-plugin-tests.py`) and the
       test run itself currently share one process/container lifetime and
       have not yet been split into a network-enabled "prime the venv
       cache" pass and a network-disconnected "run pytest" pass. A future
       iteration could add that split (e.g. `docker network disconnect
-      bridge <container>` between the two passes); this effort's Validation
-      Plan below tracks it as open rather than silently leaving it
-      unaddressed.
+      bridge <container>` between the two passes); the Validation Plan
+      below tracks it as open rather than silently leaving it unaddressed.
 - [x] Decide how this devcontainer spec is invoked for Linux test execution
       specifically -- a new `tools/run-plugin-tests.py` mode, a separate
       wrapper script, or direct `devcontainer exec` -- and how it relates to
       (without duplicating) the existing turn-key runner's own containment
-      for contributors who aren't using the devcontainer. **Done
-      2026-10-03: a separate, opt-in wrapper script**,
-      `tools/run_tests_in_devcontainer.py` -- NOT a new mode baked into
-      `run-plugin-tests.py` itself, so that runner's own interface and the
-      vast majority of local/CI runs (which don't use the devcontainer at
-      all) stay completely unchanged. The wrapper brings the container up,
-      populates its workspace volume, then invokes
-      `tools/run-plugin-tests.py` *inside* the container via `devcontainer
-      exec` and passes through every one of that runner's own flags
-      unmodified (`--changed`, `--all`, `-k`, etc.) -- so the container
-      adds a real OS-level boundary strictly on top of (never instead of,
-      never duplicating) the turn-key runner's existing process-level
-      containment. Live-validated end-to-end against a real plugin suite
-      (`ai-attribution`, 98 passed / 6 skipped) via both the wrapper's own
-      internal functions and a full `python tools/run_tests_in_devcontainer.py
-      ai-attribution` invocation -- confirmed the container tore itself
-      down afterward and the host checkout's `git status` showed no
-      unexpected changes. Unit tests
-      (`tools/test_run_tests_in_devcontainer.py`) cover the wrapper's own
-      logic (argument parsing, the host-copy exclusion list, the
-      Docker/devcontainer-CLI invocation shape) via subprocess mocking, in
-      the style of `test_run_plugin_tests.py`; the real, Docker-backed
-      end-to-end run above is a manual validation step, not part of the
-      default test portfolio, since it needs a working Docker daemon and
-      network access to pull a base image.
+      for contributors who aren't using the devcontainer. **A separate,
+      opt-in wrapper script**, `tools/run_tests_in_devcontainer.py` -- NOT
+      a new mode baked into `run-plugin-tests.py` itself, so that runner's
+      own interface and the vast majority of local/CI runs (which don't use
+      the devcontainer at all) stay completely unchanged. The wrapper
+      brings the container up, populates its workspace volume, then
+      invokes `tools/run-plugin-tests.py` *inside* the container via
+      `devcontainer exec` and passes through every one of that runner's own
+      flags unmodified (`--changed`, `--all`, `-k`, etc.) -- so the
+      container adds a real OS-level boundary strictly on top of (never
+      instead of, never duplicating) the turn-key runner's existing
+      process-level containment. Validated end-to-end against a real
+      plugin suite (`ai-attribution`, 98 passed / 6 skipped) via both the
+      wrapper's own internal functions and a full `python
+      tools/run_tests_in_devcontainer.py ai-attribution` invocation --
+      confirmed the container tore itself down afterward and the host
+      checkout's `git status` showed no unexpected changes. Unit tests
+      (`tools/test_run_tests_in_devcontainer.py`, 29 tests) cover the
+      wrapper's own logic (argument parsing, git-environment scrubbing, the
+      tracked/untracked file selection, the per-instance config/volume
+      rewrite, the linked-worktree git-dir materialization, the privileged
+      workspace population, and the Docker/devcontainer-CLI invocation
+      shape) via subprocess mocking, in the style of
+      `test_run_plugin_tests.py`, and are wired into the required
+      `test-runner-linux` CI job alongside that module; the real,
+      Docker-backed end-to-end run above is a manual validation step, not
+      part of the default test portfolio, since it needs a working Docker
+      daemon and network access to pull a base image.
 
 ### Phase 2 — Wire into CI / contributor flow
 - [ ] _Pending Phase 1 review. Candidate shape: an opt-in CI lane (not a
@@ -559,4 +561,54 @@ skipped) was re-executed from scratch after every fix in this round,
 including the `--changed` mode confirmation above -- not merely re-run once
 at the start, since finding #7's live-validation-while-fixing is exactly
 what caught finding #7's own follow-up bug.
+
+### 2026-10-03 — Review round 3: 6 substantive findings + 4 phrasing/consistency nits addressed
+Automated review on the round-2 push raised 12 items. Six were substantive:
+(1) **HIGH -- snapshot exfiltration**: the snapshot copied every file
+physically present under the checkout (including gitignored, potentially
+secret-bearing files like local credentials) plus the ENTIRE `.git`
+directory (including `config`, which can embed an authenticated remote URL
+or `credential.helper` settings) into a container that has outbound network
+access -- an adversarial/buggy test could exfiltrate host-only state. Fixed
+two ways: the working-tree copy now comes from `git ls-files --cached
+--others --exclude-standard` (the same boundary contributors and CI already
+trust to keep secrets out of the repo) instead of a raw directory walk, and
+`_materialized_git_dir` always replaces `config` with a fresh,
+credential-free minimal one and drops `hooks` entirely, regardless of
+whether the checkout is a normal one or a linked worktree. (2) the
+workspace volume had no size bound (a plain Docker local volume), so a
+buggy/adversarial test could fill host Docker storage before teardown --
+fixed by creating it explicitly as a size-bounded (4 GiB) tmpfs-backed
+volume (`_create_bounded_volume`), live-confirmed via `docker volume
+inspect`. (3) the git probes inherited ambient `GIT_DIR`/`GIT_WORK_TREE`/etc.,
+which silently override `-C` and could make the snapshot (or `--changed`)
+resolve against the wrong repository -- fixed with `_scrubbed_git_env`,
+mirroring `tools/coverage_guided_selection/ancestor_resolution.py`'s own
+`scrubbed_git_env` (duplicated by hand, matching that module's own
+"dependency-free by design" precedent, not imported). (4) the full snapshot
+was built as one in-memory `bytes` object before being handed to
+`subprocess.run`'s `input=`, multiplying peak memory on a large checkout --
+fixed by writing the tarball to a temp file and streaming it via `stdin=`
+instead. (5) `_cleanup_orphan` itself could raise (`TimeoutExpired`/`OSError`
+from any of its own `subprocess.run` calls), masking the original startup
+error its docstring promised not to mask -- each call is now individually
+guarded. (6) the new test module wasn't wired into required CI (`ci.yml`'s
+Linux `test-runner-linux` job explicitly lists which modules it collects) --
+added alongside `tools/test_run_plugin_tests.py` there (Linux-only, matching
+the wrapper's own documented scope).
+
+The remaining four were phrasing/consistency nits, also addressed: durable
+comments and Plan text that read like review-history narration ("live
+validation found...", "already-reviewed...") were rewritten to state the
+current technical fact directly (review history belongs in the review
+thread or this Journal, not in the artifact itself); and the Phase 1
+"runtime-posture hardening" checklist item was split so the still-open
+networking-scoping requirement is its own unchecked item, rather than
+living inside an item marked done.
+
+All ten changes are re-validated: the full unit test suite (29 tests, up
+from 23) passes, and a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) was executed from scratch
+afterward, plus a direct `docker volume inspect` confirming the tmpfs-backed,
+size-bounded volume.
 

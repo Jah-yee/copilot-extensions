@@ -139,34 +139,46 @@ anywhere in the remaining arguments) is passed straight through to
 `tools/run-plugin-tests.py` *inside* the container. The wrapper:
 
 1. Writes a per-invocation copy of `.devcontainer/devcontainer.json` with
-   its workspace volume name made unique to this run, then brings it up via
-   `devcontainer up` -- **never** a bind mount of the host checkout; the
-   workspace is a fresh, container-local Docker volume every run, never a
-   shared fixed one.
+   its workspace volume name made unique to this run, creates that volume
+   explicitly as a size-bounded (4 GiB), tmpfs-backed Docker volume (not
+   the default unbounded local-disk volume), then brings the container up
+   via `devcontainer up` -- **never** a bind mount of the host checkout.
 2. Copies a point-in-time snapshot of the host checkout into that volume
-   (a `tar` pipe through `docker exec`, excluding `.test-venvs` and other
-   host-only artifacts, but including `.git` -- the turn-key runner's own
-   `--changed` mode needs real repository metadata). For a normal checkout
-   that's just `.git` as-is; for a linked worktree (this repo's own
-   required flow -- `.git` here is a pointer FILE naming an absolute HOST
-   path, meaningless inside the container) it instead materializes a
-   merged, self-contained copy from the worktree's private metadata plus
-   the shared common dir, so `git` commands work normally inside the
-   container. Either way, the host checkout is only ever **read**, never
-   mutated, by anything that happens afterward inside the container.
+   (a `tar` file streamed through `docker exec`'s stdin). The working-tree
+   files come from `git ls-files --cached --others --exclude-standard` --
+   git-tracked plus untracked-but-not-ignored files, deliberately NOT every
+   file physically present under the checkout, so gitignored (and
+   potentially secret-bearing) files are never copied into a container that
+   then has outbound network access. `.git` is handled separately: for a
+   normal checkout it's copied as-is; for a linked worktree (this repo's
+   own required flow -- `.git` there is a pointer FILE naming an absolute
+   HOST path, meaningless inside the container) a merged, self-contained
+   copy is materialized from the worktree's private metadata plus the
+   shared common dir instead, so `git` commands (needed by the turn-key
+   runner's own `--changed` mode) work normally inside the container.
+   Either way, `config` is always replaced with a fresh, credential-free
+   minimal one and `hooks` is always dropped (neither is needed for `git
+   diff`/`status`/`rev-parse`, and either could carry credential-bearing or
+   otherwise sensitive content). Every `git` subprocess call here scrubs
+   ambient `GIT_DIR`/`GIT_WORK_TREE`/etc. from its environment first, so a
+   contaminated calling environment can't silently redirect it to the wrong
+   repository. The host checkout is only ever **read**, never mutated, by
+   anything that happens afterward inside the container.
 3. Runs `tools/run-plugin-tests.py` inside the container via
    `devcontainer exec` and propagates its exit code.
 4. Tears the container AND its per-invocation volume down afterward (pass
    `--keep` to leave both running for debugging); a failed removal raises
-   rather than silently reporting success.
+   rather than silently reporting success, and a failed `devcontainer up`
+   itself still triggers best-effort cleanup of anything it managed to
+   create.
 
 The container itself runs with every Linux capability dropped
 (`--cap-drop=ALL`), `no-new-privileges`, and a read-only root filesystem
-with only `/tmp`, `/run`, `$HOME`, and the workspace volume writable -- no
-Docker socket is ever mounted in. Outbound networking is currently left at
-Docker's default bridge (a known, named, open design gap -- see the effort
-README's Phase 1 journal); everything else above was live-validated against
-a real container, not merely asserted.
+with only `/tmp`, `/run`, `$HOME`, and the size-bounded workspace volume
+writable -- no Docker socket is ever mounted in. Outbound networking is
+currently left at Docker's default bridge (a known, named, open design gap
+-- see the effort README's Phase 1 journal); everything else above has been
+validated against a real container, not merely asserted.
 
 Because the workspace is a fresh copy rather than the live checkout, an
 uncommitted change you're actively testing is included (the copy happens at

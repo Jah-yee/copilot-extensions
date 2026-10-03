@@ -1,20 +1,21 @@
 """Focused unit tests for the devcontainer test-isolation wrapper.
 
-These tests never invoke Docker or the real ``devcontainer`` CLI -- they
-exercise the wrapper's own logic (argument parsing, the host-copy exclusion
-list, the per-instance config/volume rewrite, the privileged workspace
-population, and the Docker/devcontainer-CLI invocation shape) via subprocess
-mocking, matching the style of ``test_run_plugin_tests.py``. A real,
-Docker-backed end-to-end run is exercised manually (see the effort
-README's Phase 1 journal), not in the repository's default test portfolio,
-since it requires a working Docker daemon and network access to pull a
-base image -- neither of which this repo's unit-test tier guarantees.
+These tests never invoke Docker or the real ``devcontainer``/``git`` CLIs --
+they exercise the wrapper's own logic (argument parsing, git-environment
+scrubbing, the tracked/untracked file selection, the bounded-volume and
+per-instance config/volume rewrite, the linked-worktree git-dir
+materialization, the privileged workspace population, and the
+Docker/devcontainer-CLI invocation shape) via subprocess mocking, matching
+the style of ``test_run_plugin_tests.py``. A real, Docker-backed end-to-end
+run is exercised manually (see the effort README's Phase 1 journal), not in
+the repository's default test portfolio, since it requires a working Docker
+daemon and network access to pull a base image -- neither of which this
+repo's unit-test tier guarantees.
 """
 from __future__ import annotations
 
 import contextlib
 import importlib.util
-import io
 import sys
 import tarfile
 import uuid
@@ -34,18 +35,66 @@ finally:
     sys.path[:] = _previous_path
 
 
-def test_tar_of_repo_excludes_host_only_artifacts_but_includes_git() -> None:
-    data = wrapper._tar_of_repo()
-    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-        names = set(tar.getnames())
-    for excluded in wrapper.EXCLUDED_TOP_LEVEL:
-        assert excluded not in names
-    # A real, always-present tracked file proves the copy is not empty.
-    assert "TESTING.md" in names
-    # `.git` must be included -- `tools/run-plugin-tests.py --changed`
-    # shells out to `git diff`/`git status` inside the container, which
-    # silently produces an empty (not failing) target set without it.
-    assert ".git" in names
+def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> None:
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.foo")
+    monkeypatch.setenv("UNRELATED_VAR", "kept")
+    env = wrapper._scrubbed_git_env()
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert "GIT_CONFIG_KEY_0" not in env
+    assert env.get("UNRELATED_VAR") == "kept"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_tracked_and_untracked_paths_filters_excluded_prefixes() -> None:
+    fake_result = mock.Mock(
+        returncode=0,
+        stdout=b"TESTING.md\0.test-venvs/linux/foo\0.devcontainer/devcontainer.json\0tools/x.py\0",
+        stderr=b"",
+    )
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
+        paths = wrapper._tracked_and_untracked_paths()
+    assert paths == ["TESTING.md", "tools/x.py"]
+    args, kwargs = run.call_args
+    assert args[0][:4] == ["git", "-C", str(wrapper.REPO), "ls-files"]
+    assert "--exclude-standard" in args[0]
+    # Must use the scrubbed environment, not the ambient one.
+    assert kwargs["env"] == wrapper._scrubbed_git_env()
+
+
+def test_tracked_and_untracked_paths_raises_on_git_failure() -> None:
+    fake_result = mock.Mock(returncode=128, stdout=b"", stderr=b"not a git repository")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        try:
+            wrapper._tracked_and_untracked_paths()
+        except SystemExit as exc:
+            assert "not a git repository" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
+
+
+def test_create_bounded_volume_invokes_tmpfs_backed_docker_volume_create() -> None:
+    fake_result = mock.Mock(returncode=0, stderr="")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
+        wrapper._create_bounded_volume("fake-volume")
+    args = run.call_args.args[0]
+    assert args[:3] == ["docker", "volume", "create"]
+    assert "fake-volume" in args
+    assert f"o=size={wrapper.WORKSPACE_VOLUME_SIZE}" in args
+    assert "type=tmpfs" in args
+
+
+def test_create_bounded_volume_raises_on_failure() -> None:
+    fake_result = mock.Mock(returncode=1, stderr="volume already exists")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        try:
+            wrapper._create_bounded_volume("fake-volume")
+        except SystemExit as exc:
+            assert "volume already exists" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
 
 
 def test_per_instance_config_rewrites_volume_name_uniquely() -> None:
@@ -115,13 +164,119 @@ def test_bring_up_raises_when_container_id_missing_from_output(tmp_path: Path) -
             raise AssertionError("expected SystemExit")
 
 
-def test_populate_workspace_runs_root_tar_extraction_then_chmod() -> None:
+def test_resolve_git_dirs_parses_rev_parse_output() -> None:
+    git_dir_result = mock.Mock(returncode=0, stdout="/abs/path/.git/worktrees/w\n", stderr="")
+    common_dir_result = mock.Mock(returncode=0, stdout="/abs/path/.git\n", stderr="")
+    with mock.patch.object(wrapper.subprocess, "run",
+                            side_effect=[git_dir_result, common_dir_result]):
+        git_dir, common_dir = wrapper._resolve_git_dirs()
+    assert git_dir == Path("/abs/path/.git/worktrees/w")
+    assert common_dir == Path("/abs/path/.git")
+
+
+def test_resolve_git_dirs_raises_on_git_failure() -> None:
+    fail_result = mock.Mock(returncode=128, stdout="", stderr="not a git repository")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fail_result):
+        try:
+            wrapper._resolve_git_dirs()
+        except SystemExit as exc:
+            assert "not a git repository" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
+
+
+def test_materialized_git_dir_copies_whole_dir_for_normal_checkout(tmp_path: Path, monkeypatch) -> None:
+    git_dir = tmp_path / "repo" / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "refs" / "heads" / "main").write_text("deadbeef\n")
+    (git_dir / "hooks").mkdir()
+    (git_dir / "hooks" / "pre-commit.sample").write_text("#!/bin/sh\n")
+    (git_dir / "config").write_text("[remote \"origin\"]\n\turl = https://user:token@example.com/repo\n")
+
+    monkeypatch.setattr(wrapper, "_resolve_git_dirs", lambda: (git_dir, git_dir))
+    with contextlib.ExitStack() as stack:
+        merged = wrapper._materialized_git_dir(stack)
+        assert (merged / "refs" / "heads" / "main").read_text() == "deadbeef\n"
+        # The host's own config (which may embed credentials) must never
+        # survive into the materialized copy.
+        assert merged.joinpath("config").read_text() == wrapper._MINIMAL_GIT_CONFIG
+        assert "token" not in merged.joinpath("config").read_text()
+        # Hooks could carry credential-bearing or otherwise sensitive
+        # custom scripts and are never needed for diff/status/rev-parse.
+        assert not (merged / "hooks").exists()
+    assert not merged.parent.exists()
+
+
+def test_materialized_git_dir_merges_worktree_refs_without_losing_common_refs(tmp_path: Path, monkeypatch) -> None:
+    # Build a minimal common dir (shared branch ref + an unrelated OTHER
+    # worktree's private state) and a per-worktree private dir (its own
+    # near-empty `refs`, matching real git's on-disk layout) and confirm
+    # the merge keeps the common branch ref instead of letting the private
+    # dir's own near-empty `refs` wipe it.
+    common_dir = tmp_path / "common" / ".git"
+    (common_dir / "refs" / "heads").mkdir(parents=True)
+    (common_dir / "refs" / "heads" / "main").write_text("deadbeef\n")
+    (common_dir / "worktrees" / "other-worktree").mkdir(parents=True)
+    (common_dir / "worktrees" / "other-worktree" / "HEAD").write_text("ref: refs/heads/other\n")
+    (common_dir / "objects").mkdir()
+    (common_dir / "config").write_text("[remote \"origin\"]\n\turl = https://user:token@example.com/repo\n")
+
+    git_dir = common_dir / "worktrees" / "this-worktree"
+    (git_dir / "refs").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    (git_dir / "commondir").write_text("../..\n")
+
+    monkeypatch.setattr(wrapper, "_resolve_git_dirs", lambda: (git_dir, common_dir))
+    with contextlib.ExitStack() as stack:
+        merged = wrapper._materialized_git_dir(stack)
+        assert (merged / "refs" / "heads" / "main").read_text() == "deadbeef\n"
+        assert (merged / "HEAD").read_text() == "ref: refs/heads/main\n"
+        assert not (merged / "commondir").exists()
+        # The OTHER worktree's own private state must not leak into this
+        # merged, self-contained copy.
+        assert not (merged / "worktrees").exists()
+        # The host's own config (credential-bearing remote URL) must not
+        # survive into the materialized copy.
+        assert merged.joinpath("config").read_text() == wrapper._MINIMAL_GIT_CONFIG
+    # Outside the ExitStack, the temp dir must be cleaned up.
+    assert not merged.parent.exists()
+
+
+def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_path: Path, monkeypatch) -> None:
+    fake_git_dir = tmp_path / "fake-git"
+    fake_git_dir.mkdir()
+    (fake_git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    real_file = tmp_path / "tracked.txt"
+    real_file.write_text("hello\n")
+
+    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack: fake_git_dir)
+    monkeypatch.setattr(wrapper, "_tracked_and_untracked_paths", lambda: ["tracked.txt"])
+    monkeypatch.setattr(wrapper, "REPO", tmp_path)
+
+    dest = tmp_path / "out.tar"
+    wrapper._write_tar_of_repo(dest)
+    with tarfile.open(dest) as tar:
+        names = set(tar.getnames())
+    assert ".git/HEAD" in names
+    assert "tracked.txt" in names
+
+
+def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:
+    written_paths: list[Path] = []
+
+    def fake_write_tar(dest: Path) -> None:
+        written_paths.append(dest)
+        dest.write_bytes(b"not-empty")
+
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo", fake_write_tar)
     tar_result = mock.Mock(returncode=0, stderr=b"")
     chmod_result = mock.Mock(returncode=0, stderr="")
-    with mock.patch.object(wrapper, "_tar_of_repo", return_value=b"tarball-bytes"), \
-         mock.patch.object(wrapper.subprocess, "run", side_effect=[tar_result, chmod_result]) as run:
+    with mock.patch.object(wrapper.subprocess, "run",
+                            side_effect=[tar_result, chmod_result]) as run:
         wrapper._populate_workspace("container-9")
     assert run.call_count == 2
+    assert len(written_paths) == 1
 
     tar_call = run.call_args_list[0]
     tar_args = tar_call.args[0]
@@ -129,7 +284,9 @@ def test_populate_workspace_runs_root_tar_extraction_then_chmod() -> None:
     assert "container-9" in tar_args
     assert "tar" in tar_args
     assert "--no-same-owner" in tar_args
-    assert tar_call.kwargs["input"] == b"tarball-bytes"
+    # Streamed via `stdin=`, never buffered as an `input=` bytes payload.
+    assert "stdin" in tar_call.kwargs
+    assert "input" not in tar_call.kwargs
 
     chmod_args = run.call_args_list[1].args[0]
     assert chmod_args[:4] == ["docker", "exec", "-u", "root"]
@@ -137,10 +294,10 @@ def test_populate_workspace_runs_root_tar_extraction_then_chmod() -> None:
     assert wrapper.CONTAINER_WORKSPACE in chmod_args
 
 
-def test_populate_workspace_raises_when_tar_extraction_fails() -> None:
+def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> None:
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest: dest.write_bytes(b""))
     tar_result = mock.Mock(returncode=1, stderr=b"tar: permission denied")
-    with mock.patch.object(wrapper, "_tar_of_repo", return_value=b""), \
-         mock.patch.object(wrapper.subprocess, "run", return_value=tar_result):
+    with mock.patch.object(wrapper.subprocess, "run", return_value=tar_result):
         try:
             wrapper._populate_workspace("container-9")
         except SystemExit as exc:
@@ -149,17 +306,34 @@ def test_populate_workspace_raises_when_tar_extraction_fails() -> None:
             raise AssertionError("expected SystemExit")
 
 
-def test_populate_workspace_raises_when_chmod_fails() -> None:
+def test_populate_workspace_raises_when_chmod_fails(monkeypatch) -> None:
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest: dest.write_bytes(b""))
     tar_result = mock.Mock(returncode=0, stderr=b"")
     chmod_result = mock.Mock(returncode=1, stderr="chmod: operation not permitted")
-    with mock.patch.object(wrapper, "_tar_of_repo", return_value=b""), \
-         mock.patch.object(wrapper.subprocess, "run", side_effect=[tar_result, chmod_result]):
+    with mock.patch.object(wrapper.subprocess, "run", side_effect=[tar_result, chmod_result]):
         try:
             wrapper._populate_workspace("container-9")
         except SystemExit as exc:
             assert "operation not permitted" in str(exc)
         else:
             raise AssertionError("expected SystemExit")
+
+
+def test_run_tests_invokes_devcontainer_exec_with_full_passthrough_args(tmp_path: Path) -> None:
+    fake_result = mock.Mock(returncode=3)
+    config_path = tmp_path / "devcontainer.json"
+    config_path.write_text("{}")
+    with mock.patch.object(wrapper.shutil, "which", return_value="/usr/bin/devcontainer"), \
+         mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
+        code = wrapper._run_tests("abc123", config_path, ["agent-worktrees", "-k", "foo"])
+    assert code == 3
+    args = run.call_args.args[0]
+    assert args[:2] == ["/usr/bin/devcontainer", "exec"]
+    assert "--container-id" in args
+    assert str(config_path) in args
+    # The complete expected suffix, not a looser subset -- a regression
+    # that drops the final passthrough argument must fail this assertion.
+    assert args[-5:] == ["python", "tools/run-plugin-tests.py", "agent-worktrees", "-k", "foo"]
 
 
 def test_tear_down_removes_container_then_volume_on_success() -> None:
@@ -226,130 +400,21 @@ def test_cleanup_orphan_never_raises_even_if_every_removal_fails() -> None:
     vol_result = mock.Mock(returncode=1)
     with mock.patch.object(wrapper.subprocess, "run",
                             side_effect=[find_result, rm_result, vol_result]):
-        # Must not raise -- this runs while an already-failing startup
-        # error is propagating, and that original error must surface, not
-        # a secondary cleanup failure.
         wrapper._cleanup_orphan("instance-label", "fake-volume")
 
 
-def test_main_cleans_up_orphan_and_reraises_when_bring_up_fails(monkeypatch, tmp_path: Path) -> None:
-    config_path = tmp_path / "cfgdir" / "devcontainer.json"
-    config_path.parent.mkdir()
-    config_path.write_text("{}")
-    cleanup_calls: list[tuple[str, str]] = []
+def test_cleanup_orphan_never_raises_when_every_subprocess_call_itself_raises() -> None:
+    import subprocess as real_subprocess
 
-    def failing_bring_up(label: str, cfg: Path) -> str:
-        raise SystemExit("devcontainer up failed: boom")
+    def always_times_out(*args, **kwargs):
+        raise real_subprocess.TimeoutExpired(cmd=args[0] if args else "docker", timeout=30)
 
-    monkeypatch.setattr(wrapper, "_per_instance_config",
-                         lambda label: (config_path, "fake-volume"))
-    monkeypatch.setattr(wrapper, "_bring_up", failing_bring_up)
-    monkeypatch.setattr(
-        wrapper, "_cleanup_orphan",
-        lambda instance_label, volume_name: cleanup_calls.append((instance_label, volume_name)),
-    )
-
-    try:
-        wrapper.main(["agent-worktrees"])
-    except SystemExit as exc:
-        assert "boom" in str(exc)
-    else:
-        raise AssertionError("expected the original SystemExit to propagate")
-    assert len(cleanup_calls) == 1
-    assert cleanup_calls[0][1] == "fake-volume"
-    # The per-instance config dir must still be cleaned up even on this
-    # failure path.
-    assert not config_path.parent.exists()
-
-
-def test_resolve_git_dirs_parses_rev_parse_output() -> None:
-    git_dir_result = mock.Mock(returncode=0, stdout="/abs/path/.git/worktrees/w\n", stderr="")
-    common_dir_result = mock.Mock(returncode=0, stdout="/abs/path/.git\n", stderr="")
-    with mock.patch.object(wrapper.subprocess, "run",
-                            side_effect=[git_dir_result, common_dir_result]):
-        git_dir, common_dir = wrapper._resolve_git_dirs()
-    assert git_dir == Path("/abs/path/.git/worktrees/w")
-    assert common_dir == Path("/abs/path/.git")
-
-
-def test_resolve_git_dirs_raises_on_git_failure() -> None:
-    fail_result = mock.Mock(returncode=128, stdout="", stderr="not a git repository")
-    with mock.patch.object(wrapper.subprocess, "run", return_value=fail_result):
-        try:
-            wrapper._resolve_git_dirs()
-        except SystemExit as exc:
-            assert "not a git repository" in str(exc)
-        else:
-            raise AssertionError("expected SystemExit")
-
-
-def test_materialized_git_dir_returns_repo_git_for_normal_checkout(monkeypatch) -> None:
-    same = Path("/abs/path/.git")
-    monkeypatch.setattr(wrapper, "_resolve_git_dirs", lambda: (same, same))
-    with contextlib.ExitStack() as stack:
-        result = wrapper._materialized_git_dir(stack)
-    assert result == wrapper.REPO / ".git"
-
-
-def test_materialized_git_dir_merges_worktree_refs_without_losing_common_refs(tmp_path: Path, monkeypatch) -> None:
-    # Build a minimal common dir (shared branch ref + an unrelated OTHER
-    # worktree's private state) and a per-worktree private dir (its own
-    # near-empty `refs`, matching real git's on-disk layout) and confirm
-    # the merge keeps the common branch ref instead of letting the private
-    # dir's own near-empty `refs` wipe it.
-    common_dir = tmp_path / "common" / ".git"
-    (common_dir / "refs" / "heads").mkdir(parents=True)
-    (common_dir / "refs" / "heads" / "main").write_text("deadbeef\n")
-    (common_dir / "worktrees" / "other-worktree").mkdir(parents=True)
-    (common_dir / "worktrees" / "other-worktree" / "HEAD").write_text("ref: refs/heads/other\n")
-    (common_dir / "objects").mkdir()
-
-    git_dir = tmp_path / "common" / ".git" / "worktrees" / "this-worktree"
-    (git_dir / "refs").mkdir(parents=True)
-    git_dir_joined = tmp_path / "common" / ".git" / "worktrees" / "this-worktree"
-    (git_dir_joined / "HEAD").write_text("ref: refs/heads/main\n")
-    (git_dir_joined / "commondir").write_text("../..\n")
-
-    monkeypatch.setattr(wrapper, "_resolve_git_dirs", lambda: (git_dir_joined, common_dir))
-    with contextlib.ExitStack() as stack:
-        merged = wrapper._materialized_git_dir(stack)
-        assert (merged / "refs" / "heads" / "main").read_text() == "deadbeef\n"
-        assert (merged / "HEAD").read_text() == "ref: refs/heads/main\n"
-        assert not (merged / "commondir").exists()
-        # The OTHER worktree's own private state must not leak into this
-        # merged, self-contained copy.
-        assert not (merged / "worktrees").exists()
-    # Outside the ExitStack, the temp dir must be cleaned up.
-    assert not merged.parent.exists()
-
-
-def test_tar_of_repo_uses_materialized_git_dir(monkeypatch, tmp_path: Path) -> None:
-    fake_git_dir = tmp_path / "fake-git"
-    fake_git_dir.mkdir()
-    (fake_git_dir / "HEAD").write_text("ref: refs/heads/main\n")
-
-    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack: fake_git_dir)
-    data = wrapper._tar_of_repo()
-    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-        names = set(tar.getnames())
-    assert ".git/HEAD" in names
-
-
-def test_run_tests_invokes_devcontainer_exec_with_full_passthrough_args(tmp_path: Path) -> None:
-    fake_result = mock.Mock(returncode=3)
-    config_path = tmp_path / "devcontainer.json"
-    config_path.write_text("{}")
-    with mock.patch.object(wrapper.shutil, "which", return_value="/usr/bin/devcontainer"), \
-         mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
-        code = wrapper._run_tests("abc123", config_path, ["agent-worktrees", "-k", "foo"])
-    assert code == 3
-    args = run.call_args.args[0]
-    assert args[:2] == ["/usr/bin/devcontainer", "exec"]
-    assert "--container-id" in args
-    assert str(config_path) in args
-    # The complete expected suffix, not a looser subset -- a regression
-    # that drops the final passthrough argument must fail this assertion.
-    assert args[-5:] == ["python", "tools/run-plugin-tests.py", "agent-worktrees", "-k", "foo"]
+    with mock.patch.object(wrapper.subprocess, "run", side_effect=always_times_out):
+        # Must not raise -- this runs while an already-failing startup
+        # error is propagating, and that original error must surface, not
+        # a secondary cleanup failure (not even a raised TimeoutExpired
+        # from one of the cleanup's own subprocess calls).
+        wrapper._cleanup_orphan("instance-label", "fake-volume")
 
 
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:
@@ -357,6 +422,7 @@ def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) 
 
     monkeypatch.setattr(wrapper, "_per_instance_config",
                          lambda label: (Path("/tmp/fake-devcontainer-dir/devcontainer.json"), "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
     monkeypatch.setattr(wrapper, "_bring_up", lambda label, config_path: "container-1")
     monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id: None)
     monkeypatch.setattr(wrapper, "_run_tests",
@@ -376,7 +442,6 @@ def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) 
     assert calls == [["--all", "-k", "some_filter"]]
 
 
-
 def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch, tmp_path: Path) -> None:
     torn_down: list[tuple[str, str]] = []
 
@@ -390,6 +455,7 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
     config_path = make_config_path()
     monkeypatch.setattr(wrapper, "_per_instance_config",
                          lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
     monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-2")
     monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id: None)
     monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
@@ -408,3 +474,60 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
                          lambda label: (config_path, "fake-volume"))
     wrapper.main(["--keep", "agent-worktrees"])
     assert torn_down == []
+
+
+def test_main_cleans_up_orphan_and_reraises_when_bring_up_fails(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "cfgdir" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+    cleanup_calls: list[tuple[str, str]] = []
+
+    def failing_bring_up(label: str, cfg: Path) -> str:
+        raise SystemExit("devcontainer up failed: boom")
+
+    monkeypatch.setattr(wrapper, "_per_instance_config",
+                         lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", failing_bring_up)
+    monkeypatch.setattr(
+        wrapper, "_cleanup_orphan",
+        lambda instance_label, volume_name: cleanup_calls.append((instance_label, volume_name)),
+    )
+
+    try:
+        wrapper.main(["agent-worktrees"])
+    except SystemExit as exc:
+        assert "boom" in str(exc)
+    else:
+        raise AssertionError("expected the original SystemExit to propagate")
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0][1] == "fake-volume"
+    # The per-instance config dir must still be cleaned up even on this
+    # failure path.
+    assert not config_path.parent.exists()
+
+
+def test_main_cleans_up_orphan_when_create_bounded_volume_itself_fails(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "cfgdir2" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+    cleanup_calls: list[tuple[str, str]] = []
+
+    def failing_create_volume(volume_name: str) -> None:
+        raise SystemExit("failed to create bounded workspace volume: boom")
+
+    monkeypatch.setattr(wrapper, "_per_instance_config",
+                         lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", failing_create_volume)
+    monkeypatch.setattr(
+        wrapper, "_cleanup_orphan",
+        lambda instance_label, volume_name: cleanup_calls.append((instance_label, volume_name)),
+    )
+
+    try:
+        wrapper.main(["agent-worktrees"])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("expected the original SystemExit to propagate")
+    assert len(cleanup_calls) == 1

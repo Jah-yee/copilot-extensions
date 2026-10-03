@@ -15,24 +15,25 @@
   "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bullseye",
 
   // Workspace storage model (Phase 1, item 1): a naive devcontainer binds
-  // the host checkout read-write by default -- Phase 0 live-reproduced that
-  // a file written from inside such a container is immediately visible,
-  // modified, on the HOST filesystem. That is a regression versus
-  // `run-plugin-tests.py`'s containment, not an improvement. This spec
-  // therefore overrides the default workspace mount with a container-local
-  // Docker VOLUME (never a bind of any host path) -- the host checkout is
-  // never mounted into the container at all. `tools/run_tests_in_devcontainer.py`
-  // populates this volume from a point-in-time COPY of the host checkout
-  // (via a tar pipe into `docker exec`, mirroring the already-reviewed
-  // `docker cp`-based repo materialization in
+  // the host checkout read-write by default, so a file written from inside
+  // the container is immediately visible, modified, on the HOST filesystem
+  // -- a regression versus `run-plugin-tests.py`'s containment, not an
+  // improvement. This spec therefore overrides the default workspace mount
+  // with a container-local Docker VOLUME (never a bind of any host path,
+  // and size-bounded -- see `tools/run_tests_in_devcontainer.py`'s
+  // `_create_bounded_volume`) -- the host checkout is never mounted into
+  // the container at all. `tools/run_tests_in_devcontainer.py` populates
+  // this volume from a point-in-time COPY of the host checkout (via a tar
+  // pipe into `docker exec`, mirroring the repo-materialization pattern in
   // `plugins/agent-containers/src/agent_containers/devcontainer_launch.py`)
-  // after the container is up, so the host checkout is only ever READ, never
-  // mutated, by anything that happens inside the container afterward.
+  // after the container is up, so the host checkout is only ever READ,
+  // never mutated, by anything that happens inside the container
+  // afterward.
   "workspaceMount": "source=copilot-extensions-test-isolation-ws,target=/workspaces/copilot-extensions,type=volume",
   "workspaceFolder": "/workspaces/copilot-extensions",
 
-  // Runtime-posture hardening (Phase 1, item 2) -- deliberately mirrors the
-  // already-reviewed restricted-fleet invariants this repo enforces for
+  // Runtime-posture hardening (Phase 1, item 2) -- mirrors the
+  // restricted-fleet invariants this repo enforces for
   // `agent-containers`' own dispatched-development containers
   // (`plugins/agent-containers/src/agent_containers/fleet.py`'s restricted
   // run-args, checked by `lifecycle.py`'s `restricted_policy_errors`, whose
@@ -42,27 +43,25 @@
   // privilege escalation, and keep the root filesystem read-only so only
   // these explicitly declared writable surfaces can be written at all.
   // `/home/vscode` specifically must be writable, not just `/tmp`/`/run` --
-  // live validation found the devcontainer CLI's OWN lifecycle-hook
-  // bookkeeping (an `.devcontainer/.onCreateCommandMarker` file under
-  // `$HOME`) silently fails without it, which in turn silently skips
+  // the devcontainer CLI's OWN lifecycle-hook bookkeeping (a marker file
+  // under `$HOME`) silently fails without it, which in turn silently skips
   // `onCreateCommand` (and would equally break any real tool, like `uv`,
   // that installs into `$HOME`). `/home/vscode` and `/run` both need an
   // explicit `mode=1777` (world-writable + sticky, the same pattern Docker
-  // already applies to `/tmp` by default) -- a bare tmpfs mount is still
-  // created `root:root 0755` by default, which the non-root `vscode` remote
-  // user cannot write into; `mode=1777` avoids hardcoding that user's
-  // uid/gid (observed as 1001 on the current base image, but not a stable
-  // constant across image updates). `/home/vscode` and `/tmp` additionally
-  // need an explicit `exec` option -- Docker's own tmpfs default is
-  // `noexec`, which live validation caught directly (installed `uv`
-  // couldn't be executed from `$HOME/.local/bin`, "Permission denied");
-  // `uv`'s own binary, and anything pytest builds/writes into a temp dir at
-  // runtime, both need to execute from these two surfaces. `/run` has no
-  // such need and stays `noexec`. No Docker-socket mount is present
-  // anywhere in this file, and none should be added by a future feature
-  // without a deliberate, documented reason (a mounted socket is a full
-  // host-escape vector -- Phase 0 confirmed the naive baseline does NOT
-  // expose it by default, and this spec must not regress that).
+  // already applies to `/tmp` by default) -- a bare tmpfs mount is created
+  // `root:root 0755` by default, which the non-root `vscode` remote user
+  // cannot write into; `mode=1777` avoids hardcoding that user's uid/gid
+  // (observed as 1001 on the current base image, but not a stable constant
+  // across image updates). `/home/vscode` and `/tmp` additionally need an
+  // explicit `exec` option -- Docker's own tmpfs default is `noexec`, which
+  // would otherwise prevent executing the installed `uv` binary from
+  // `$HOME/.local/bin`; `uv`'s own binary, and anything pytest builds/
+  // writes into a temp dir at runtime, both need to execute from these two
+  // surfaces. `/run` has no such need and stays `noexec`. No Docker-socket
+  // mount is present anywhere in this file, and none should be added by a
+  // future feature without a deliberate, documented reason -- a mounted
+  // socket is a full host-escape vector, and the naive baseline this spec
+  // replaces does NOT expose one by default.
   "runArgs": [
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",

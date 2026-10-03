@@ -192,19 +192,19 @@ changefiles and auto-bumps."
       last-shipped-on-`main` source and apply the same coalesced
       consumer/vendorable bump resolution promotion does, not recompute its
       own narrower approximation.
-- [ ] Give a local dev checkout (built straight off `dev`, never promoted)
-      a non-release identity distinct from both a real shipped version and
-      the bare `"0.0.0"` placeholder, or route local installs through a
-      generated preview/dev slot instead of the raw repo-tree version —
-      `agent-bridge`'s own install script derives its immutable slot from
-      `pyproject.toml` and explicitly **rejects** a `plugin.json` version of
-      `"0.0.0"` as a downgrade from any already-shipped install
-      (`scripts/install.sh:242-250,1901-1932`), so placeholder values as
-      currently scoped would break the documented pre-merge local-install
-      path outright, including a repeated local install over an existing
-      release. This needs its own resolved design, not just a validation
-      afterthought — raise it back to the operator if the resolution isn't
-      a clear implementation detail once scoped.
+- [ ] Route every local install through a generated preview/dev slot
+      instead of ever installing the raw repo-tree `plugin.json` version
+      directly — local install always materializes a real hypothetical
+      version via `preview_release.py` (already being extended above for
+      the same seeding/propagation model as promotion) first, then installs
+      that generated slot. `agent-bridge`'s own install script derives its
+      immutable slot from `pyproject.toml` and explicitly **rejects** a
+      `plugin.json` version of `"0.0.0"` as a downgrade from any
+      already-shipped install (`scripts/install.sh:242-250,1901-1932`), so
+      installing straight off `dev`'s placeholder values would break the
+      documented pre-merge local-install path outright; routing through a
+      generated preview slot sidesteps that entirely since the thing
+      actually installed never carries the `"0.0.0"` placeholder itself.
 - [ ] Extend the placeholder-conversion inventory and migration to cover
       every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       every real copy), not just per-plugin manifests and hook-owned
@@ -229,6 +229,12 @@ changefiles and auto-bumps."
    post-generation promotion invariant against the `main` snapshot (see the
    Plan item above) rather than surviving as an unchanged, separately-run
    file.
+4. **Local install under placeholder versions:** route local installs
+   through a generated preview/dev slot (`preview_release.py`) rather than
+   giving a local `dev` checkout its own distinct non-release version
+   identity — the raw repo-tree `plugin.json` is never installed directly,
+   so `agent-bridge`'s downgrade rejection of `"0.0.0"` never comes into
+   play.
 
 ## Validation Plan
 
@@ -269,9 +275,10 @@ changefiles and auto-bumps."
       `0.0.x` preview derived from the `"0.0.0"` placeholder.
 - [ ] A local install from a `dev` checkout (never promoted) succeeds, both
       fresh and as a repeat install over an existing real-versioned
-      release — confirm `agent-bridge`'s install script's downgrade
-      rejection does not fire against whatever non-release identity this
-      phase gives a local `dev` checkout.
+      release — confirm the install path actually goes through
+      `preview_release.py`'s generated slot rather than `plugin.json`
+      directly, so `agent-bridge`'s install script's downgrade rejection of
+      `"0.0.0"` never fires.
 - [ ] Every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       real copies) reads `"0.0.0"` on `dev` alongside the per-plugin
       manifests, and vendorable seeding (above) still recovers its real

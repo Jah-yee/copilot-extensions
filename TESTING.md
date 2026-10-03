@@ -197,12 +197,14 @@ arguments) is passed straight through to `tools/run-plugin-tests.py`
    create.
 
 The container itself runs with every Linux capability dropped
-(`--cap-drop=ALL`), `no-new-privileges`, and a read-only root filesystem
-with only `/tmp`, `/run`, `$HOME`, and the size-bounded workspace volume
-writable -- no Docker socket is ever mounted in. Outbound networking is
-currently left at Docker's default bridge (a known, named, open design gap
--- see the effort README's Phase 1 journal); everything else above has been
-validated against a real container, not merely asserted.
+(`--cap-drop=ALL`), `no-new-privileges`, a read-only root filesystem with
+only `/tmp`, `/run`, `$HOME`, and the size-bounded workspace volume
+writable, and hard resource ceilings (6 GiB memory with no extra swap, 4
+CPUs, a 512-process PID limit) -- no Docker socket is ever mounted in.
+Outbound networking is currently left at Docker's default bridge (a known,
+named, open design gap -- see the effort README's Phase 1 journal);
+everything else above has been validated against a real container, not
+merely asserted.
 
 Because the workspace is a fresh copy rather than the live checkout, an
 uncommitted MODIFICATION to a tracked file is included (the copy reads the

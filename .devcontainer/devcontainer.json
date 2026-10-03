@@ -63,11 +63,26 @@
   // mount is present anywhere in this file, and none should be added by a
   // future feature without a deliberate, documented reason -- a mounted
   // socket is a full host-escape vector, and the naive baseline this spec
-  // replaces does NOT expose one by default.
+  // replaces does NOT expose one by default. Hard resource ceilings
+  // (`--memory`/`--memory-swap`/`--cpus`/`--pids-limit`) mirror the same
+  // restricted-fleet invariants cited above
+  // (`plugins/agent-containers/src/agent_containers/fleet.py`'s restricted
+  // run-args; `lifecycle.py`'s `restricted_policy_errors` treats these as
+  // fixed, checked invariants, not optional tuning) -- without them, a
+  // test could exhaust host RAM/CPU or fork-bomb outside of (or even
+  // before) `tools/run-plugin-tests.py`'s OWN inner per-sub-suite bounds
+  // (128 processes / 4096 MiB default) ever get a chance to act. Sized
+  // with headroom above those inner defaults, not equal to them, since the
+  // container itself (shell, git, uv, the Python interpreter, `pytest`
+  // bookkeeping) needs some of that budget too.
   "runArgs": [
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
     "--read-only",
+    "--memory=6g",
+    "--memory-swap=6g",
+    "--cpus=4",
+    "--pids-limit=512",
     "--tmpfs", "/home/vscode:rw,nosuid,nodev,exec,mode=1777,size=256m",
     "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=512m",
     "--tmpfs", "/run:rw,nosuid,nodev,mode=1777,size=64m"

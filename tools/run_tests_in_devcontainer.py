@@ -230,7 +230,12 @@ def _tracked_paths(*, include_untracked: bool) -> list[str]:
         raise SystemExit(
             f"git ls-files failed: {res.stderr.decode(errors='replace').strip()}"
         )
-    paths = [p for p in res.stdout.decode().split("\0") if p]
+    # `os.fsdecode` (surrogate-escape), not a plain UTF-8 `.decode()` --
+    # a git-tracked path on Linux is arbitrary bytes, and a plain decode
+    # would raise `UnicodeDecodeError` outright for a valid tracked
+    # filename that happens not to be valid UTF-8, aborting the whole
+    # snapshot over one oddly-named file.
+    paths = [p for p in os.fsdecode(res.stdout).split("\0") if p]
     excluded_prefixes = tuple(f"{name}/" for name in EXCLUDED_TOP_LEVEL)
     return [
         p for p in paths
@@ -558,27 +563,31 @@ def main(argv: list[str] | None = None) -> int:
         except BaseException:
             _cleanup_orphan(instance_label, volume_name)
             raise
-        # The primary test path's own exception (if any) must win over a
-        # secondary teardown failure -- a raised `_tear_down` SystemExit in
-        # a bare `finally` would otherwise silently replace it, discarding
-        # both the real failure and its traceback. `result`/`primary_exc`
-        # let the `finally` below tell which case it's in: report (but
-        # don't re-raise) a teardown failure when the primary path already
-        # failed; raise it directly only when the primary path succeeded.
+        # The primary test path's own result (a nonzero exit code) OR
+        # exception must win over a secondary teardown failure -- a raised
+        # `_tear_down` SystemExit in a bare `finally` would otherwise
+        # silently replace either, discarding the real failure (and, for
+        # an exception, its traceback too). `result`/`primary_failed` let
+        # the `finally` below tell which case it's in: report (but don't
+        # re-raise) a teardown failure whenever the primary path already
+        # failed -- whether that failure raised or merely returned
+        # nonzero -- and raise it directly only when the primary path
+        # truly succeeded (a zero exit code, no exception).
         result: int | None = None
-        primary_exc: BaseException | None = None
+        primary_failed = False
         try:
             _populate_workspace(container_id, passthrough, include_untracked=ns.include_untracked)
             result = _run_tests(container_id, config_path, passthrough)
-        except BaseException as exc:
-            primary_exc = exc
+            primary_failed = result != 0
+        except BaseException:
+            primary_failed = True
             raise
         finally:
             if not ns.keep:
                 try:
                     _tear_down(container_id, volume_name)
                 except BaseException as teardown_exc:
-                    if primary_exc is None:
+                    if not primary_failed:
                         raise
                     print(f"warning: teardown also failed: {teardown_exc}", file=sys.stderr)
         return result

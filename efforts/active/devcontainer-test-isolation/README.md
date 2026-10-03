@@ -753,3 +753,34 @@ passes, and a fresh Docker-backed end-to-end run (`ai-attribution`, 98
 passed / 6 skipped) confirms the removed index-copy step doesn't break the
 common case.
 
+### 2026-10-03 — Review round 8: 3 findings addressed
+Automated review raised three more items: (1) **HIGH**: the container had
+no hard memory/CPU/PID ceiling at all -- a test could exhaust host RAM/cores
+or fork-bomb entirely outside `tools/run-plugin-tests.py`'s own inner
+per-sub-suite bounds (128 processes / 4096 MiB default), which only ever
+get a chance to act from INSIDE the container. Fixed by adding explicit
+`--memory=6g --memory-swap=6g --cpus=4 --pids-limit=512` to `runArgs`,
+mirroring the same restricted-fleet invariants already cited elsewhere in
+this file (`fleet.py`'s run-args; `lifecycle.py`'s `restricted_policy_errors`
+treats these as fixed, checked invariants) -- sized with headroom above the
+inner defaults, not equal to them, since the container itself needs some
+of that budget too. Live-confirmed via `docker inspect`:
+`Memory: 6442450944, MemorySwap: 6442450944, NanoCpus: 4000000000,
+PidsLimit: 512`. (2) `_tracked_paths` decoded `git ls-files -z` output with
+a plain UTF-8 `.decode()`, which raises `UnicodeDecodeError` outright for a
+valid tracked filename that happens not to be valid UTF-8 (git paths on
+Linux are arbitrary bytes) -- fixed with `os.fsdecode` (surrogate-escape),
+which preserves such names instead of aborting the whole snapshot over one
+oddly-named file. (3) round 7's exception-masking fix only covered a
+RAISED primary exception -- a nonzero `_run_tests` exit code is a
+*returned* value, not an exception, so `primary_failed` stayed `False` for
+a real test failure and a secondary `_tear_down` failure would still mask
+it with an unrelated `SystemExit`. Fixed by treating a nonzero result the
+same as a raised exception for masking purposes.
+
+Re-validated end-to-end: the full unit test suite (41 tests, including new
+coverage for all three fixes) passes, a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) confirms the new resource limits
+don't starve a real test run, and a live `docker inspect` confirms the
+exact limit values took effect.
+

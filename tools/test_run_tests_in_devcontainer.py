@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import os
 import sys
 import tarfile
 import uuid
@@ -73,6 +74,20 @@ def test_tracked_paths_include_untracked_adds_others_exclude_standard() -> None:
     args = run.call_args.args[0]
     assert args == ["git", "-C", str(wrapper.REPO), "ls-files", "-z",
                      "--cached", "--others", "--exclude-standard"]
+
+
+def test_tracked_paths_decodes_non_utf8_bytes_via_surrogateescape() -> None:
+    # A git-tracked path on Linux is arbitrary bytes -- a plain UTF-8
+    # `.decode()` would raise `UnicodeDecodeError` outright for a valid
+    # tracked filename that isn't valid UTF-8, aborting the whole snapshot.
+    # `os.fsdecode` (surrogate-escape) must handle it instead.
+    non_utf8_name = b"weird-\xff-name.txt"
+    fake_result = mock.Mock(returncode=0, stdout=non_utf8_name + b"\0", stderr=b"")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        paths = wrapper._tracked_paths(include_untracked=False)
+    assert len(paths) == 1
+    # Round-trips back to the original bytes via `os.fsencode`.
+    assert os.fsencode(paths[0]) == non_utf8_name
 
 
 def test_tracked_paths_raises_on_git_failure() -> None:
@@ -721,6 +736,34 @@ def test_main_preserves_primary_exception_when_teardown_also_fails(monkeypatch, 
     else:
         raise AssertionError("expected the primary SystemExit to propagate")
     # The secondary teardown failure is still reported, just not raised.
+    assert "secondary teardown failure" in capsys.readouterr().err
+
+
+def test_main_preserves_nonzero_test_result_when_teardown_also_fails(monkeypatch, tmp_path: Path, capsys) -> None:
+    # A nonzero `_run_tests` exit code is a RETURNED value, not a raised
+    # exception -- it must be treated the same as an exception for
+    # teardown-masking purposes: a secondary `_tear_down` failure must not
+    # replace it with a confusing, unrelated SystemExit.
+    config_path = tmp_path / "cfgdir5" / "devcontainer.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}")
+
+    monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-5")
+    monkeypatch.setattr(wrapper, "_populate_workspace",
+                         lambda container_id, passthrough, *, include_untracked: None)
+    # A real test FAILURE (nonzero exit), not an exception.
+    monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 7)
+
+    def failing_tear_down(container_id: str, volume_name: str) -> None:
+        raise SystemExit("secondary teardown failure")
+
+    monkeypatch.setattr(wrapper, "_tear_down", failing_tear_down)
+
+    # The nonzero test result must still be returned, not masked by the
+    # teardown's own SystemExit.
+    assert wrapper.main(["agent-worktrees"]) == 7
     assert "secondary teardown failure" in capsys.readouterr().err
 
 

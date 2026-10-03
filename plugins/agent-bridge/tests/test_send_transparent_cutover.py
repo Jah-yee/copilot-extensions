@@ -207,6 +207,48 @@ def test_a_protocol_floor_still_retries_a_restart_that_keeps_the_protocol(monkey
     assert "Delivered to live session sess1" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("failure", [
+    urllib.error.URLError(TimeoutError("timed out")),
+    urllib.error.URLError(BrokenPipeError("broken pipe")),
+    ConnectionResetError("reset"),
+])
+def test_a_post_that_may_have_reached_the_daemon_is_never_resent(failure):
+    """Only a refused connection proves nothing was sent; a timeout, broken pipe
+    or reset may have delivered the seed, so resending could deliver it twice."""
+    import time as _time
+
+    from agent_bridge import session_targeting_cli as stc
+    from agent_bridge.client import BridgeConnectionError
+
+    sent: list[str] = []
+
+    class Client:
+        _base, _connect_grace = "http://old", 30.0
+
+        def _reresolve(self):
+            return "http://old"
+
+        def _request(self, method, path, *a, **k):
+            if path == "/health":
+                return {"protocol_version": 21}
+            sent.append(method)
+            raise BridgeConnectionError("lost") from failure
+
+    client = Client()
+    stc._hold_protocol_floor(client, 21)
+    real_sleep, _time.sleep = _time.sleep, (lambda s: None)
+    try:
+        with pytest.raises(BridgeConnectionError):
+            client._request("POST", "/api/v1/live-sessions/s/messages")
+    finally:
+        _time.sleep = real_sleep
+    assert sent == ["POST"]
+    assert stc._connection_refused(BridgeConnectionError("x")) is False
+    refused = BridgeConnectionError("refused")
+    refused.__cause__ = urllib.error.URLError(ConnectionRefusedError("refused"))
+    assert stc._connection_refused(refused) is True
+
+
 def test_an_unanswered_protocol_check_is_retried_never_skipped(monkeypatch):
     """After the refused POST the replacement's /health refuses too, then it
     answers protocol 19: the POST must not have been retried in between."""

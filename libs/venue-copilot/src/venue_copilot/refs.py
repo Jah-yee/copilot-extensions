@@ -13,6 +13,7 @@ the SSH exec channel's **stdin**, so the command line stays tiny.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import shutil
 import subprocess
@@ -140,7 +141,12 @@ def deliver_note(
     """
     _bin = "agent-bridge"  # marketplace-isolation: allow legacy-compatibility
     bridge = shutil.which(_bin) or _bin
-    argv = [bridge, "send", session_id, "--prompt-file", "-", "--no-wait", "--steer"]
+    # Stable for this text to this session: a retry after an ambiguous failure
+    # (the daemon may have accepted it) returns the original message instead of
+    # enqueueing the note -- or a seed -- twice.
+    key = "venue-note-" + hashlib.sha256(f"{session_id}\0{note}".encode("utf-8")).hexdigest()[:32]
+    argv = [bridge, "send", session_id, "--prompt-file", "-", "--no-wait", "--steer",
+            "--idempotency-key", key]
     if min_daemon_protocol:
         argv += ["--min-daemon-protocol", str(min_daemon_protocol)]
     try:

@@ -76,8 +76,14 @@ def test_deliver_note_sends_over_stdin():
 
     assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run)
     argv, stdin = calls[0]
-    assert argv[1:] == ["send", "sid-1", "--prompt-file", "-", "--no-wait", "--steer"]
+    assert argv[1:7] == ["send", "sid-1", "--prompt-file", "-", "--no-wait", "--steer"]
     assert stdin == "see /x/y.har"
+    # A stable idempotency key: resending the same note can't enqueue it twice.
+    key = argv[argv.index("--idempotency-key") + 1]
+    assert venue_refs.deliver_note("sid-1", "see /x/y.har", run=run)
+    assert calls[1][0][calls[1][0].index("--idempotency-key") + 1] == key
+    assert venue_refs.deliver_note("sid-1", "another note", run=run)
+    assert calls[2][0][calls[2][0].index("--idempotency-key") + 1] != key
 
 
 def test_deliver_note_is_steered_and_bounded():

@@ -694,7 +694,7 @@ def test_a_rollover_after_the_purge_snapshot_keeps_its_alias(tmp_db: Database, m
         if "status IN ('expired', 'taken-over')" in sql:
             rows = [{"session_id": "placeholder"}]
             assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242,
-                             started=now - 599.5) == "live"
+                             started=now - 599.9) == "live"
         return rows
 
     monkeypatch.setattr(tmp_db, "execute_read", _rollover_after_snapshot)
@@ -750,10 +750,13 @@ def test_a_reused_pid_with_a_later_start_time_is_a_different_process(tmp_db: Dat
     tmp_db.create_cli_mode_reservation("wt-R", now=now)
     assert _register(tmp_db, "placeholder", "wt-R", now + 1, pid=4242, started=now - 600) == "live"
     assert _register(tmp_db, "stranger", "wt-R", now + 2, pid=4242, started=now + 1.5) == "live"
+    # Closely spaced but different starts are different processes too.
+    assert _register(tmp_db, "close", "wt-R", now + 2.5, pid=4242, started=now - 599.0) == "live"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
     assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
     # The same process (same start time) still rolls over, even once its lease lapsed.
     tmp_db.execute_write("UPDATE live_sessions SET status='expired' WHERE session_id='placeholder'")
-    assert _register(tmp_db, "resumed", "wt-R", now + 300, pid=4242, started=now - 599.5) == "live"
+    assert _register(tmp_db, "resumed", "wt-R", now + 300, pid=4242, started=now - 599.9) == "live"
     assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
 
 

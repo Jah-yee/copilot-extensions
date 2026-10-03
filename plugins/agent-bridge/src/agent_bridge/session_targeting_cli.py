@@ -64,6 +64,21 @@ def _resolve_prompt(args: argparse.Namespace, *, required: bool) -> str | None:
     return None
 
 
+def _connection_refused(exc: BaseException) -> bool:
+    """True when the error chain proves the connection was refused (nothing
+    was sent), as opposed to a reset, timeout or broken pipe that may have
+    delivered the request."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ConnectionRefusedError) or isinstance(getattr(cur, "reason", None),
+                                                                   ConnectionRefusedError):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _hold_protocol_floor(client: Any, floor: int) -> None:
     """Keep ``--min-daemon-protocol`` true for every request attempt.
 
@@ -108,8 +123,11 @@ def _hold_protocol_floor(client: Any, floor: int) -> None:
             try:
                 return request(method, path, *a, **k)
             except BridgeConnectionError as exc:
-                # A reset mid-POST may have been delivered: never resend it.
-                if time.monotonic() >= deadline or ("reset" in str(exc) and method not in ("GET", "HEAD")):
+                # A request that may have reached the daemon (a reset, a timeout,
+                # a broken pipe) may have been accepted: resend only an
+                # idempotent one, or one whose connection was refused outright.
+                if time.monotonic() >= deadline or (
+                        method not in ("GET", "HEAD") and not _connection_refused(exc)):
                     raise
                 retrying = True
             except BridgeClientError as exc:

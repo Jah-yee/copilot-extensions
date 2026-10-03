@@ -1963,6 +1963,31 @@ def test_a_bare_shell_prompt_holding_the_footer_words_is_not_ready(prompt):
     assert pane_readiness.ready_signature(f"  {prompt} press esc to interrupt\n") is None
 
 
+@pytest.mark.parametrize("line", [
+    "user@host ~/esc/interrupt % echo hi",
+    "~/repo ❯ press esc to interrupt",
+    "~/esc/interrupt$ press esc to interrupt",
+    "press esc to interrupt now please",
+    "echo press esc to interrupt",
+])
+def test_only_the_footer_grammar_is_ready_never_a_prompt_with_typed_text(line):
+    from agent_worktrees import pane_readiness
+
+    assert pane_readiness.ready_signature(line + "\n") is None
+
+
+@pytest.mark.parametrize("line", [
+    "press esc to interrupt",
+    "Esc to interrupt",
+    "◐ press esc to interrupt",
+    "esc to interrupt · ctrl+c exit",
+])
+def test_copilots_own_footer_rows_are_ready(line):
+    from agent_worktrees import pane_readiness
+
+    assert pane_readiness.ready_signature(line + "\n") == "interrupt-footer"
+
+
 def test_ordinary_output_under_a_stale_prompt_is_not_ready():
     """Only Copilot's own footer rows may sit under the box, and the legacy cue
     must be the live bottom line -- not merely free of shell-like tails."""

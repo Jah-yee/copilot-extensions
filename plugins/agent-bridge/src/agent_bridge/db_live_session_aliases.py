@@ -16,9 +16,13 @@ from typing import Any
 
 from .db_core import LIVE_SESSION_STALE_SECONDS
 
-#: How far two reports of one process's start time may drift (each is derived
-#: from wall clock minus uptime); a reused pid starts well after the original.
-PROCESS_START_TOLERANCE_SECONDS = 2.0
+#: How far two reports of one process's start time may drift. The extension
+#: fixes it once per process (wall clock minus uptime), so the same process
+#: reports the same value; only a recomputation (an extension reload in the
+#: same process) moves it, by milliseconds. A reused pid's process can't have
+#: started within this window of the original's: the original registered (and
+#: so outlived it) before the pid was free again.
+PROCESS_START_TOLERANCE_SECONDS = 0.25
 
 
 def _newer_turn(predecessor: Any, successor: Any) -> tuple[Any, Any]:

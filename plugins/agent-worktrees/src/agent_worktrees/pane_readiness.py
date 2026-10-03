@@ -80,16 +80,31 @@ _SHELL_HEAD = re.compile(
 )
 
 
+#: The legacy footer's own cue, a whole footer segment: an optional non-prompt
+#: glyph, then "[press] esc to interrupt" -- nothing typed before or after.
+_INTERRUPT_SEGMENT = re.compile(r"^(?:[^\w\s$#%❯>]\s*)?(?:press\s+)?esc\s+to\s+interrupt$", re.IGNORECASE)
+
+
+def _is_interrupt_footer_row(line: str) -> bool:
+    """A footer row built only from Copilot's grammar: ``·``-joined segments,
+    each the interrupt cue or a key hint, at least one the interrupt cue. Any
+    other text on the line (a prompt, a path, typed input) is not Copilot's."""
+    segs = [seg.strip() for seg in line.split("·")]
+    return (any(_INTERRUPT_SEGMENT.match(s) for s in segs)
+            and all(_INTERRUPT_SEGMENT.match(s) or _FOOTER_SEGMENT.match(s) for s in segs))
+
+
 def _live_footer(region: str) -> bool:
-    """The "esc ... interrupt" footer as the live bottom line: anything below it
-    (a prompt, an exit line, ``Connection closed``) means it is stale, and a
-    shell-shaped line that merely contains both words (``user@host:~/esc-interrupt$``)
-    is a shell, not Copilot."""
+    """The "esc to interrupt" footer as the live bottom line: anything below it
+    (a prompt, an exit line, ``Connection closed``) means it is stale, and the
+    line must match the footer's own grammar -- a shell line that merely
+    contains both words (``user@host ~/esc/interrupt % ...``, ``~/repo ❯ press
+    esc to interrupt``) is a shell, not Copilot."""
     lines = [line for line in region.splitlines() if line.strip()]
     if not lines:
         return False
     last = lines[-1]
-    return ("esc" in last.lower() and "interrupt" in last.lower()
+    return (_is_interrupt_footer_row(last)
             and not _SHELL_TAIL.search(last) and not _SHELL_HEAD.match(last))
 
 

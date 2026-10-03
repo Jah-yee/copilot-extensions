@@ -572,6 +572,56 @@ def test_materialized_git_dir_skips_base_closure_when_base_unresolvable_and_not_
         assert rp.stdout.strip() == head_sha
 
 
+def test_materialized_git_dir_excludes_base_closure_when_base_resolves_but_not_changed_mode(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # A RESOLVABLE base must still be excluded from the bundle when
+    # changed-selection isn't active (`--all`/an explicit plugin name) --
+    # otherwise a divergent `origin/main` would needlessly widen the
+    # minimal-history boundary with unrelated commits/trees/blobs reachable
+    # from it but having nothing to do with the plugin suite being run.
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+    _run_git(["git", "-C", str(repo), "branch", "origin/main"], check=True)
+
+    # A divergent commit on "origin/main" that is NOT an ancestor of HEAD
+    # and carries unique, placeholder-secret-shaped content -- this must
+    # NOT survive into the materialized copy when changed-selection is
+    # inactive, proving the base closure genuinely was never bundled.
+    _run_git(["git", "-C", str(repo), "checkout", "-q", "origin/main"], check=True)
+    (repo / "divergent-secret.txt").write_text("not-a-real-secret-placeholder\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "divergent"], check=True)
+    divergent_sha = _run_git(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    _run_git(["git", "-C", str(repo), "checkout", "-q", "main"], check=True)
+    head_sha = _run_git(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    with contextlib.ExitStack() as stack:
+        # "origin/main" genuinely resolves here, but an explicit plugin
+        # name means changed-selection mode is NOT active.
+        merged = wrapper._materialized_git_dir(stack, ["agent-worktrees"])
+        rp = _run_git(
+            ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert rp.returncode == 0
+        assert rp.stdout.strip() == head_sha
+
+        divergent_lookup = _run_git(
+            ["git", f"--git-dir={merged}", "cat-file", "-e", divergent_sha],
+            capture_output=True, text=True,
+        )
+        assert divergent_lookup.returncode != 0
+
+
 def test_materialized_git_dir_raises_when_changed_mode_active_and_base_unresolvable(
     tmp_path: Path, monkeypatch,
 ) -> None:

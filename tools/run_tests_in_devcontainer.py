@@ -613,7 +613,16 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
             "report \"no plugin suites to run\" instead of the real "
             "problem. Fetch or correct --base."
         )
-    bundle_refs = ["HEAD", base_ref] if base_resolves else ["HEAD"]
+    # Only include the base ref's closure when changed-selection actually
+    # consults it -- an `--all` run or an explicit plugin name never uses
+    # `base_ref` at all, so bundling it there would needlessly widen the
+    # minimal-history boundary with unrelated commits/trees/blobs reachable
+    # from a base that may have diverged significantly from `HEAD`.
+    bundle_refs = (
+        ["HEAD", base_ref]
+        if base_resolves and _changed_mode_active(passthrough)
+        else ["HEAD"]
+    )
 
     bundle_res = subprocess.run(
         ["git", "-C", str(REPO), "bundle", "create", str(bundle_file), *bundle_refs],
@@ -769,14 +778,11 @@ def _run_tests(container_id: str, config_path: Path, passthrough: list[str]) -> 
 def _tear_down(container_id: str, volume_name: str) -> None:
     """Remove the container, then the per-invocation volume it owned --
     both failures are surfaced (never silently swallowed), since a failed
-    removal leaves a live container (and any test-spawned descendants it
-    holds) running, or an orphaned volume accumulating on the host. Each
-    removal is individually guarded against
-    ``subprocess.SubprocessError``/``OSError`` (a ``TimeoutExpired``, or the
-    ``docker`` binary vanishing mid-teardown) so a raised exception from the
-    container removal can never skip the volume removal that follows it --
-    both are always attempted, and any failure (a nonzero exit OR a raised
-    exception) from either is collected and surfaced together."""
+    removal leaves a live container running or an orphaned volume on the
+    host. Each removal is individually guarded against
+    ``subprocess.SubprocessError``/``OSError`` so a raised exception from
+    the container removal can never skip the volume removal after it --
+    both are always attempted, and any failure from either is surfaced."""
     errors: list[str] = []
     try:
         res = subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, text=True, timeout=60)

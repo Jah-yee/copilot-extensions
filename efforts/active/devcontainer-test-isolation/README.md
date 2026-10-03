@@ -1314,3 +1314,28 @@ check confirmed a genuinely bare invocation (`_rewrite_base_to_resolved_sha([])`
 now appends an explicit resolved `--base <sha>` rather than leaving no
 base token at all. Docker cleanup and host `git status --short`
 reconfirmed clean of anything beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (tenth pass): 1 finding addressed (scope the bundled base closure to changed-mode)
+A tenth review pass of the same round confirmed the base-append and
+signal-masking fixes resolved, and raised one more. HIGH: `bundle_refs`
+included the resolved `--base` ref's object closure whenever it resolved
+on the host, regardless of whether changed-selection was even active --
+for an `--all` run or an explicit plugin name (which never consult
+`--base` at all), a divergent `origin/main` would still get bundled,
+needlessly widening the minimal-history security boundary with unrelated
+commits/trees/blobs having nothing to do with the plugin suite being run,
+inside a container that keeps outbound networking. Fixed by gating
+`bundle_refs`'s inclusion of the base ref on `_changed_mode_active`, not
+just `base_resolves` -- mirroring the same gating the fail-loud
+unresolvable-base guard already uses.
+
+Re-validated end-to-end: the full unit test suite (79 tests, including a
+new real-git regression test proving a divergent base branch's unique
+commit is genuinely unresolvable in the materialized copy when
+changed-selection is inactive, mirroring the existing secret-branch
+regression pattern) passes; a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
+works; a dedicated `--changed --base origin/dev~1` run confirms
+changed-mode still correctly bundles the base closure. Docker cleanup and
+host `git status --short` reconfirmed clean of anything beyond this
+round's own diff.

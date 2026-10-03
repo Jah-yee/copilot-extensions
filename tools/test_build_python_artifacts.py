@@ -133,6 +133,25 @@ def test_read_wheel_generator_missing_dist_info_raises(tmp_path: Path):
         bpa.read_wheel_generator(wheel)
 
 
+def test_read_wheel_generator_multiple_dist_info_raises(tmp_path: Path):
+    # Regression: a malformed wheel with more than one matching
+    # dist-info/WHEEL entry must not silently trust whichever ZIP member
+    # happens to come first -- that could record the WRONG distribution's
+    # generator.
+    wheel = tmp_path / "fake_pkg-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as zf:
+        zf.writestr(
+            "fake_pkg-1.0.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nGenerator: setuptools (84.1.0)\n",
+        )
+        zf.writestr(
+            "other_pkg-2.0.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nGenerator: setuptools (1.0.0)\n",
+        )
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.read_wheel_generator(wheel)
+
+
 def test_read_wheel_generator_invalid_utf8_raises(tmp_path: Path):
     # Regression: errors="replace" would silently accept corrupt metadata
     # and record a replacement-character Generator as if the real toolchain
@@ -294,6 +313,45 @@ def test_resolve_vendored_libs_missing_canonical_dir_raises(fake_repo: Path):
     # References a lib that was never seeded under libs/ at all.
     plugin_dir = fake_repo / "plugins" / "demo"
     _write_pyproject(plugin_dir, sources={"demo-widget": "../../libs/widget"})
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
+def test_resolve_vendored_libs_in_tree_editable_combination_raises(fake_repo: Path):
+    # Regression: an `editable = true` entry whose path does NOT escape its
+    # own consumer root falls through BOTH discovery functions
+    # (find_uv_editable_refs only returns escaping entries;
+    # find_in_tree_lib_sources skips every editable=true entry) and would
+    # otherwise be silently omitted from the manifest entirely.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _seed_in_tree_lib(plugin_dir, "widget")
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n\n'
+        '[tool.uv.sources]\ndemo-widget = { path = "libs/widget", editable = true }\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
+def test_resolve_vendored_libs_name_collision_different_canonical_raises(
+    fake_repo: Path,
+):
+    # Regression: deduplicating solely by the final directory name would
+    # silently drop one of two genuinely distinct sources that happen to
+    # share a name (here, two different "widget" libs nested under two
+    # different parents).
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_a = _seed_in_tree_lib(plugin_dir, "a")
+    _seed_in_tree_lib(lib_a, "widget")
+    _write_in_tree_pyproject(lib_a, sources={"demo-widget": "libs/widget"})
+    lib_b = _seed_in_tree_lib(plugin_dir, "b")
+    _seed_in_tree_lib(lib_b, "widget")
+    _write_in_tree_pyproject(lib_b, sources={"demo-widget": "libs/widget"})
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-a": "libs/a", "demo-b": "libs/b"})
 
     with pytest.raises(bpa.ArtifactBuildError):
         bpa.resolve_vendored_libs(plugin_dir)

@@ -251,6 +251,60 @@ def _validate_editable_canonical_ref(
     return canonical
 
 
+def _check_no_in_tree_editable_entries(consumer_dir: Path) -> None:
+    """Fails closed on an `editable = true` entry whose path does NOT
+    escape ``consumer_dir``'s own root -- a combination neither discovery
+    function covers (`find_uv_editable_refs` only ever returns escaping
+    entries; `find_in_tree_lib_sources` explicitly skips every
+    `editable = true` entry, escaping or not), so it would otherwise be
+    silently omitted from the manifest entirely rather than built or
+    explicitly rejected. `editable = true` is reserved for the dev-branch
+    canonical reference, which always escapes to a top-level `libs/<lib>`;
+    an in-tree path marked editable has no established meaning in this
+    repo and must not be silently dropped."""
+    sources = _read_sources_table(consumer_dir)
+    consumer_root = consumer_dir.resolve()
+    for name, entry in sources.items():
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        if entry.get("editable") is not True:
+            continue
+        raw_path = entry["path"]
+        if not isinstance(raw_path, str):
+            continue  # ManifestUnreadable from find_uv_editable_refs covers this
+        candidate = (consumer_dir / raw_path).resolve()
+        if not uer.escapes_root(candidate, consumer_root):
+            raise ArtifactBuildError(
+                f"{consumer_dir}: {name} -> {raw_path} is editable = true "
+                "but does not escape its own root -- this combination is "
+                "not supported (editable = true is reserved for the "
+                "dev-branch canonical reference, which always escapes to a "
+                "top-level libs/<lib>)"
+            )
+
+
+def _add_vendored_lib(
+    out: dict[str, Path], pending: list[Path], *, lib: str, canonical: Path, label: str
+) -> None:
+    """Records ``lib`` -> ``canonical`` in ``out``, queueing it for
+    recursion the first time it's seen. Fails closed if ``lib`` was
+    already recorded pointing at a DIFFERENT canonical directory --
+    deduplicating solely by the final directory name would otherwise
+    silently drop one of two genuinely distinct sources that happen to
+    share a name (e.g. `libs/a/libs/widget` and `libs/b/libs/widget`),
+    building and describing only whichever was visited first."""
+    existing = out.get(lib)
+    if existing is not None:
+        if existing.resolve() != canonical.resolve():
+            raise ArtifactBuildError(
+                f"{label}: lib name {lib!r} resolves to two different "
+                f"directories ({existing} vs {canonical}) -- ambiguous, refusing"
+            )
+        return
+    out[lib] = canonical
+    pending.append(canonical)
+
+
 def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
     """Every vendored lib ``consumer_dir`` needs, recursively, discovering
     BOTH known `[tool.uv.sources]` shapes: the dev-branch live, escaping,
@@ -302,6 +356,7 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
                     f"{'; '.join(problems)}"
                 )
             is_top_level = False
+        _check_no_in_tree_editable_entries(current)
 
         try:
             escaping_refs = uer.find_uv_editable_refs(current)
@@ -321,9 +376,9 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
             canonical = _validate_editable_canonical_ref(
                 consumer_dir=current, name=name, raw_path=raw_path, lib=lib
             )
-            if lib not in out:
-                out[lib] = canonical
-                pending.append(canonical)
+            _add_vendored_lib(
+                out, pending, lib=lib, canonical=canonical, label=str(current)
+            )
 
         for name, raw_path, lib in find_in_tree_lib_sources(current):
             if not uer.is_safe_lib_name(lib):
@@ -334,9 +389,9 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
             canonical = _validate_in_tree_lib_dir(
                 f"{current}:{name}", current / raw_path
             )
-            if lib not in out:
-                out[lib] = canonical
-                pending.append(canonical)
+            _add_vendored_lib(
+                out, pending, lib=lib, canonical=canonical, label=str(current)
+            )
     return sorted(out.items())
 
 
@@ -513,8 +568,15 @@ def read_wheel_generator(wheel_path: Path) -> str:
         wheel_meta_names = [
             n for n in zf.namelist() if n.endswith(".dist-info/WHEEL")
         ]
-        if not wheel_meta_names:
-            raise ArtifactBuildError(f"{wheel_path}: no dist-info/WHEEL entry found")
+        if len(wheel_meta_names) != 1:
+            # A malformed wheel with multiple matching entries must never
+            # silently trust whichever ZIP member happens to come first --
+            # that could record a generator from the WRONG distribution's
+            # metadata.
+            raise ArtifactBuildError(
+                f"{wheel_path}: expected exactly one dist-info/WHEEL entry, "
+                f"found {len(wheel_meta_names)}: {wheel_meta_names}"
+            )
         raw = zf.read(wheel_meta_names[0])
     try:
         text = raw.decode("utf-8")

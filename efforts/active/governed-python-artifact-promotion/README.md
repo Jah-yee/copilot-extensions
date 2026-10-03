@@ -534,6 +534,25 @@ win grows with build complexity.
   while still preserving the intentional retry-overwrite behavior for a
   prior invocation's own leftover wheel. 56 unit tests now; re-verified
   both `agent-bridge` and `agent-worktrees` build correctly.
+- An eighth review round reported 0 new open findings (its lighter "needs
+  a closer look" banner, versus the prior seven rounds' "changes
+  recommended") and confirmed both of round seven's HIGH findings
+  resolved, but surfaced 3 more real, narrower edge cases from
+  code already in place: an `editable = true` entry whose path does NOT
+  escape its own consumer root fell through BOTH discovery functions
+  entirely (neither `find_uv_editable_refs`, which only returns escaping
+  entries, nor `find_in_tree_lib_sources`, which skips every
+  `editable = true` entry) and would have been silently omitted from the
+  manifest rather than built or explicitly rejected -- fixed with an
+  explicit check that fails closed on this unsupported combination;
+  deduplicating a vendored lib solely by its final directory name could
+  silently drop one of two genuinely distinct sources sharing a name
+  (e.g. two different `libs/.../libs/widget` trees) -- fixed by comparing
+  the resolved canonical directory whenever a name repeats, failing closed
+  on a real mismatch; and a malformed wheel with more than one
+  `dist-info/WHEEL` entry would silently trust whichever ZIP member came
+  first -- fixed to require exactly one. 59 unit tests now; re-verified
+  both plugins build correctly.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

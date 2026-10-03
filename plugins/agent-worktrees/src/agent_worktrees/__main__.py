@@ -1162,8 +1162,7 @@ def _worktree_to_dict(
     registered_sessions = getattr(rec, "sessions", None)
     if registered_sessions is not None:
         d["session_count"] = len(registered_sessions)
-    head_session = tracking_lifecycle.listing_head_session(rec, d)
-    if head_session:
+    if head_session := tracking_lifecycle.listing_head_session(rec, d):
         d["last_session_id"] = head_session
     if rec.execution_leg_opaque or rec.session_backend_opaque:
         # Legacy ``session_backend:`` opaque records still surface through the

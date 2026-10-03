@@ -18,14 +18,23 @@ pre-existing backlog on any other repo this pattern gets adopted in.
 Deliberately conservative, mirroring `tools/module-health-watchdog.py`'s own
 convention:
 
+- Only considers a PR with recorded GraphQL state **MERGED**; an open or
+  closed-unmerged PR's head branch is never treated as deletable, and its
+  branch name is explicitly vetoed even if a coincidentally-matching OID
+  would otherwise look deletable (reused/reopened branch names).
 - A branch name alone is never a stable identity: a name can be deleted and
   recreated, force-pushed with new commits, picked up by a brand-new open
   PR, or (for a same-named branch on a fork) never have belonged to this
-  repository at all. A deletion only ever proceeds when the **same-repo**
-  merged PR's recorded head commit OID still matches that branch's *current*
-  commit OID on `origin` at delete time -- an identity/lease check, not a
-  name match. A fork-originated PR's `headRefName` never denotes a branch
-  on this repo at all and is excluded entirely.
+  repository at all. Planning only proposes a branch whose **same-repo,
+  MERGED** PR's recorded head commit OID still matches that branch's
+  *current* commit OID on `origin` as of the planning snapshot. The actual
+  deletion then performs its own atomic, server-side compare-and-delete via
+  `git push --force-with-lease=<ref>:<expected-oid>` -- not a separate
+  check-then-act GET+DELETE, which a transient GET failure or a race
+  between the two calls could silently bypass (fail open). A rejected lease
+  (the branch moved between planning and deleting) is treated as a safe
+  skip, never a forced delete. A fork-originated PR's `headRefName` never
+  denotes a branch on this repo at all and is excluded entirely.
 - Never touches a protected branch (the repo's configured default branch,
   plus `dev` for this repo's own `main`+`dev` pair -- see
   ``DEFAULT_PROTECTED_EXTRA``).
@@ -83,11 +92,13 @@ class PullRequestHead:
     branch: str
     head_oid: str
     same_repo: bool
+    state: str  # "OPEN", "CLOSED", or "MERGED" (gh's own GraphQL enum casing)
 
 
 def plan_sweep(
     remote_branches: dict[str, str],
     merged_heads: dict[str, str],
+    open_branch_names: set[str],
     all_pr_branch_names: set[str],
     protected_branches: set[str],
     flag_patterns: tuple[str, ...] = FLAG_PATTERNS,
@@ -97,18 +108,29 @@ def plan_sweep(
     ``remote_branches``: current branch name -> current commit OID on
     ``origin``, as of the moment the caller fetched it.
 
-    ``merged_heads``: a **same-repository** merged PR's head branch name ->
-    the head commit OID that PR actually merged. A fork-originated PR's
-    head branch never denotes a branch on this repo and must never appear
+    ``merged_heads``: a **same-repository, MERGED** PR's head branch name ->
+    the head commit OID that PR actually merged. A fork-originated or
+    non-merged (open/closed-unmerged) PR's head branch must never appear
     here (callers are responsible for excluding it -- see
     :func:`_pull_requests`).
 
+    ``open_branch_names``: every branch name with a currently **OPEN** PR,
+    same-repo or not. Checked as an explicit veto, independent of the OID
+    match below: a branch name can be deleted and recreated with a brand
+    new open PR that coincidentally shares its old merged PR's head OID
+    (e.g. reopened from the same commit) -- this guards that case even
+    though it is not the primary identity check.
+
     ``deletable``: a branch whose *current* OID on origin still exactly
     matches a merged PR's recorded head OID for that same branch name --
-    the identity/lease check described in this module's docstring. A branch
-    reused since (force-pushed, or picked up by a new open PR with new
-    commits) has a different current OID and is correctly left alone.
-    Excludes anything in ``protected_branches``.
+    the identity check described in this module's docstring -- AND has no
+    currently open PR. A branch reused since (force-pushed, or picked up by
+    a new open PR with new commits) has a different current OID and is
+    correctly left alone regardless. Excludes anything in
+    ``protected_branches``. This is a *planning-time* decision only; the
+    actual deletion performs its own atomic compare-and-delete lease check
+    (see :func:`_delete_branch`), since a branch can still move between
+    planning and acting.
 
     ``flagged``: a branch matching one of ``flag_patterns`` with **no** PR
     record at all (not even open or closed-unmerged) -- never deleted here,
@@ -118,6 +140,7 @@ def plan_sweep(
         branch
         for branch, current_oid in remote_branches.items()
         if branch not in protected_branches
+        and branch not in open_branch_names
         and branch in merged_heads
         and merged_heads[branch] == current_oid
     )
@@ -175,6 +198,7 @@ def _pull_requests(repo: str, limit: int) -> list[PullRequestHead]:
             branch=row["headRefName"],
             head_oid=row["headRefOid"],
             same_repo=not row["isCrossRepository"],
+            state=row["state"],
         )
         for row in rows
     ]
@@ -219,34 +243,49 @@ def _remote_branches(repo: str, limit: int) -> dict[str, str]:
     return branches
 
 
-def _delete_branch(repo: str, branch: str, expected_oid: str) -> bool:
-    # Re-verify the identity/lease check immediately before deleting: the
-    # plan was computed from a snapshot that may be stale by the time
-    # `--execute` actually runs through the deletable list (a later branch
-    # in the same run can take noticeable wall-clock time to reach).
-    current = subprocess.run(
-        ["gh", "api", "--method", "GET", f"repos/{repo}/branches/{branch}", "--jq", ".commit.sha"],
-        capture_output=True,
-        text=True,
-    )
-    if current.returncode == 0 and current.stdout.strip() != expected_oid:
-        print(f"[SKIP] {branch} has moved since planning (expected {expected_oid}, now {current.stdout.strip()}) -- not deleting.")
-        return True
-    out = subprocess.run(
-        ["gh", "api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}"],
-        capture_output=True,
-        text=True,
-    )
+def _verify_remote_matches_repo(remote: str, repo: str) -> None:
+    """Refuse to push a deletion through a local ``remote`` that isn't
+    actually this ``repo`` -- a mismatched local checkout (e.g. ``--repo``
+    pointed elsewhere than the directory this script happens to run in)
+    must never result in deleting branches on the wrong repository."""
+    out = subprocess.run(["git", "remote", "get-url", remote], capture_output=True, text=True)
     if out.returncode != 0:
-        # A 422 "Reference does not exist" means someone/something already
-        # deleted it between planning and acting -- not a real failure.
-        if "Reference does not exist" in out.stderr:
-            print(f"[OK] {branch} already gone -- nothing to do.")
-            return True
-        print(f"[ERROR] failed to delete {branch}: {out.stderr.strip()}", file=sys.stderr)
-        return False
-    print(f"[OK] deleted {branch}")
-    return True
+        raise GhCallFailed(f"git remote get-url {remote} failed: {out.stderr.strip()}")
+    url = out.stdout.strip().rstrip("/")
+    if url.endswith(".git"):
+        url = url[: -len(".git")]
+    normalized = url.replace(":", "/").lower()
+    if not normalized.endswith(f"/{repo.lower()}"):
+        raise GhCallFailed(
+            f"git remote '{remote}' ({url}) does not match --repo {repo} -- refusing to "
+            "push deletions against a mismatched local checkout."
+        )
+
+
+def _delete_branch(remote: str, branch: str, expected_oid: str) -> bool:
+    """Delete ``branch`` on ``remote`` via an atomic compare-and-delete:
+    ``git push --force-with-lease`` fails the update server-side unless the
+    remote ref is still exactly at ``expected_oid`` at push time -- a real
+    lease, not a separate check-then-act GET+DELETE (which a transient GET
+    failure or a race between the two calls could silently bypass)."""
+    lease = f"refs/heads/{branch}:{expected_oid}"
+    out = subprocess.run(
+        ["git", "push", remote, f"--force-with-lease={lease}", f":refs/heads/{branch}"],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode == 0:
+        print(f"[OK] deleted {branch}")
+        return True
+    combined = out.stdout + out.stderr
+    if "remote ref does not exist" in combined or "unable to delete" in combined and "does not exist" in combined:
+        print(f"[OK] {branch} already gone -- nothing to do.")
+        return True
+    if "stale info" in combined or "rejected" in combined:
+        print(f"[SKIP] {branch} lease rejected (moved since planning) -- not deleting.")
+        return True
+    print(f"[ERROR] failed to delete {branch}: {combined.strip()}", file=sys.stderr)
+    return False
 
 
 def _existing_tracking_issue(repo: str) -> int | None:
@@ -312,6 +351,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", default=DEFAULT_REPO, help=f"owner/name to sweep (default {DEFAULT_REPO})")
     parser.add_argument(
+        "--remote", default="origin",
+        help="local git remote name to push deletions through (default origin); must resolve to --repo",
+    )
+    parser.add_argument(
         "--limit", type=int, default=DEFAULT_LIMIT,
         help=f"safety bound on PRs/branches fetched; a result hitting it aborts as possibly truncated (default {DEFAULT_LIMIT})",
     )
@@ -326,11 +369,18 @@ def main() -> int:
         pull_requests = _pull_requests(args.repo, args.limit)
         remote_branches = _remote_branches(args.repo, args.limit)
         default_branch = _default_branch(args.repo)
+        if args.execute:
+            _verify_remote_matches_repo(args.remote, args.repo)
     except (GhCallFailed, TruncatedResult) as error:
         print(f"[ERROR] {error}", file=sys.stderr)
         return 1
 
-    merged_heads = {pr.branch: pr.head_oid for pr in pull_requests if pr.same_repo and pr.head_oid}
+    merged_heads = {
+        pr.branch: pr.head_oid
+        for pr in pull_requests
+        if pr.same_repo and pr.state == "MERGED" and pr.head_oid
+    }
+    open_branch_names = {pr.branch for pr in pull_requests if pr.state == "OPEN"}
     # "Has any PR record at all" must still count a fork-originated PR (its
     # branch isn't deletable here -- it isn't this repo's branch -- but a
     # same-named branch on THIS repo with no record of its own should not be
@@ -339,7 +389,7 @@ def main() -> int:
     all_pr_branch_names = {pr.branch for pr in pull_requests}
     protected = {default_branch, *DEFAULT_PROTECTED_EXTRA}
 
-    deletable, flagged = plan_sweep(remote_branches, merged_heads, all_pr_branch_names, protected)
+    deletable, flagged = plan_sweep(remote_branches, merged_heads, open_branch_names, all_pr_branch_names, protected)
 
     print(f"[INFO] {len(remote_branches)} remote branch(es) examined; protected: {sorted(protected)}.")
     print(f"[INFO] {len(deletable)} deletable (merged PR, branch unchanged since merge):")
@@ -355,7 +405,7 @@ def main() -> int:
 
     failed = False
     for branch in deletable:
-        if not _delete_branch(args.repo, branch, merged_heads[branch]):
+        if not _delete_branch(args.remote, branch, merged_heads[branch]):
             failed = True
 
     if flagged:

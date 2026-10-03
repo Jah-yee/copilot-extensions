@@ -346,6 +346,139 @@ future module added to this package needs a quick stdlib-name collision
 check before landing, not just a local test pass (the fast test suite *did*
 pass before this incident, since it only ever imports the package normally).
 
+### 2026-10-02 (final) — Root-caused and fixed `agent-worktrees`' coverage.py crash; enrolled; Phase 1 complete
+Operator asked to pursue the `agent-worktrees` blocker from the previous
+entry specifically (over the `agent-dispatch` one), rather than pausing.
+
+**Root cause, fully confirmed this time** (the previous entry's own
+"exact mechanism remains unconfirmed" is now resolved): `_DRIVER_SCRIPT`
+called `pytest.main(...)` **unguarded at module scope** -- no
+`if __name__ == "__main__":`. `agent-worktrees`' own
+`test_cleanup_revalidation_manual.py` spawns a real child process via
+`multiprocessing.get_context("spawn")` to test genuine cross-process
+file-lock contention. `spawn` bootstraps a brand-new interpreter that
+**re-imports the driver script as a plain module** (not as `__main__`) to
+reconstruct its pickled target -- and without the guard, that re-import
+re-executed `pytest.main(...)` unconditionally, which tripped Python's
+own multiprocessing bootstrap-safety check ("An attempt has been made to
+start a new process before the current process has finished its
+bootstrapping phase"), killing the spawned child before it ever ran its
+real target (confirmed directly: `holder.is_alive()` was `False` --
+the child died at bootstrap, not during its own work). The doomed
+re-execution's own half-started pytest-cov instance is what corrupted the
+real coverage SQLite data file the parent was still writing to
+(`coverage.exceptions.DataError: ... no such table: context` -- the
+previous entry's own symptom). Confirmed by first reproducing WITHOUT
+`--cov-context=test` (the internal coverage crash disappeared, replaced
+by the real, more legible `multiprocessing/spawn.py:140: RuntimeError`
+pointing straight at the missing guard).
+
+**Fix:** wrapped the driver script's entire body in
+`if __name__ == "__main__":`, exactly matching Python's own documented
+"Safe importing of main module" guidance for any script a
+`multiprocessing`-spawning test might re-import. Also fixed a related
+minor robustness gap the full-suite run surfaced: `collect_baseline`'s own
+`tempfile.TemporaryDirectory` lacked `ignore_cleanup_errors=True` (unlike
+`run-plugin-tests.py`'s own sandboxed-tempdir handling), so a lingering
+file handle left by a real spawned child could turn an already-successful
+collection into a raised `OSError` on cleanup, discarding a baseline that
+was already earned. Added it.
+
+**Verified directly:** `agent-worktrees`' full suite (265 test files, 11
+chunks) now collects cleanly end to end (6451 tests, 216 covered files).
+Re-verified every other enrolled plugin (`agent-ssh`, `agent-codespaces`,
+`agent-containers`, `agent-vault`, `agent-logger`, `agent-mcp`,
+`agent-bridge`) unaffected. Added a new real, opt-in integration test
+(`test_collect_baseline_survives_a_real_spawn_based_multiprocessing_child`)
+constructing a throwaway suite with a genuine `spawn`-context child,
+mirroring the real failure rather than just unit-testing the guard in
+isolation. Full fast unit suite (32 passed) and full opt-in integration
+suite (36 passed) both green.
+
+`agent-worktrees` enrolled in this same change.
+
+**Phase 1 is now substantively complete: 8 of 9 plugins enrolled.**
+`agent-ssh`, `agent-codespaces`, `agent-containers`, `agent-vault`,
+`agent-logger`, `agent-mcp`, `agent-bridge`, `agent-worktrees` -- every
+plugin except `agent-dispatch`. That one remains blocked on a distinct,
+already-tracked, genuine app-level async-cancellation race in its own
+shutdown path (cancelling an `asyncio.to_thread`-wrapped call doesn't
+actually stop the underlying thread, which can still complete real I/O
+after its own resource is torn down) -- confirmed its full suite passes
+cleanly under the trusted `run-plugin-tests.py` runner, so this is
+`agent-dispatch`'s own application-code fix to make, not a `baseline.py`
+tooling problem, and stays out of this effort's own scope.
+
+**Not yet done:** watching a real promotion land `agent-worktrees`' own
+baseline on `main`; `agent-dispatch`'s own fix (separate domain, tracked
+issue); Phase 2 (nearest-ancestor resolution) hasn't started.
+
+### 2026-10-02 (yet later still) — Phase 1: enroll `agent-bridge`
+Operator chose `agent-bridge` next, out of the 3 remaining plugins.
+
+By far the largest plugin enrolled so far: 178 test files, 2993 collected
+tests, 8 sub-suites under the trusted `run-plugin-tests.py` runner's own
+chunking. A genuine proof point for the chunking fix the previous entry
+landed, not just a repeat of an already-small suite. Enrolled with the
+same generalized pilot-plugin-list pattern; no further code changes
+needed beyond the two-line list addition.
+
+**Verified directly:** `baseline.py` run against `agent-bridge`'s real
+suite collects a clean baseline end to end (2993 tests, 142 covered
+files) in one run, chunked into ~8 sequential pytest processes
+automatically. Fast unit suite (32 passed) re-confirmed unaffected.
+
+Phase 1 now covers 7 of 9 plugins. **Not yet done:** watching a real
+promotion land `agent-bridge`'s baseline on `main`; the operator's next
+choice of which plugin(s) to enroll from the 2 still remaining
+(`agent-dispatch`, `agent-worktrees`).
+
+### 2026-10-02 (yet later) — `baseline.py` chunking fix; `agent-mcp` enrolled
+Operator asked to fix the scaling limitation from the previous entry
+directly (unblock `agent-mcp`) rather than continuing to the next
+unrelated plugin.
+
+**Root-caused the real failure mode precisely, not just the process-count
+theory from the previous entry.** Teaching `baseline.py` to chunk a large
+suite the same way `run-plugin-tests.py` does (`_plan_chunks`, splitting
+into sequential 25-file groups via the same `partition` helper, one pytest
+process per chunk, results merged via a new `_merge_chunk_results` --
+durations union plus a genuine per-line test-name union for any source
+file touched by tests from more than one chunk) changed the failure from a
+silent crash into real, readable pytest output -- which showed the actual
+cause: `OSError: AF_UNIX path too long`. `agent-mcp`'s own real-socket
+cutover tests create Unix-domain sockets under pytest's `tmp_path`
+fixture, and without an explicit `--basetemp`, that fixture nests under
+whatever `TMPDIR` `_subprocess_env`'s `isolated_environment` redirects to
+-- deep enough (`.../sandbox/tmp/pytest-of-<user>/pytest-<n>/...`) to
+exceed `AF_UNIX`'s 108-byte `sun_path` limit. `run-plugin-tests.py` never
+hits this because it always passes its own short, explicit `--basetemp`;
+`baseline.py` never did. Added the same explicit `--basetemp` (one per
+chunk, directly under the ephemeral collection tempdir, well short of the
+limit) to the driver script.
+
+**Verified directly**, not just reasoned about: `agent-mcp`'s full suite
+(634 tests, 48 covered files) now collects a clean baseline end to end.
+Re-ran every already-enrolled plugin (`agent-ssh`, `agent-codespaces`,
+`agent-containers`, `agent-vault`, `agent-logger`) after the change and
+all five still collect cleanly -- the single-chunk path for a suite within
+the limit is bit-for-bit the same invocation as before chunking existed.
+Added fast, mocked unit tests for `_plan_chunks` (small suite stays
+unsplit; a single file stays unsplit; a large suite splits into the
+expected bounded groups) and `_merge_chunk_results` (duration union;
+coverage-line union across chunks), plus a new real, opt-in
+end-to-end integration test that forces a tiny `max_files_per_chunk` and
+confirms a shared module's coverage is genuinely attributed to tests from
+every chunk, not just whichever one happened to run first.
+
+`agent-mcp` is now enrolled in this same change -- the whole point of the
+fix. Phase 1 now covers 6 of 9 plugins total.
+
+**Not yet done:** watching a real promotion land `agent-mcp`'s baseline
+(and the still-pending `agent-vault`/`agent-logger` ones) on `main`; the
+operator's next choice of which plugin(s) to enroll from the 3 still
+remaining (`agent-bridge`, `agent-dispatch`, `agent-worktrees`).
+
 ### 2026-10-02 (later still) — Phase 1: enroll `agent-vault` and `agent-logger`; `agent-mcp` deferred
 Operator chose the next three Phase 1 plugins out of the 6 remaining:
 `agent-mcp`, `agent-vault`, `agent-logger`.

@@ -194,9 +194,13 @@ def _fold_in_predecessor(
     match), ``cli_mode``, and the *same, known*
     PID. A missing PID on either side never counts as a match. A PID alone
     does not prove the same process (it can be reused), so when both rows
-    carry ``process_started_at`` those must agree; otherwise the predecessor
-    must still be heartbeating (fresh ``live``) or confirmed alive (``wedged``)
-    -- never a lapsed or confirmed-dead registration.
+    carry ``process_started_at`` those must agree. A legacy predecessor
+    without one must have registered after this process started (else an
+    earlier holder of the pid registered it) and still be heartbeating (fresh
+    ``live``) or confirmed alive (``wedged``) -- never a lapsed or
+    confirmed-dead registration. When only the predecessor has a start time,
+    identity can't be established and nothing is folded in; when neither
+    does (older extensions), the fresh-or-wedged lease is the only evidence.
     """
     successor = conn.execute(
         "SELECT * FROM live_sessions WHERE session_id=? "
@@ -216,11 +220,22 @@ def _fold_in_predecessor(
         "AND pid=? AND machine = ? AND CASE "
         "WHEN ? IS NOT NULL AND process_started_at IS NOT NULL "
         "THEN ABS(process_started_at - ?) < ? "
+        # A legacy predecessor (no start time): the same process registered it
+        # after starting, so a registration from before this process started
+        # came from an earlier holder of the pid. A fresh lease alone is not
+        # process identity.
+        "WHEN ? IS NOT NULL "
+        "THEN registered_at >= ? - ? AND (status='wedged' OR (status='live' AND updated_at >= ?)) "
+        # Only the predecessor has a start time: mixed evidence, so identity
+        # can't be established.
+        "WHEN process_started_at IS NOT NULL THEN 0 "
+        # Neither side reports one (older extensions): the lease is all there is.
         "ELSE status='wedged' OR (status='live' AND updated_at >= ?) END "
         "ORDER BY updated_at DESC LIMIT 1",
         (worktree_id, session_id, session_id, successor["pid"], successor["machine"],
          started, started, PROCESS_START_TOLERANCE_SECONDS,
-         now - LIVE_SESSION_STALE_SECONDS),
+         started, started, PROCESS_START_TOLERANCE_SECONDS,
+         now - LIVE_SESSION_STALE_SECONDS, now - LIVE_SESSION_STALE_SECONDS),
     ).fetchone()
     if predecessor is None:
         return None

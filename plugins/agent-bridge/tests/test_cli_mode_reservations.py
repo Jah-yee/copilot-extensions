@@ -771,6 +771,28 @@ def test_a_reused_pid_never_inherits_a_confirmed_dead_registration(tmp_db: Datab
     assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
 
 
+def test_a_mixed_version_pid_reuse_never_inherits_a_fresh_legacy_registration(
+    tmp_db: Database,
+) -> None:
+    """A legacy registration (no start time) heartbeated at ``now + 1``; a new
+    process reusing its pid that started at ``now + 10`` can't have made it,
+    however fresh the lease. The same process (started before it registered)
+    still rolls over; a legacy successor of a timed predecessor never does."""
+    now = time.time()
+    tmp_db.create_cli_mode_reservation("wt-R", now=now)
+    assert _register(tmp_db, "placeholder", "wt-R", now + 1, pid=4242) == "live"
+    assert _register(tmp_db, "stranger", "wt-R", now + 11, pid=4242, started=now + 10) == "live"
+    assert tmp_db.get_live_session("stranger")["cli_mode"] == 0
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "placeholder"
+    assert _register(tmp_db, "resumed", "wt-R", now + 12, pid=4242, started=now - 5) == "live"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+    # Only the predecessor reports a start time: identity can't be established.
+    tmp_db.create_cli_mode_reservation("wt-S", now=now)
+    assert _register(tmp_db, "timed", "wt-S", now + 1, pid=77, started=now - 5) == "live"
+    assert _register(tmp_db, "untimed", "wt-S", now + 2, pid=77) == "live"
+    assert tmp_db.get_live_session("timed")["session_id"] == "timed"
+
+
 def test_a_reused_pid_with_a_later_start_time_is_a_different_process(tmp_db: Database) -> None:
     now = time.time()
     tmp_db.create_cli_mode_reservation("wt-R", now=now)

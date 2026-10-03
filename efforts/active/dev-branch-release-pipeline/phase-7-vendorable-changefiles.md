@@ -205,6 +205,13 @@ changefiles and auto-bumps."
       documented pre-merge local-install path outright; routing through a
       generated preview slot sidesteps that entirely since the thing
       actually installed never carries the `"0.0.0"` placeholder itself.
+      `preview_release.py` today only writes its computed hypothetical
+      version into `PREVIEW.json`'s own metadata — the `plugin.json`/
+      `pyproject.toml` copies it materializes for actual install are left
+      unchanged (`tools/preview_release.py:151-172`), so this sidestep only
+      works once the preview build is also taught to write the computed
+      version into every one of those copied, generated files, not just
+      report it.
 - [ ] Extend the placeholder-conversion inventory and migration to cover
       every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       every real copy), not just per-plugin manifests and hook-owned
@@ -273,6 +280,10 @@ changefiles and auto-bumps."
       a plugin reached only through a vendorable's propagated changefile
       (not just one with its own direct entry), and never reports a bogus
       `0.0.x` preview derived from the `"0.0.0"` placeholder.
+- [ ] The generated preview tree's own `plugin.json`/`pyproject.toml`
+      copies carry the computed hypothetical version, not the `"0.0.0"`
+      placeholder `PREVIEW.json` alone would report it as — inspect the
+      materialized files directly, not just the preview's reported summary.
 - [ ] A local install from a `dev` checkout (never promoted) succeeds, both
       fresh and as a repeat install over an existing real-versioned
       release — confirm the install path actually goes through

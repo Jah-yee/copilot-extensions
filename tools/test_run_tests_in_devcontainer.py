@@ -1,16 +1,19 @@
 """Focused unit tests for the devcontainer test-isolation wrapper.
 
-These tests never invoke Docker or the real ``devcontainer``/``git`` CLIs --
-they exercise the wrapper's own logic (argument parsing, git-environment
-scrubbing, the tracked/untracked file selection, the bounded-volume and
-per-instance config/volume rewrite, the linked-worktree git-dir
-materialization, the privileged workspace population, and the
-Docker/devcontainer-CLI invocation shape) via subprocess mocking, matching
-the style of ``test_run_plugin_tests.py``. A real, Docker-backed end-to-end
-run is exercised manually (see the effort README's Phase 1 journal), not in
-the repository's default test portfolio, since it requires a working Docker
-daemon and network access to pull a base image -- neither of which this
-repo's unit-test tier guarantees.
+These tests never invoke Docker or the real ``devcontainer`` CLI, but
+several DO invoke the real ``git`` CLI against small, throwaway repositories
+built in ``tmp_path`` (the ``_materialized_git_dir`` tests) -- that function
+makes several sequential `git bundle`/`clone`/`fetch` calls whose real
+behavior is the point being tested, not something subprocess mocking could
+meaningfully stand in for. Everything else (argument parsing,
+git-environment scrubbing, the tracked-file selection, the bounded-volume
+and per-instance config/volume rewrite, the privileged workspace population,
+and the Docker/devcontainer-CLI invocation shape) is exercised via
+subprocess mocking, matching the style of ``test_run_plugin_tests.py``. A
+real, Docker-backed end-to-end run is exercised manually (see the effort
+README's Phase 1 journal), not in the repository's default test portfolio,
+since it requires a working Docker daemon and network access to pull a base
+image -- neither of which this repo's unit-test tier guarantees.
 """
 from __future__ import annotations
 
@@ -48,27 +51,35 @@ def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> N
     assert env["GIT_TERMINAL_PROMPT"] == "0"
 
 
-def test_tracked_and_untracked_paths_filters_excluded_prefixes() -> None:
+def test_tracked_paths_defaults_to_cached_only_and_filters_excluded_prefixes() -> None:
     fake_result = mock.Mock(
         returncode=0,
         stdout=b"TESTING.md\0.test-venvs/linux/foo\0.devcontainer/devcontainer.json\0tools/x.py\0",
         stderr=b"",
     )
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
-        paths = wrapper._tracked_and_untracked_paths()
+        paths = wrapper._tracked_paths(include_untracked=False)
     assert paths == ["TESTING.md", "tools/x.py"]
     args, kwargs = run.call_args
-    assert args[0][:4] == ["git", "-C", str(wrapper.REPO), "ls-files"]
-    assert "--exclude-standard" in args[0]
+    assert args[0] == ["git", "-C", str(wrapper.REPO), "ls-files", "-z", "--cached"]
     # Must use the scrubbed environment, not the ambient one.
     assert kwargs["env"] == wrapper._scrubbed_git_env()
 
 
-def test_tracked_and_untracked_paths_raises_on_git_failure() -> None:
+def test_tracked_paths_include_untracked_adds_others_exclude_standard() -> None:
+    fake_result = mock.Mock(returncode=0, stdout=b"TESTING.md\0", stderr=b"")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
+        wrapper._tracked_paths(include_untracked=True)
+    args = run.call_args.args[0]
+    assert args == ["git", "-C", str(wrapper.REPO), "ls-files", "-z",
+                     "--cached", "--others", "--exclude-standard"]
+
+
+def test_tracked_paths_raises_on_git_failure() -> None:
     fake_result = mock.Mock(returncode=128, stdout=b"", stderr=b"not a git repository")
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
         try:
-            wrapper._tracked_and_untracked_paths()
+            wrapper._tracked_paths(include_untracked=False)
         except SystemExit as exc:
             assert "not a git repository" in str(exc)
         else:
@@ -327,11 +338,11 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
     real_file.write_text("hello\n")
 
     monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack, passthrough: fake_git_dir)
-    monkeypatch.setattr(wrapper, "_tracked_and_untracked_paths", lambda: ["tracked.txt"])
+    monkeypatch.setattr(wrapper, "_tracked_paths", lambda *, include_untracked: ["tracked.txt"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
 
     dest = tmp_path / "out.tar"
-    wrapper._write_tar_of_repo(dest, ["agent-worktrees"])
+    wrapper._write_tar_of_repo(dest, ["agent-worktrees"], include_untracked=False)
     with tarfile.open(dest) as tar:
         names = set(tar.getnames())
     assert ".git/HEAD" in names
@@ -341,10 +352,12 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
 def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:
     written_paths: list[Path] = []
     written_passthrough: list[list[str]] = []
+    written_include_untracked: list[bool] = []
 
-    def fake_write_tar(dest: Path, passthrough: list[str]) -> None:
+    def fake_write_tar(dest: Path, passthrough: list[str], *, include_untracked: bool) -> None:
         written_paths.append(dest)
         written_passthrough.append(passthrough)
+        written_include_untracked.append(include_untracked)
         dest.write_bytes(b"not-empty")
 
     monkeypatch.setattr(wrapper, "_write_tar_of_repo", fake_write_tar)
@@ -352,10 +365,11 @@ def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) ->
     chmod_result = mock.Mock(returncode=0, stderr="")
     with mock.patch.object(wrapper.subprocess, "run",
                             side_effect=[tar_result, chmod_result]) as run:
-        wrapper._populate_workspace("container-9", ["--changed"])
+        wrapper._populate_workspace("container-9", ["--changed"], include_untracked=True)
     assert run.call_count == 2
     assert len(written_paths) == 1
     assert written_passthrough == [["--changed"]]
+    assert written_include_untracked == [True]
 
     tar_call = run.call_args_list[0]
     tar_args = tar_call.args[0]
@@ -374,11 +388,12 @@ def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) ->
 
 
 def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> None:
-    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest, passthrough: dest.write_bytes(b""))
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo",
+                         lambda dest, passthrough, *, include_untracked: dest.write_bytes(b""))
     tar_result = mock.Mock(returncode=1, stderr=b"tar: permission denied")
     with mock.patch.object(wrapper.subprocess, "run", return_value=tar_result):
         try:
-            wrapper._populate_workspace("container-9", [])
+            wrapper._populate_workspace("container-9", [], include_untracked=False)
         except SystemExit as exc:
             assert "permission denied" in str(exc)
         else:
@@ -386,12 +401,13 @@ def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> Non
 
 
 def test_populate_workspace_raises_when_chmod_fails(monkeypatch) -> None:
-    monkeypatch.setattr(wrapper, "_write_tar_of_repo", lambda dest, passthrough: dest.write_bytes(b""))
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo",
+                         lambda dest, passthrough, *, include_untracked: dest.write_bytes(b""))
     tar_result = mock.Mock(returncode=0, stderr=b"")
     chmod_result = mock.Mock(returncode=1, stderr="chmod: operation not permitted")
     with mock.patch.object(wrapper.subprocess, "run", side_effect=[tar_result, chmod_result]):
         try:
-            wrapper._populate_workspace("container-9", [])
+            wrapper._populate_workspace("container-9", [], include_untracked=False)
         except SystemExit as exc:
             assert "operation not permitted" in str(exc)
         else:
@@ -503,7 +519,7 @@ def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) 
                          lambda label: (Path("/tmp/fake-devcontainer-dir/devcontainer.json"), "fake-volume"))
     monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
     monkeypatch.setattr(wrapper, "_bring_up", lambda label, config_path: "container-1")
-    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough: None)
+    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough, *, include_untracked: None)
     monkeypatch.setattr(wrapper, "_run_tests",
                          lambda container_id, config_path, passthrough: calls.append(passthrough) or 0)
     monkeypatch.setattr(wrapper, "_tear_down", lambda container_id, volume_name: None)
@@ -536,7 +552,7 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
                          lambda label: (config_path, "fake-volume"))
     monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
     monkeypatch.setattr(wrapper, "_bring_up", lambda label, cfg: "container-2")
-    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough: None)
+    monkeypatch.setattr(wrapper, "_populate_workspace", lambda container_id, passthrough, *, include_untracked: None)
     monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
     monkeypatch.setattr(
         wrapper, "_tear_down",

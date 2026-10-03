@@ -114,13 +114,17 @@ already-small, single-contract files is not required.
 `tools/run_tests_in_devcontainer.py` is an opt-in wrapper around the turn-key
 runner above that additionally runs it inside a hardened, ephemeral
 devcontainer (`.devcontainer/devcontainer.json`) -- a real OS-level
-filesystem/network boundary on top of (not instead of) the turn-key runner's
-own process-level containment. It exists for the case the turn-key runner
-cannot cover on its own: a buggy or adversarial test that escapes
-process-level containment via an absolute path write, a raw socket, or a
-privilege a job object doesn't restrict. See
+filesystem/privilege boundary on top of (not instead of) the turn-key
+runner's own process-level containment. **Networking is NOT yet part of
+that boundary** -- the container keeps Docker's default bridge network with
+full outbound reach (a known, named, open design gap; see the effort
+README's Phase 1 journal), so a test can still open ordinary sockets and
+reach external or host/LAN services. The filesystem/privilege boundary
+exists for the case the turn-key runner cannot cover on its own: a buggy or
+adversarial test that escapes process-level containment via an absolute
+path write or a privilege a job object doesn't restrict. See
 `efforts/active/devcontainer-test-isolation/README.md` for the full design
-rationale and the live-validated findings (Phase 0) that shaped it.
+rationale and the findings (Phase 0) that shaped it.
 
 Requires the [devcontainers CLI](https://github.com/devcontainers/cli)
 (`npm i -g @devcontainers/cli`) and a working Docker daemon. Linux only --
@@ -132,11 +136,13 @@ nothing there.
 python tools/run_tests_in_devcontainer.py agent-worktrees
 python tools/run_tests_in_devcontainer.py --changed
 python tools/run_tests_in_devcontainer.py --all -- -k some_filter
+python tools/run_tests_in_devcontainer.py --include-untracked agent-worktrees
 ```
 
-Everything after the wrapper's own small flag set (or a literal `--`
-anywhere in the remaining arguments) is passed straight through to
-`tools/run-plugin-tests.py` *inside* the container. The wrapper:
+Everything after the wrapper's own small flag set (`--keep`,
+`--include-untracked`; or a literal `--` anywhere in the remaining
+arguments) is passed straight through to `tools/run-plugin-tests.py`
+*inside* the container. The wrapper:
 
 1. Writes a per-invocation copy of `.devcontainer/devcontainer.json` with
    its workspace volume name made unique to this run, creates that volume
@@ -145,17 +151,22 @@ anywhere in the remaining arguments) is passed straight through to
    via `devcontainer up` -- **never** a bind mount of the host checkout.
 2. Copies a point-in-time snapshot of the host checkout into that volume
    (a `tar` file streamed through `docker exec`'s stdin). The working-tree
-   files come from `git ls-files --cached --others --exclude-standard` --
-   git-tracked plus untracked-but-not-ignored files, deliberately NOT every
-   file physically present under the checkout, so gitignored (and
-   potentially secret-bearing) files are never copied into a container that
-   then has outbound network access. `.git` is handled separately and
-   deliberately minimally: rather than copying the real git database
-   wholesale (which would carry every branch, stash, reflog, and
-   unreachable object -- local-only content having nothing to do with the
-   plugin suite being run, into a container that can still reach the
-   network), a `git bundle` containing only the object closure of `HEAD`
-   and the `--changed` diff base (`--base`, or that runner's own
+   files come from `git ls-files --cached` by DEFAULT -- git-tracked files
+   only, deliberately NOT every file physically present under the checkout
+   and NOT untracked files either: this repository has no blanket
+   `.gitignore` rule for `.env`-style config or arbitrary credential
+   filenames, so an untracked-but-not-ignored secret file sitting in the
+   working tree would otherwise still be copied into a container that then
+   has outbound network access. Pass `--include-untracked` to additionally
+   include untracked-but-not-gitignored files (e.g. to test a new,
+   not-yet-committed file) -- a deliberate, explicit opt-in, never the
+   default. `.git` is handled separately and deliberately minimally: rather
+   than copying the real git database wholesale (which would carry every
+   branch, stash, reflog, and unreachable object -- local-only content
+   having nothing to do with the plugin suite being run, into a container
+   that can still reach the network), a `git bundle` containing only the
+   object closure of `HEAD` and the `--changed` diff base (`--base`, or
+   that runner's own
    `origin/main` default when `--base` isn't passed) is built and cloned
    into a fresh, minimal git directory instead -- this also transparently
    handles a linked worktree's `.git` (this repo's own required flow,
@@ -188,10 +199,12 @@ currently left at Docker's default bridge (a known, named, open design gap
 validated against a real container, not merely asserted.
 
 Because the workspace is a fresh copy rather than the live checkout, an
-uncommitted change you're actively testing is included (the copy happens at
-invocation time from the working tree, not from a commit), and a fresh,
-per-invocation volume means no state (including prior test artifacts)
-carries over between runs.
+uncommitted MODIFICATION to a tracked file is included (the copy reads the
+working tree's current on-disk content at invocation time, not the
+committed blob) -- but a new, never-committed file is NOT included unless
+`--include-untracked` is passed, per the tracked-files-by-default policy
+above. A fresh, per-invocation volume means no state (including prior test
+artifacts) carries over between runs.
 
 
 ## Local Windows SSH proxy regression

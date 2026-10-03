@@ -342,13 +342,14 @@ verbatim ask.
       tools/run_tests_in_devcontainer.py ai-attribution` invocation --
       confirmed the container tore itself down afterward and the host
       checkout's `git status` showed no unexpected changes. Unit tests
-      (`tools/test_run_tests_in_devcontainer.py`, 29 tests) cover the
-      wrapper's own logic (argument parsing, git-environment scrubbing, the
-      tracked/untracked file selection, the per-instance config/volume
-      rewrite, the linked-worktree git-dir materialization, the privileged
-      workspace population, and the Docker/devcontainer-CLI invocation
-      shape) via subprocess mocking, in the style of
-      `test_run_plugin_tests.py`, and are wired into the required
+      (`tools/test_run_tests_in_devcontainer.py`) cover the wrapper's own
+      logic (argument parsing, git-environment scrubbing, the tracked-file
+      selection, the per-instance config/volume rewrite, the git-bundle
+      snapshot materialization -- the last via real `git` subprocess calls
+      against throwaway repositories, not mocked, since that logic's real
+      behavior is the point being tested -- the privileged workspace
+      population, and the Docker/devcontainer-CLI invocation shape), in the
+      style of `test_run_plugin_tests.py`, and are wired into the required
       `test-runner-linux` CI job alongside that module; the real,
       Docker-backed end-to-end run above is a manual validation step, not
       part of the default test portfolio, since it needs a working Docker
@@ -647,4 +648,36 @@ passes, and a fresh Docker-backed end-to-end run (`ai-attribution`, 98
 passed / 6 skipped) plus a `--changed --base origin/dev` run were both
 executed from scratch afterward against the new bundle-based snapshot
 path.
+
+### 2026-10-03 — Review round 5: 4 findings addressed (tracked-files-only default)
+Automated review raised four items on the round-4 push: (1) **HIGH**: even
+after round 4's bundle-based `.git` fix, the working-tree snapshot still
+used `--cached --others --exclude-standard`, which includes every
+untracked-but-not-gitignored file -- this repository has no blanket
+`.gitignore` rule for `.env`-style config or arbitrary credential
+filenames, so a genuinely untracked secret file sitting in the working tree
+would still be copied into a container with full outbound egress. Fixed by
+making tracked files (`git ls-files --cached` only) the default, with a new
+explicit `--include-untracked` wrapper flag required to opt into also
+copying untracked-but-not-gitignored files (e.g. to test a new,
+not-yet-committed file) -- never the default. (2) `TESTING.md` and
+`.devcontainer/devcontainer.json`'s own comments called this "a real
+OS-level filesystem/**network** boundary" while the container still keeps
+full outbound egress -- corrected to "filesystem/**privilege** boundary"
+with an explicit callout that networking is not yet part of it. (3) a
+Plan-item cross-reference hardcoded an exact test count ("29 tests") that
+was already stale by the time it was reviewed -- replaced with a
+description that doesn't need updating every time a test is added. (4) the
+test module's own docstring claimed subprocess-mocking throughout, but the
+git-bundle materialization tests (added in round 4) genuinely invoke the
+real `git` CLI against throwaway repositories -- the docstring now says so
+directly, including why (that logic's real behavior is the point being
+tested).
+
+Re-validated end-to-end: the full unit test suite (35 tests) passes
+(including two new tests for the tracked-vs-include-untracked selection),
+a Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms the new tracked-only default still runs real suites correctly,
+and a second run with `--include-untracked` against a deliberately added
+untracked marker file confirms the opt-in path still works end-to-end too.
 

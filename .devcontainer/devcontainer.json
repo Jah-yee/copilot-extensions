@@ -5,8 +5,10 @@
   // general interactive development environment (that remains
   // `agent-containers`' own trusted-development-venue posture, a separate
   // concern); it exists solely so a plugin's pytest suite can run with a
-  // real OS-level filesystem/network boundary instead of (or on top of)
+  // real OS-level filesystem/privilege boundary instead of (or on top of)
   // `tools/run-plugin-tests.py`'s existing process-level containment.
+  // Networking is NOT (yet) part of that boundary -- see this file's own
+  // networking comment below, a known, named, open design gap.
   //
   // Linux-only (this repo's CI already covers the Windows-specific
   // containment paths `TESTING.md` describes via its own windows-latest

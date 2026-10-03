@@ -62,9 +62,9 @@ WORKSPACE_VOLUME_SIZE = "4g"
 # Excluded from the point-in-time copy made into the container even if
 # `git ls-files` would otherwise include them: large, host-specific
 # artifacts the test run inside the container does not need and should not
-# reproduce. Belt-and-suspenders only -- `_tracked_and_untracked_paths`
-# already excludes anything gitignored (including `.test-venvs`, which is
-# git-ignored per `TESTING.md`).
+# reproduce. Belt-and-suspenders only -- `_tracked_paths` already excludes
+# anything gitignored (including `.test-venvs`, which is git-ignored per
+# `TESTING.md`).
 EXCLUDED_TOP_LEVEL = {
     ".test-venvs",
     ".devcontainer",
@@ -205,21 +205,24 @@ def _bring_up(instance_label: str, config_path: Path) -> str:
     return container_id
 
 
-def _tracked_and_untracked_paths() -> list[str]:
-    """Repo-relative paths of every file the snapshot should contain:
-    git-tracked files plus untracked-but-not-ignored ones -- deliberately
-    NOT every file physically present under ``REPO``. A plain directory
-    walk would also copy gitignored, potentially secret-bearing files
-    (local credentials, `.env`-style config) into a container that then has
-    outbound network access, letting an adversarial/buggy test exfiltrate
-    host-only state. ``git ls-files`` with ``--exclude-standard`` is the
-    same boundary contributors and CI already trust to keep such files out
-    of the repository in the first place."""
-    res = subprocess.run(
-        ["git", "-C", str(REPO), "ls-files", "-z",
-         "--cached", "--others", "--exclude-standard"],
-        capture_output=True, timeout=60, env=_scrubbed_git_env(),
-    )
+def _tracked_paths(*, include_untracked: bool) -> list[str]:
+    """Repo-relative paths of files the snapshot should contain --
+    deliberately NOT every file physically present under ``REPO``. Default
+    (``include_untracked=False``) is git-TRACKED files only
+    (``git ls-files --cached``): this repository has no blanket `.gitignore`
+    rule for `.env`-style config or arbitrary credential filenames, so an
+    untracked-but-not-ignored secret file sitting in the working tree would
+    otherwise still be copied into a container that has outbound network
+    access, letting an adversarial/buggy test exfiltrate it -- tracked
+    files are the only set contributors and CI already trust as safe to
+    share. ``include_untracked=True`` (the wrapper's own ``--include-
+    untracked`` flag) additionally includes untracked-but-not-gitignored
+    files via ``--others --exclude-standard``, for the deliberate, opt-in
+    case of testing new, not-yet-committed files -- never the default."""
+    args = ["git", "-C", str(REPO), "ls-files", "-z", "--cached"]
+    if include_untracked:
+        args += ["--others", "--exclude-standard"]
+    res = subprocess.run(args, capture_output=True, timeout=60, env=_scrubbed_git_env())
     if res.returncode != 0:
         raise SystemExit(
             f"git ls-files failed: {res.stderr.decode(errors='replace').strip()}"
@@ -362,7 +365,7 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     return merged
 
 
-def _write_tar_of_repo(dest: Path, passthrough: list[str]) -> None:
+def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked: bool) -> None:
     """Write a tarball of the host checkout to ``dest`` on disk (never held
     in memory as one ``bytes`` object -- a checkout with a large object
     store or build artifacts could otherwise need several times its own
@@ -370,15 +373,16 @@ def _write_tar_of_repo(dest: Path, passthrough: list[str]) -> None:
     own copy of an ``input=`` payload). Only ever READS the host tree --
     ``.git`` is handled via ``_materialized_git_dir``, which builds a
     separate, temporary, minimal-history copy rather than touching the real
-    one; everything else comes from ``_tracked_and_untracked_paths``, so
-    gitignored (and potentially secret-bearing) files are never included."""
+    one; everything else comes from ``_tracked_paths``, so gitignored (and,
+    unless ``include_untracked`` is explicitly set, untracked) files are
+    never included."""
     with tarfile.open(dest, mode="w") as tar, contextlib.ExitStack() as stack:
         tar.add(_materialized_git_dir(stack, passthrough), arcname=".git")
-        for rel_path in _tracked_and_untracked_paths():
+        for rel_path in _tracked_paths(include_untracked=include_untracked):
             tar.add(REPO / rel_path, arcname=rel_path)
 
 
-def _populate_workspace(container_id: str, passthrough: list[str]) -> None:
+def _populate_workspace(container_id: str, passthrough: list[str], *, include_untracked: bool) -> None:
     """Copy a point-in-time snapshot of the host checkout into the
     container's workspace VOLUME (never a host bind -- see
     ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
@@ -396,7 +400,7 @@ def _populate_workspace(container_id: str, passthrough: list[str]) -> None:
     with tempfile.NamedTemporaryFile(
         prefix="devcontainer-test-isolation-snapshot-", suffix=".tar",
     ) as tar_file:
-        _write_tar_of_repo(Path(tar_file.name), passthrough)
+        _write_tar_of_repo(Path(tar_file.name), passthrough, include_untracked=include_untracked)
         tar_file.seek(0)
         res = subprocess.run(
             [
@@ -503,6 +507,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--keep", action="store_true",
                      help="leave the container running after the test run (debugging)")
+    ap.add_argument("--include-untracked", action="store_true",
+                     help=(
+                         "also copy untracked-but-not-gitignored files into the "
+                         "snapshot (default: tracked files only -- an untracked "
+                         "secret-shaped file sitting in the working tree is not "
+                         "necessarily gitignored, so this is opt-in, not default)"
+                     ))
     ns, passthrough = ap.parse_known_args(argv)
     # "--" is argparse's own flags/positionals separator, not a real
     # run-plugin-tests.py argument -- strip every occurrence (not just a
@@ -520,13 +531,14 @@ def main(argv: list[str] | None = None) -> int:
             _cleanup_orphan(instance_label, volume_name)
             raise
         try:
-            _populate_workspace(container_id, passthrough)
+            _populate_workspace(container_id, passthrough, include_untracked=ns.include_untracked)
             return _run_tests(container_id, config_path, passthrough)
         finally:
             if not ns.keep:
                 _tear_down(container_id, volume_name)
     finally:
         shutil.rmtree(config_path.parent, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

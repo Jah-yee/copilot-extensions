@@ -94,7 +94,10 @@ _REPOSITORY_CONTEXT_ENV = frozenset({
     "GIT_COMMON_DIR",
     "GIT_CONFIG",
     "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
     "GIT_DIR",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_GRAFT_FILE",
@@ -114,16 +117,16 @@ _REPOSITORY_CONTEXT_ENV = frozenset({
 
 def _scrubbed_git_env() -> dict[str, str]:
     """Ambient environment with every repository-selection variable
-    removed -- every git subprocess below supplies its target repository
-    explicitly via ``-C``; any of these inherited variables would silently
-    override that. Also forces ``GIT_OPTIONAL_LOCKS=0`` (even a nominally
-    read-only ``git status`` against the REAL host checkout can otherwise
-    refresh/rewrite the index, violating this wrapper's read-only-host
-    guarantee), and unconditionally ``GIT_NO_LAZY_FETCH=1``/
-    ``GIT_NO_REPLACE_OBJECTS=1`` (a partial clone could otherwise lazily
-    fetch missing objects INTO the host repo while resolving ``HEAD``/
-    ``--base``, or a local replacement ref could substitute different
-    history into the bundle) -- all four mirror
+    removed (including the config-selector trio `GIT_CONFIG_GLOBAL`/
+    `GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`, which select/disable
+    config independent of `-C`) -- every git subprocess below supplies
+    its target repository explicitly via `-C`; any inherited variable
+    would silently override that. Also forces `GIT_OPTIONAL_LOCKS=0`
+    (even a read-only `git status` against the REAL host checkout can
+    otherwise refresh/rewrite the index) and unconditionally
+    `GIT_NO_LAZY_FETCH=1`/`GIT_NO_REPLACE_OBJECTS=1` (a partial clone
+    could lazily fetch objects INTO the host repo, or a local replacement
+    ref could substitute different history into the bundle) -- all mirror
     `tools/agent_bridge_contract_git.py`'s own hardened environment."""
     env = os.environ.copy()
     for name in list(env):
@@ -232,26 +235,20 @@ def _tracked_paths(*, include_untracked: bool) -> list[str]:
     rule for `.env`-style config or arbitrary credential filenames, so an
     untracked-but-not-ignored secret file sitting in the working tree would
     otherwise still be copied into a container that has outbound network
-    access, letting an adversarial/buggy test exfiltrate it -- tracked
-    files are the set contributors and CI already trust to keep secrets
-    OUT OF THE REPOSITORY. ``include_untracked=True`` (the wrapper's own
-    ``--include-untracked`` flag) additionally includes
+    access -- tracked files are the set contributors and CI already trust
+    to keep secrets OUT OF THE REPOSITORY. ``include_untracked=True`` (the
+    wrapper's own ``--include-untracked`` flag) additionally includes
     untracked-but-not-gitignored files via ``--others --exclude-standard``,
-    for the deliberate, opt-in case of testing new, not-yet-committed files
-    -- never the default.
+    for the deliberate, opt-in case of testing new, uncommitted files.
 
     Known, accepted residual exposure: this boundary is about which PATHS
     are copied, not which bytes -- the content read for a tracked path is
-    the CURRENT on-disk file (so uncommitted edits you're actively testing
-    are included; see ``_write_tar_of_repo``), not the last-committed blob.
-    A secret pasted directly into an otherwise-tracked, ordinarily-safe
-    file (e.g. a config example) and never committed is therefore still
-    copied in. A clean CI checkout has no such dirty state; a contributor's
-    local checkout might. This is a deliberate tradeoff (the tool's whole
-    point is testing in-progress, uncommitted changes), not an oversight --
-    but "tracked" must never be read as "every byte in it is safe,"
-    only as "this path itself isn't the kind of thing that normally
-    carries secrets."
+    the CURRENT on-disk file (uncommitted edits included; see
+    ``_write_tar_of_repo``), not the last-committed blob, so a secret
+    pasted into an otherwise-tracked file and never committed is still
+    copied in. "Tracked" must never be read as "every byte in it is safe,"
+    only as "this path isn't the kind of thing that normally carries
+    secrets."
     """
     args = ["git", "-C", str(REPO), "ls-files", "-z", "--cached"]
     if include_untracked:
@@ -465,13 +462,17 @@ def _git_rev_parse(ref: str) -> str | None:
     -- this function's own contract is never to fail outright on an
     unresolvable ref. Whether that's actually tolerable is the CALLER's
     decision: `_materialized_git_dir` treats it as fatal (`SystemExit`)
-    when changed-selection mode is active (since
-    `tools/run-plugin-tests.py`'s own `changed_plugins()` would otherwise
-    silently report "no plugin suites to run" instead of the real
-    problem), but tolerates it (falling back to a `HEAD`-only bundle) when
-    changed-selection isn't in play at all."""
+    when changed-selection mode is active, but tolerates it (falling back
+    to a `HEAD`-only bundle) otherwise.
+
+    Peels to ``ref^{commit}`` rather than resolving ``ref`` bare: plain
+    ``rev-parse --verify`` accepts ANY object type, but the downstream
+    ``git diff <base>...HEAD`` needs a commit-ish -- letting a non-commit
+    object pass here would bypass this contract, only to fail that later
+    diff and silently select no suites. ``--end-of-options`` keeps a ref
+    starting with ``-`` from being misread as a flag."""
     res = subprocess.run(
-        ["git", "-C", str(REPO), "rev-parse", "--verify", ref],
+        ["git", "-C", str(REPO), "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
         capture_output=True, text=True, timeout=30, env=_scrubbed_git_env(),
     )
     return res.stdout.strip() if res.returncode == 0 else None

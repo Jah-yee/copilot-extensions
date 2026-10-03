@@ -47,11 +47,20 @@ def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> N
     monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
     monkeypatch.setenv("GIT_WORK_TREE", "/somewhere/else")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.foo")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/somewhere/else/.gitconfig")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/somewhere/else/gitconfig")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "0")
     monkeypatch.setenv("UNRELATED_VAR", "kept")
     env = wrapper._scrubbed_git_env()
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
     assert "GIT_CONFIG_KEY_0" not in env
+    # These select/disable config independent of `-C`, so an injected
+    # config could otherwise still alter the hardened Git probes below
+    # (notably the fail-closed `_warn_about_dirty_tracked_files` check).
+    assert "GIT_CONFIG_GLOBAL" not in env
+    assert "GIT_CONFIG_SYSTEM" not in env
+    assert "GIT_CONFIG_NOSYSTEM" not in env
     assert env.get("UNRELATED_VAR") == "kept"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     # Without this, even a nominally read-only `git status` against the
@@ -330,7 +339,10 @@ def test_git_rev_parse_returns_sha_on_success() -> None:
         result = wrapper._git_rev_parse("origin/dev")
     assert result == "deadbeef"
     args, kwargs = run.call_args
-    assert args[0] == ["git", "-C", str(wrapper.REPO), "rev-parse", "--verify", "origin/dev"]
+    assert args[0] == [
+        "git", "-C", str(wrapper.REPO), "rev-parse", "--verify",
+        "--end-of-options", "origin/dev^{commit}",
+    ]
     assert kwargs["env"] == wrapper._scrubbed_git_env()
 
 
@@ -338,6 +350,30 @@ def test_git_rev_parse_returns_none_when_unresolvable() -> None:
     fake_result = mock.Mock(returncode=128, stdout="", stderr="unknown revision")
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
         assert wrapper._git_rev_parse("no-such-ref") is None
+
+
+def test_git_rev_parse_rejects_a_non_commit_object(tmp_path: Path, monkeypatch) -> None:
+    # Plain `rev-parse --verify` accepts ANY object type -- a tree/blob
+    # expression resolves fine there, but the downstream `git diff
+    # <base>...HEAD` needs a commit-ish, so letting a non-commit object
+    # pass here would bypass this function's own resolvability contract.
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
+    tree_sha = _run_git(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    assert wrapper._git_rev_parse(tree_sha) is None
+    head_sha = _run_git(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert wrapper._git_rev_parse("HEAD") == head_sha
 
 
 def _run_git(args: list[str], **kwargs):

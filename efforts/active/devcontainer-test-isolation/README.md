@@ -1416,3 +1416,37 @@ background run, confirmed full teardown with no leftover container or
 volume) to confirm the restructure didn't regress the mechanism itself.
 Docker cleanup and host `git status --short` reconfirmed clean of
 anything beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (thirteenth pass): 2 findings addressed (complete the git config env scrub, require a commit base)
+A thirteenth review pass of the same round confirmed the prior fixes
+resolved and raised no genuinely new findings -- only two more
+previously-missed ones against earlier code. MEDIUM:
+`_REPOSITORY_CONTEXT_ENV` still permitted `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_NOSYSTEM` through from the caller --
+those select/disable config independently of `-C`, so an injected config
+could still alter the hardened Git probes this scrub exists to protect
+(notably the fail-closed `_warn_about_dirty_tracked_files` check), even
+though every other repository-selection variable was already scrubbed.
+Fixed by adding all three to the scrub set, matching the repo's own
+complete precedent for this class. MEDIUM: `_git_rev_parse` resolved
+`ref` via plain `rev-parse --verify`, which accepts ANY object type (a
+tree or blob expression resolves fine) -- but the downstream `git diff
+<base>...HEAD` that consumes this value needs a commit-ish, so a
+non-commit base could bypass this function's own resolvability contract,
+only to fail that later diff and silently select no suites. Fixed by
+peeling to `ref^{commit}` (with `--end-of-options` to keep a ref starting
+with `-` from being misread as a flag), confirmed via direct
+experimentation that a tree SHA is correctly rejected while a genuine
+commit ref still resolves.
+
+Re-validated end-to-end: the full unit test suite (84 tests, including
+updated scrub-set assertions, an updated exact-command assertion for the
+peeled `rev-parse` invocation, and a new real-git regression test proving
+a tree object is rejected while `HEAD` still resolves) passes;
+`check-module-size.py --changed-since origin/dev` passes; a fresh
+Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms the common case still works; a dedicated `--changed --base
+origin/dev~1` run confirms changed-mode still resolves and diffs
+correctly through the peeled commit check. Docker cleanup and host
+`git status --short` reconfirmed clean of anything beyond this round's
+own diff.

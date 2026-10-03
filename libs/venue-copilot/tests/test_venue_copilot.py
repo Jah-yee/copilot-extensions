@@ -551,6 +551,59 @@ class TestDetachedRunner:
         assert "--copilot-arg=--no-ask-user" in launch
         assert released == [("anchor-repo@venue", "r1")]
 
+    def _launch_resume(self, monkeypatch, protocol: int | None) -> tuple[int, dict[str, Any], list]:
+        from venue_copilot import detached
+
+        def health(_port):
+            if protocol is None:
+                raise OSError("connection refused")
+            return {"protocol_version": protocol}
+
+        monkeypatch.setattr("venue_copilot._daemon_health", health)
+        monkeypatch.setattr("venue_copilot.detached.resolve_daemon_port", lambda: 41234)
+        monkeypatch.setattr("venue_copilot.detached.resolve_local_auth_token", lambda: "tok")
+        monkeypatch.setattr(
+            "venue_copilot.detached.reserve_with_retry",
+            lambda scope, venue, **kw: {"reservation_id": "r1"},
+        )
+        monkeypatch.setattr("venue_copilot.detached.await_claim", lambda scope, rid, timeout: "sid-42")
+        monkeypatch.setattr("venue_copilot.detached.release_cli_mode", lambda *a, **k: 1)
+        adapter = _Adapter()
+        adapter.launch_payload = {**adapter.launch_payload, "created": False}
+        steps: list = []
+        rc, payload = detached.launch_detached(
+            adapter, self._plan(), seed=None, driver=None,
+            copilot_args=["--resume=abc"], ensure_mux=True, register_timeout=0.0,
+            progress=lambda *a: steps.append(a),
+        )
+        return rc, payload, steps
+
+    @pytest.mark.parametrize("protocol", [19, None])
+    def test_a_resume_on_a_daemon_without_aliases_reports_a_provisional_handle(
+        self, monkeypatch, protocol
+    ) -> None:
+        """The alias floor is checked before launch, not only when a note is sent:
+        a resume with nothing to deliver must not report a normal handle."""
+        rc, payload, steps = self._launch_resume(monkeypatch, protocol)
+        assert rc == 0
+        assert payload["session_handle"] == "provisional"
+        assert "live-session aliases" in payload["handle_warning"]
+        assert steps[0][0] == "handle"  # reported before anything was reserved or launched
+
+    def test_a_resume_on_an_alias_capable_daemon_reports_a_normal_handle(self, monkeypatch) -> None:
+        rc, payload, steps = self._launch_resume(monkeypatch, 21)
+        assert rc == 0
+        assert "session_handle" not in payload and "handle_warning" not in payload
+        assert not any(step[0] == "handle" for step in steps)
+
+    def test_a_fresh_launch_never_asks_the_daemon(self) -> None:
+        from venue_copilot import unstable_handle_warning
+
+        def health(_port):
+            raise AssertionError("a launch that can't switch ids needs no protocol check")
+
+        assert unstable_handle_warning(41234, ["--no-ask-user"], health=health) is None
+
     def test_handle_never_echoes_runner_configuration(self, monkeypatch) -> None:
         from venue_copilot import detached
 

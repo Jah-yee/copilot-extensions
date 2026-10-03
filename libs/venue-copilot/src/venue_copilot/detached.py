@@ -25,6 +25,7 @@ from . import (
     seed_delivery,
     seed_outcome,
     trust_folder_command,
+    unstable_handle_warning,
     with_new_session,
 )
 
@@ -179,6 +180,9 @@ def launch_detached(
                 plan,
                 error="the host agent-bridge daemon has no readable auth token",
             )
+        handle_warning = unstable_handle_warning(daemon_port, copilot_args)
+        if handle_warning:
+            progress("handle", handle_warning)
 
         rc, _out, err = adapter.run(
             registration_credentials_script(token, daemon_port),
@@ -344,6 +348,8 @@ def launch_detached(
             keeper=keeper,
             **seed_extra,
             **refs_extra,
+            **({"session_handle": "provisional", "handle_warning": handle_warning}
+               if handle_warning else {}),
             commands={
                 **observe_commands(session_id),
                 "attach": adapter.attach_command(plan),

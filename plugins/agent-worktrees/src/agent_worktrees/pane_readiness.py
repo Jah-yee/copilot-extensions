@@ -68,7 +68,8 @@ def _live_box(capture: str) -> bool:
         return False
     tail = lines[bottom + 1:]
     return len(tail) <= _MAX_FOOTER_LINES and all(
-        _is_footer_row(line) and not _SHELL_TAIL.search(line) for line in tail
+        _is_footer_row(line) and not _SHELL_TAIL.search(line) and not _SHELL_HEAD.match(line)
+        for line in tail
     )
 
 

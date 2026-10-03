@@ -535,6 +535,11 @@ def cmd_detach(
     daemon_port = resolve_daemon_port()
     if not daemon_port:
         return _fail("the host agent-bridge daemon is not running (no routing table)", plan)
+    from venue_copilot import unstable_handle_warning
+
+    handle_warning = unstable_handle_warning(daemon_port, copilot_args)
+    if handle_warning:
+        _progress("handle", handle_warning)
     if not owner.ensure_owner_running(config):
         return _fail(
             "the Connection Owner could not be started; a detached session needs it "
@@ -782,6 +787,8 @@ def cmd_detach(
                if seed_unconfirmed else {}),
             # A rejoin of a running session applied none of them: nothing was recalled.
             **({"recalled": recalled} if recalled and created else {}),
+            **({"session_handle": "provisional", "handle_warning": handle_warning}
+               if handle_warning else {}),
             "plugin_dirs": captured.get("plugin_dirs", []),
             **({"reverse_forwards": reverse_forwards,
                 "reverse_forwards_ready": forwards_ready} if reverse_forwards else {}),

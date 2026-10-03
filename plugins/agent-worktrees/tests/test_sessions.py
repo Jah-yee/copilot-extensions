@@ -2009,6 +2009,15 @@ def test_output_with_generic_key_words_under_a_box_is_not_ready():
     assert pane_readiness.ready_signature(two_rows) == "boxed-input"
 
 
+def test_a_root_prompt_with_typed_text_under_a_stale_box_is_not_ready():
+    """``# echo ready`` reads like a "#" key hint, but it is a root shell prompt
+    with typed text: a stale box above it is scrollback, not live input."""
+    from agent_worktrees import pane_readiness
+
+    for prompt in ("# echo ready", "# ls", "$ echo ready", "% make test"):
+        assert pane_readiness.ready_signature(_BOXED_INPUT + prompt + "\n") is None, prompt
+
+
 def test_an_attached_powershell_or_cmd_prompt_is_not_ready():
     from agent_worktrees import pane_readiness
 

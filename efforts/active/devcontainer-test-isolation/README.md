@@ -1123,3 +1123,35 @@ teardown ran to completion (no leftover container or volume) in the
 non-`--keep` case, while `--keep` correctly continued to preserve both
 for debugging. Docker cleanup and host `git status --short` reconfirmed
 clean of anything beyond this round's own diff after every pass.
+
+### 2026-10-03 — Review round 15 (final-final pass): 1 finding addressed (SIGTERM during cleanup itself)
+A fifth review pass of the same round confirmed the SIGTERM fix above but
+spotted a signal-timing race in it: a SECOND `SIGTERM` arriving WHILE
+`_tear_down`/`_cleanup_orphan` is already running (e.g. between removing
+a container and removing its volume -- two separate sequential subprocess
+calls) would raise `_TerminationRequested` again right there, and since
+those cleanup functions only catch `subprocess.SubprocessError`/`OSError`,
+the second exception escapes immediately and could skip whichever
+removal step hadn't run yet -- reopening the exact leak the first SIGTERM
+fix was meant to close. Fixed with a new `_sigterm_deferred` context
+manager that sets `SIGTERM` to `SIG_IGN` for the duration of a cleanup
+step, restoring whatever handler was previously installed afterward;
+wired around both the orphan-cleanup call (bring-up failure path) and the
+`_tear_down` call (normal teardown path).
+
+Re-validated end-to-end: the full unit test suite (68 tests, including a
+new `_sigterm_deferred` ignore-then-restore test and a new integration-
+style test confirming `signal.getsignal(SIGTERM)` is genuinely `SIG_IGN`
+during a real `_tear_down` call, not merely assumed) passes; a fresh
+Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms the common case still works; Docker cleanup and host
+`git status --short` reconfirmed clean of anything beyond this round's
+own diff.
+
+With this fix landed, five full review passes within round 15 have each
+confirmed their predecessor's fixes resolved and raised only genuinely
+new findings (no regressions reopened) -- the PR author judges this a
+reasonable point to merge rather than continue iterating indefinitely
+against a non-blocking `COMMENTED` verdict (see
+`docs/pr-review-protocol.md` and the repo's own commented-verdict review
+fallback policy), absent a severe new finding on the next pass.

@@ -866,6 +866,25 @@ def _raise_on_sigterm(signum: int, frame: object) -> None:
     raise _TerminationRequested(f"received signal {signum}")
 
 
+@contextlib.contextmanager
+def _sigterm_deferred():
+    """Temporarily ignore ``SIGTERM`` for the duration of a cleanup step
+    (``_tear_down``/``_cleanup_orphan``), restoring whatever handler was
+    previously installed afterward. Without this, a SECOND ``SIGTERM``
+    arriving WHILE cleanup is already running (e.g. between removing the
+    container and removing its volume in `_tear_down`, two separate
+    sequential subprocess calls) would raise `_TerminationRequested` again
+    right there -- `_tear_down`/`_cleanup_orphan` only catch
+    `subprocess.SubprocessError`/`OSError`, so that second exception
+    escapes immediately and can skip whichever removal step hadn't run
+    yet, reopening the exact leak `_raise_on_sigterm` exists to prevent."""
+    previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Converts a SIGTERM into a normal raised exception so this
     # function's own try/finally cleanup runs -- see
@@ -901,7 +920,8 @@ def main(argv: list[str] | None = None) -> int:
             _create_bounded_volume(volume_name)
             container_id = _bring_up(instance_label, config_path)
         except BaseException:
-            _cleanup_orphan(instance_label, volume_name)
+            with _sigterm_deferred():
+                _cleanup_orphan(instance_label, volume_name)
             raise
         # The primary test path's own result (a nonzero exit code) OR
         # exception must win over a secondary teardown failure -- a raised
@@ -925,7 +945,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if not ns.keep:
                 try:
-                    _tear_down(container_id, volume_name)
+                    with _sigterm_deferred():
+                        _tear_down(container_id, volume_name)
                 except BaseException as teardown_exc:
                     if not primary_failed:
                         raise

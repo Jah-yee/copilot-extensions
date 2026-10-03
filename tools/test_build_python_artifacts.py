@@ -387,6 +387,22 @@ def test_resolve_vendored_libs_sibling_cross_reference(fake_repo: Path):
     assert libs["b"] == lib_b.resolve()
 
 
+def test_find_in_tree_lib_sources_rejects_cross_plugin_escape(fake_repo: Path):
+    # Regression: a non-editable path resolving to an UNRELATED plugin's
+    # libs/ directory (not the consumer's own, nor a sibling in the same
+    # parent libs/ folder) must not be accepted as a legitimate in-tree
+    # vendored copy -- `materialize_nested_uv_editable_refs` enforces this
+    # identical "expected sibling location" constraint.
+    other_plugin_dir = fake_repo / "plugins" / "other"
+    _seed_in_tree_lib(other_plugin_dir, "widget")
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_in_tree_pyproject(
+        plugin_dir, sources={"demo-widget": "../other/libs/widget"}
+    )
+
+    assert bpa.find_in_tree_lib_sources(plugin_dir) == []
+
+
 def test_resolve_vendored_libs_in_tree_missing_src_raises(fake_repo: Path):
     plugin_dir = fake_repo / "plugins" / "demo"
     lib_dir = plugin_dir / "libs" / "widget"
@@ -412,6 +428,27 @@ def test_resolve_vendored_libs_in_tree_symlink_raises(fake_repo: Path):
         # (some sandboxed/locked-down hosts) path resolution THROUGH a
         # freshly created symlink is itself blocked -- both are
         # environment limitations unrelated to the behavior under test.
+        pytest.skip("symlinks are not fully usable in this environment")
+    _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
+def test_resolve_vendored_libs_in_tree_nested_symlink_raises(fake_repo: Path):
+    # Regression: the lib directory itself is a real directory (not a
+    # symlink), but a file WITHIN it is a symlink -- the shallow
+    # `unresolved.is_symlink()` check alone would miss this, letting
+    # hashing/building silently follow it outside the vendored tree.
+    plugin_dir = fake_repo / "plugins" / "demo"
+    lib_dir = _seed_in_tree_lib(plugin_dir, "widget")
+    outside = fake_repo / "outside.txt"
+    outside.write_text("not part of the vendored tree", encoding="utf-8")
+    link = lib_dir / "src" / "widget" / "escape.py"
+    try:
+        link.symlink_to(outside)
+        link.resolve(strict=True)
+    except OSError:
         pytest.skip("symlinks are not fully usable in this environment")
     _write_in_tree_pyproject(plugin_dir, sources={"demo-widget": "libs/widget"})
 
@@ -652,9 +689,33 @@ def test_build_plugin_artifacts_end_to_end(
     assert manifest["python_tag"] == "py3"
     assert {e["role"] for e in manifest["wheels"]} == {"plugin", "vendored-lib"}
     assert len(manifest["wheels"]) == 2
+    for wheel_entry in manifest["wheels"]:
+        # Regression: each wheel's OWN parsed tags must be recorded, not
+        # just the artifact set's aggregate ones.
+        assert wheel_entry["python_tag"] == "py3"
+        assert wheel_entry["abi_tag"] == "none"
+        assert wheel_entry["platform_tag"] == "any"
     manifest_path = out_dir / "demo-0.1.0-manifest.json"
     assert manifest_path.is_file()
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+
+
+def test_build_plugin_artifacts_rejects_nested_symlink_in_plugin_dir(
+    fake_repo: Path,
+):
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_pyproject(plugin_dir)
+    outside = fake_repo / "outside.txt"
+    outside.write_text("not part of the plugin tree", encoding="utf-8")
+    link = plugin_dir / "escape.py"
+    try:
+        link.symlink_to(outside)
+        link.resolve(strict=True)
+    except OSError:
+        pytest.skip("symlinks are not fully usable in this environment")
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.build_plugin_artifacts("demo", out_dir=fake_repo / "dist")
 
 
 def test_build_plugin_artifacts_payload_hash_excludes_build_residue(

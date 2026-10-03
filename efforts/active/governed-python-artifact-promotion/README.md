@@ -491,6 +491,27 @@ win grows with build complexity.
   (`tools/test_build_python_artifacts.py`), including one derived directly
   from the real `agent-worktrees` cross-reference bug the smoke test found;
   re-verified `agent-bridge` and `agent-worktrees` both build correctly.
+- A sixth review round confirmed the recursive-discovery fix and found 3
+  more real issues against it: the in-tree lib validation only checked the
+  lib directory itself for a symlink, missing one nested anywhere below it
+  (fixed by reusing `uv_editable_ref._find_symlink`'s own recursive check,
+  applied to both vendored libs and -- a second occurrence of the same
+  gap -- the top-level plugin directory itself, which had no symlink
+  protection at all); the in-tree discovery's `candidate.parent.name ==
+  "libs"` check was too permissive, accepting a non-editable path that
+  escaped to an UNRELATED plugin's `libs/` directory (fixed by constraining
+  accepted locations to the consumer's own `libs/` or, when the consumer
+  itself already lives directly under a directory named `libs`, that same
+  parent `libs/` folder -- matching `materialize_nested_uv_editable_refs`'s
+  own identical "expected sibling location" constraint); and the manifest
+  only recorded the artifact SET's aggregate tags, not each wheel's own
+  parsed `python_tag`/`abi_tag`/`platform_tag` as the effort's own
+  documentation already claimed (fixed by adding them to every wheel
+  entry). 52 unit tests now, 3 environment-conditional (skip when this
+  particular sandboxed machine's own symlink-resolution restriction makes
+  the scenario unexercisable, same limitation already noted for `uv`
+  itself elsewhere in this effort's Journal); re-verified both plugins
+  build correctly, with their manifests' wheel entries now carrying tags.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

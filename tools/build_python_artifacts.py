@@ -111,21 +111,32 @@ def _read_sources_table(consumer_dir: Path) -> dict:
 def find_in_tree_lib_sources(consumer_dir: Path) -> list[tuple[str, str, str]]:
     """Every NON-editable ``[tool.uv.sources]`` entry in ``consumer_dir``'s
     `pyproject.toml` whose `path` resolves to a directory literally named
-    `libs/<lib>` -- an ordinary, already-vendored/materialized copy, the
-    complement of `uv_editable_ref.find_uv_editable_refs`'s editable-only
-    scope (an entry is classified by its `editable` marker, not by whether
-    it escapes ``consumer_dir``'s own tree): this covers BOTH a plugin's
-    own `libs/<lib>` (nested within its root) AND a vendored lib
-    cross-referencing a SIBLING vendored lib one level up (e.g.
-    `plugins/agent-worktrees/libs/plugin-activation` depending on
-    `../dropin-registry`, which escapes `plugin-activation`'s own root but
-    is still an ordinary frozen copy, not a dev-branch live reference).
-    This is the ONLY shape left to discover once promotion's own
-    `materialize_main.py` has rewritten every plugin's live editable
-    reference into exactly this local, in-tree form; some plugins (e.g.
-    `agent-worktrees`) also use it permanently, by design, even on `dev`.
-    Returns ``(name, raw_path, lib)`` tuples."""
+    `libs/<lib>` under an ALLOWED location -- an ordinary, already-
+    vendored/materialized copy, the complement of
+    `uv_editable_ref.find_uv_editable_refs`'s editable-only scope (an entry
+    is classified by its `editable` marker, not by whether it escapes
+    ``consumer_dir``'s own tree): this covers BOTH a plugin's own
+    `libs/<lib>` (nested within its root) AND a vendored lib
+    cross-referencing a SIBLING vendored lib in the SAME parent `libs/`
+    folder (e.g. `plugins/agent-worktrees/libs/plugin-activation` depending
+    on `../dropin-registry`, which escapes `plugin-activation`'s own root
+    but lands in the same `plugins/agent-worktrees/libs/` it already lives
+    in). The allowed set is deliberately narrow -- ``consumer_dir``'s own
+    `libs/` and, only when ``consumer_dir`` itself already lives directly
+    under a directory named `libs`, that SAME parent `libs/` folder -- so a
+    non-editable path can never escape to an unrelated plugin's `libs/`
+    directory elsewhere in the repo; `materialize_nested_uv_editable_refs`
+    enforces this identical "expected sibling location" constraint for the
+    materialization step itself. This is the ONLY shape left to discover
+    once promotion's own `materialize_main.py` has rewritten every
+    plugin's live editable reference into exactly this local, in-tree
+    form; some plugins (e.g. `agent-worktrees`) also use it permanently,
+    by design, even on `dev`. Returns ``(name, raw_path, lib)`` tuples."""
     sources = _read_sources_table(consumer_dir)
+    consumer_root = consumer_dir.resolve()
+    allowed_libs_dirs = {consumer_root / "libs"}
+    if consumer_root.parent.name == "libs":
+        allowed_libs_dirs.add(consumer_root.parent)
     out: list[tuple[str, str, str]] = []
     for name, entry in sources.items():
         if not isinstance(entry, dict) or "path" not in entry:
@@ -139,7 +150,7 @@ def find_in_tree_lib_sources(consumer_dir: Path) -> list[tuple[str, str, str]]:
                 f"{consumer_dir}: [tool.uv.sources] {name!r}'s path is not a string"
             )
         candidate = (consumer_dir / raw_path).resolve()
-        if candidate.parent.name != "libs":
+        if candidate.parent not in allowed_libs_dirs:
             continue
         out.append((name, raw_path, candidate.name))
     return out
@@ -157,7 +168,13 @@ def _validate_in_tree_lib_dir(label: str, unresolved: Path) -> Path:
     Takes the UNRESOLVED candidate path and checks `.is_symlink()` on it
     directly -- `Path.resolve()` follows symlinks, so checking a path
     that's already been resolved can never detect one; this must run
-    before resolving. Returns the resolved canonical directory."""
+    before resolving. Also walks the ENTIRE tree for a nested symlink
+    (reusing `uv_editable_ref._find_symlink` -- the same check
+    `uv_editable_problems` applies to the escaping form) -- checking only
+    the lib directory itself would miss a symlink anywhere below it, which
+    hashing/building would then silently follow and consume bytes from
+    outside the vendored tree entirely. Returns the resolved canonical
+    directory."""
     if unresolved.is_symlink():
         raise ArtifactBuildError(f"{label}: {unresolved} is a symlink -- refusing")
     canonical = unresolved.resolve()
@@ -167,6 +184,13 @@ def _validate_in_tree_lib_dir(label: str, unresolved: Path) -> Path:
         raise ArtifactBuildError(f"{label}: {canonical}/src does not exist")
     if not (canonical / "pyproject.toml").is_file():
         raise ArtifactBuildError(f"{label}: {canonical}/pyproject.toml is missing")
+    nested = uer._find_symlink(canonical)
+    if nested is not None:
+        where = canonical if nested == "." else canonical / nested
+        raise ArtifactBuildError(
+            f"{label}: {where} is a symlink -- refusing (a vendored lib tree "
+            "must contain only real files)"
+        )
     return canonical
 
 
@@ -544,6 +568,14 @@ def build_plugin_artifacts(
     plugin_dir = PLUGINS_DIR / plugin
     if not (plugin_dir / "pyproject.toml").is_file():
         raise ArtifactBuildError(f"{plugin_dir}: no pyproject.toml -- not a plugin")
+    plugin_nested_symlink = uer._find_symlink(plugin_dir)
+    if plugin_nested_symlink is not None:
+        where = plugin_dir if plugin_nested_symlink == "." else plugin_dir / plugin_nested_symlink
+        raise ArtifactBuildError(
+            f"{where} is a symlink -- refusing (a plugin's own tree must "
+            "contain only real files; hashing/building would otherwise "
+            "silently follow it and consume bytes from outside the tree)"
+        )
 
     vendored_libs = resolve_vendored_libs(plugin_dir)
 
@@ -589,6 +621,9 @@ def build_plugin_artifacts(
             "filename": plugin_wheel.name,
             "sha256": sha256_file(plugin_wheel),
             "generator": plugin_generator,
+            "python_tag": plugin_info["python_tag"],
+            "abi_tag": plugin_info["abi_tag"],
+            "platform_tag": plugin_info["platform_tag"],
         }
     )
 
@@ -607,6 +642,9 @@ def build_plugin_artifacts(
                 "filename": lib_wheel.name,
                 "sha256": sha256_file(lib_wheel),
                 "generator": lib_generator,
+                "python_tag": lib_info["python_tag"],
+                "abi_tag": lib_info["abi_tag"],
+                "platform_tag": lib_info["platform_tag"],
             }
         )
 

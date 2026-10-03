@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
+import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -22,6 +26,7 @@ from agent_dispatch.repository_issue_loops import (
     _forge_provider_for,
     _latest_reservations,
     _marker,
+    _resource_key,
     expand_repository_issue_loop,
     occurrence_epoch,
     run_tick,
@@ -1673,7 +1678,7 @@ def test_claim_does_not_reuse_a_different_loops_comment():
     [
         ({"source": ""}, "source"),
         ({"batch_size": 0}, "batch_size"),
-        ({"forge": {"provider": "other"}}, "only \\['azure-devops', 'github'\\]"),
+        ({"forge": {"provider": "other"}}, "only \\['azure-devops', 'github', 'script'\\]"),
         ({"forge": {"provider": "github"}}, "producer_login"),
         ({"reservation": {"label": "x", "comment": False}}, "must be true"),
         ({"pool": {"max_active_processes": 2}}, "concurrency must be 1"),
@@ -1886,7 +1891,9 @@ def test_validate_config_rejects_gitea_provider_until_implemented():
     accepting it here would let a declaration validate cleanly and then fail
     forever on its first tick, so it must stay rejected until a real adapter
     lands (ThomasMichon/copilot-extensions#4825)."""
-    with pytest.raises(RegistrarError, match="only \\['azure-devops', 'github'\\]"):
+    with pytest.raises(
+        RegistrarError, match="only \\['azure-devops', 'github', 'script'\\]"
+    ):
         validate_config(
             _config(
                 repo="example-org/example-project",
@@ -1946,6 +1953,1168 @@ def test_gitea_provider_is_an_explicit_stub(operation, args):
     provider = GiteaProvider("issue-bot")
     with pytest.raises(NotImplementedError, match="copilot-extensions#4825"):
         getattr(provider, operation)(*args)
+
+
+# -- script forge provider (Phase 2 of agent-dispatch-recipe-composability) ---
+
+def test_validate_config_requires_command_for_script_provider(tmp_path):
+    with pytest.raises(RegistrarError, match="forge.command: required"):
+        validate_config(
+            _config(
+                repo="my-backlog",
+                forge={"provider": "script", "producer_login": "issue-bot"},
+            )
+        )
+
+
+def test_validate_config_rejects_script_fields_for_github_provider():
+    with pytest.raises(RegistrarError, match="only supported for forge.provider 'script'"):
+        validate_config(
+            _config(
+                forge={
+                    "provider": "github",
+                    "producer_login": "issue-bot",
+                    "command": ["./script.sh"],
+                }
+            )
+        )
+
+
+def test_validate_config_accepts_a_non_owner_name_repo_for_script_provider(tmp_path):
+    """The script interprets `repo` itself -- the motivating consumer's
+    own case has no real forge-shaped 'owner/name' concept at all."""
+    (tmp_path / "script.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./script.sh"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert config["repo"] == "pending-work-items"
+
+
+def test_validate_config_resolves_a_relative_script_command_against_repo_root(tmp_path):
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./tools/poller.py", "--flag"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert config["forge"]["command"] == [
+        sys.executable,
+        str((tmp_path / "tools" / "poller.py").resolve()),
+        "--flag",
+    ]
+
+
+def test_validate_config_leaves_an_absolute_script_command_path_untouched(tmp_path):
+    absolute_script = str((tmp_path / "poller.py").resolve())
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": [absolute_script],
+            },
+        ),
+        cwd=tmp_path / "unrelated",
+    )
+    assert config["forge"]["command"] == [sys.executable, absolute_script]
+
+
+def test_validate_config_rejects_a_relative_script_command_with_no_repo_root(tmp_path):
+    """Regression guard: a direct declaration read with no resolvable
+    registrar context (no known repo root) must never silently fall back
+    to resolving a relative script path against the daemon process's own
+    incidental working directory."""
+    with pytest.raises(
+        RegistrarError, match="requires a known declaring repo root"
+    ):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.py"],
+                    "cwd": str(tmp_path),
+                },
+            ),
+        )
+
+
+def test_validate_config_rejects_an_unset_script_cwd_with_no_repo_root(tmp_path):
+    absolute_script = str((tmp_path / "poller.py").resolve())
+    with pytest.raises(RegistrarError, match="requires an absolute path"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": [absolute_script],
+                },
+            ),
+        )
+
+
+def test_validate_config_rejects_a_relative_script_cwd_with_no_repo_root(tmp_path):
+    absolute_script = str((tmp_path / "poller.py").resolve())
+    with pytest.raises(RegistrarError, match="requires an absolute path"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": [absolute_script],
+                    "cwd": "./subdir",
+                },
+            ),
+        )
+
+
+def test_validate_config_accepts_fully_absolute_script_fields_with_no_repo_root(tmp_path):
+    """An absolute `command`/`cwd` never depends on a repo root in the
+    first place, so a declaration using both is accepted even when no
+    repo root is known."""
+    absolute_script = str((tmp_path / "poller.py").resolve())
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": [absolute_script],
+                "cwd": str(tmp_path),
+            },
+        ),
+    )
+    assert config["forge"]["command"] == [sys.executable, absolute_script]
+    assert config["forge"]["cwd"] == str(tmp_path.resolve())
+
+
+def test_validate_config_prefixes_a_dot_sh_script_with_bash(tmp_path):
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.sh"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    bash = shutil.which("bash")
+    assert bash is not None
+    assert config["forge"]["command"] == [bash, str((tmp_path / "poller.sh").resolve())]
+
+
+def test_validate_config_leaves_a_non_script_suffix_command_unprefixed(tmp_path):
+    """An executable with no recognized interpreter-requiring suffix (e.g.
+    an already-compiled binary, or a shebang'd extensionless script) is
+    invoked directly, matching POSIX's own exec semantics."""
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert config["forge"]["command"] == [str((tmp_path / "poller").resolve())]
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("pwsh") is None,
+    reason="pwsh not available on this host to resolve",
+)
+def test_validate_config_prefixes_a_dot_ps1_script_with_pwsh(tmp_path):
+    import shutil as _shutil
+
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.ps1"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    pwsh = _shutil.which("pwsh")
+    assert config["forge"]["command"] == [
+        pwsh,
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        str((tmp_path / "poller.ps1").resolve()),
+    ]
+
+
+def test_validate_config_rejects_a_dot_sh_script_without_bash(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "agent_dispatch.script_provider.shutil.which", lambda _name: None
+    )
+    with pytest.raises(RegistrarError, match="requires bash"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.sh"],
+                },
+            ),
+            cwd=tmp_path,
+        )
+
+
+def test_validate_config_resolves_a_relative_script_cwd_against_repo_root(tmp_path):
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.py"],
+                "cwd": "./subdir",
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert config["forge"]["cwd"] == str((tmp_path / "subdir").resolve())
+
+
+def test_validate_config_defaults_script_cwd_to_the_repo_root(tmp_path):
+    """An unset `forge.cwd` must still anchor the subprocess to the
+    declaring repo root, never the daemon process's own incidental cwd --
+    the same rule `command`'s own resolution already follows."""
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert config["forge"]["cwd"] == str(tmp_path.resolve())
+
+
+
+def test_validate_config_defaults_script_timeout_and_accepts_an_override(tmp_path):
+    from agent_dispatch.script_provider import DEFAULT_TIMEOUT_SECONDS
+
+    default_config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert default_config["forge"]["timeout_seconds"] == DEFAULT_TIMEOUT_SECONDS
+
+    overridden = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.py"],
+                "timeout_seconds": 5,
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert overridden["forge"]["timeout_seconds"] == 5.0
+
+
+def test_validate_config_rejects_a_non_positive_script_timeout(tmp_path):
+    with pytest.raises(RegistrarError, match="timeout_seconds: expected a finite number > 0"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.py"],
+                    "timeout_seconds": 0,
+                },
+            ),
+            cwd=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("bad_timeout", [math.inf, -math.inf, math.nan])
+def test_validate_config_rejects_a_non_finite_script_timeout(tmp_path, bad_timeout):
+    with pytest.raises(RegistrarError, match="timeout_seconds: expected a finite number > 0"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.py"],
+                    "timeout_seconds": bad_timeout,
+                },
+            ),
+            cwd=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("bad_timeout", [1800.1, 1e308, 3600])
+def test_validate_config_rejects_an_excessively_large_script_timeout(tmp_path, bad_timeout):
+    """A very large but technically-finite timeout (e.g. `1e308`) still
+    reaches `Popen.communicate()` and raises `OverflowError` before
+    waiting at all -- finiteness alone is not a valid bound."""
+    with pytest.raises(RegistrarError, match=r"<= 1800"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.py"],
+                    "timeout_seconds": bad_timeout,
+                },
+            ),
+            cwd=tmp_path,
+        )
+
+
+def test_script_provider_init_rejects_an_excessively_large_timeout():
+    from agent_dispatch.script_provider import ScriptProvider
+
+    with pytest.raises(ValueError, match=r"<= 1800"):
+        ScriptProvider(["./poller.py"], timeout_seconds=1e308)
+
+
+def test_validate_config_rejects_a_huge_integer_script_timeout(tmp_path):
+    """A huge JSON/YAML integer (e.g. far beyond any float's range) raises
+    `OverflowError` on conversion to `float` rather than producing a
+    non-finite value -- the validator must still classify it as an
+    ordinary out-of-range timeout, not crash."""
+    with pytest.raises(RegistrarError, match=r"<= 1800"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.py"],
+                    "timeout_seconds": 10**400,
+                },
+            ),
+            cwd=tmp_path,
+        )
+
+
+def test_script_provider_init_rejects_a_huge_integer_timeout():
+    from agent_dispatch.script_provider import ScriptProvider
+
+    with pytest.raises(ValueError, match=r"<= 1800"):
+        ScriptProvider(["./poller.py"], timeout_seconds=10**400)
+
+
+def test_forge_provider_for_selects_script_provider(tmp_path):
+    from agent_dispatch.script_provider import ScriptProvider
+
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.py"],
+                "cwd": ".",
+                "timeout_seconds": 5,
+            },
+        ),
+        cwd=tmp_path,
+    )
+    provider = _forge_provider_for(config)
+    assert isinstance(provider, ScriptProvider)
+    assert provider.command == [sys.executable, str((tmp_path / "poller.py").resolve())]
+    assert provider.cwd == str(tmp_path.resolve())
+    assert provider.timeout_seconds == 5.0
+
+
+def test_forge_provider_for_does_not_corrupt_an_already_resolved_script_command(tmp_path):
+    """Regression guard: `run_tick` pre-validates `config` via
+    `validate_config(config, cwd=cwd)` (resolving + portability-wrapping
+    `forge.command` once) and then calls `_forge_provider_for(config,
+    cwd=cwd)` on that *already*-wrapped config. A naive re-normalization
+    there would treat the wrapped `command[0]` (e.g. `sys.executable`) as
+    if it were still the raw script path, double-wrapping it and
+    corrupting both the final argv and the resource-key namespace."""
+    from agent_dispatch.script_provider import ScriptProvider
+
+    config = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    expected_command = [sys.executable, str((tmp_path / "poller.py").resolve())]
+    assert config["forge"]["command"] == expected_command
+
+    # Same call shape `run_tick` itself uses after its own validate_config.
+    provider = _forge_provider_for(config, cwd=tmp_path)
+    assert isinstance(provider, ScriptProvider)
+    assert provider.command == expected_command
+    assert provider.producer_login == "issue-bot"
+
+
+def test_forge_provider_for_normalizes_a_rootless_absolute_script_command(tmp_path):
+    """Regression guard: a direct declaration read outside any recognized
+    registrar surface (no declaring repo root known, `cwd=None`) must
+    still have its already-absolute `.py` script wrapped with the
+    required interpreter prefix -- build_provider previously skipped
+    normalization entirely whenever `repo_root` was `None`, reaching the
+    subprocess with a bare, unwrapped argv that fails on Windows."""
+    from agent_dispatch.script_provider import ScriptProvider
+
+    absolute_script = str((tmp_path / "poller.py").resolve())
+    raw_config = {
+        "forge": {
+            "provider": "script",
+            "producer_login": "issue-bot",
+            "command": [absolute_script],
+            "cwd": str(tmp_path),
+        }
+    }
+    provider = _forge_provider_for(raw_config)  # no cwd -- no root known
+    assert isinstance(provider, ScriptProvider)
+    assert provider.command == [sys.executable, absolute_script]
+    assert provider.cwd == str(tmp_path.resolve())
+
+
+def test_resource_key_namespaces_script_providers_by_resolved_command(tmp_path):
+    """Regression guard: unlike a real `owner/name`/`organization/project`,
+    a script backlog's own `repo` has no inherent global-uniqueness
+    guarantee -- two unrelated declarations choosing the same `repo` label
+    must not collide on the coordinator's resource key merely because they
+    share that label."""
+    (tmp_path / "poller_a.py").write_text("", encoding="utf-8")
+    (tmp_path / "poller_b.py").write_text("", encoding="utf-8")
+    config_a = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller_a.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    config_b = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["./poller_b.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert _resource_key(config_a, 1) != _resource_key(config_b, 1)
+    # Same declaration, same issue -> stable/reproducible key.
+    assert _resource_key(config_a, 1) == _resource_key(config_a, 1)
+
+
+def test_resource_key_namespaces_the_same_script_differently_by_args_and_cwd(tmp_path):
+    """A reusable script declared with different arguments or working
+    directories for two distinct backlogs must not collide just because
+    they share both the script path and a `repo` label."""
+    (tmp_path / "poller.py").write_text("", encoding="utf-8")
+    (tmp_path / "work-a").mkdir()
+    (tmp_path / "work-b").mkdir()
+    base = {
+        "repo": "pending-work-items",
+        "forge": {
+            "provider": "script",
+            "producer_login": "issue-bot",
+            "command": ["./poller.py"],
+        },
+    }
+    config_args = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={**base["forge"], "command": ["./poller.py", "--backlog=a"]},
+        ),
+        cwd=tmp_path,
+    )
+    config_args2 = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={**base["forge"], "command": ["./poller.py", "--backlog=b"]},
+        ),
+        cwd=tmp_path,
+    )
+    assert _resource_key(config_args, 1) != _resource_key(config_args2, 1)
+
+    absolute_script = str((tmp_path / "poller.py").resolve())
+    config_cwd_a = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={**base["forge"], "command": [absolute_script], "cwd": "work-a"},
+        ),
+        cwd=tmp_path,
+    )
+    config_cwd_b = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={**base["forge"], "command": [absolute_script], "cwd": "work-b"},
+        ),
+        cwd=tmp_path,
+    )
+    assert _resource_key(config_cwd_a, 1) != _resource_key(config_cwd_b, 1)
+
+
+def _init_git_repo_with_remote(root, remote_url: str) -> None:
+    import subprocess as _subprocess
+
+    root.mkdir(parents=True, exist_ok=True)
+    _subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    _subprocess.run(
+        ["git", "remote", "add", "origin", remote_url], cwd=root, check=True
+    )
+
+
+def test_resource_key_is_stable_for_the_same_declaration_across_machine_local_roots(tmp_path):
+    """High-severity regression guard: the same logical declaration (the
+    same repo checkout, run on a second host for redundancy/failover, or
+    under a different local Python installation) must dedup against
+    itself through the coordinator. Both machine roots are real git
+    checkouts sharing one remote -- the namespace must resolve from that
+    canonicalized remote (stable cross-host identity), never the
+    machine-resolved absolute script path (which legitimately differs per
+    host/checkout)."""
+    machine_a_root = tmp_path / "machine-a" / "checkout"
+    machine_b_root = tmp_path / "machine-b" / "different-checkout-path"
+    remote_url = "git@example.com:org/pending-work-items.git"
+    _init_git_repo_with_remote(machine_a_root, remote_url)
+    _init_git_repo_with_remote(machine_b_root, remote_url)
+    (machine_a_root / "scripts").mkdir(parents=True)
+    (machine_b_root / "scripts").mkdir(parents=True)
+    forge = {
+        "provider": "script",
+        "producer_login": "issue-bot",
+        "command": ["./scripts/poller.py"],
+    }
+    config_a = validate_config(
+        _config(repo="pending-work-items", forge=forge), cwd=machine_a_root
+    )
+    config_b = validate_config(
+        _config(repo="pending-work-items", forge=forge), cwd=machine_b_root
+    )
+    # Different hosts resolve to genuinely different absolute script paths...
+    assert config_a["forge"]["command"] != config_b["forge"]["command"]
+    # ...but the coordinator namespace (and therefore the resource key)
+    # must still agree, so the two hosts dedup against the same backlog.
+    assert _resource_key(config_a, 1) == _resource_key(config_b, 1)
+
+
+def test_resource_key_distinguishes_unrelated_repos_sharing_a_script_path(tmp_path):
+    """High-severity regression guard: two *unrelated* repositories that
+    happen to declare the same relative script path, producer_login, and
+    `repo` label must not collide just because the raw declaration
+    spelling matches -- the declaring repository's own identity must be
+    part of the namespace."""
+    repo_a_root = tmp_path / "repo-a"
+    repo_b_root = tmp_path / "repo-b"
+    _init_git_repo_with_remote(repo_a_root, "git@example.com:org/repo-a.git")
+    _init_git_repo_with_remote(repo_b_root, "git@example.com:org/repo-b.git")
+    (repo_a_root / "scripts").mkdir(parents=True)
+    (repo_b_root / "scripts").mkdir(parents=True)
+    forge = {
+        "provider": "script",
+        "producer_login": "issue-bot",
+        "command": ["scripts/poller.py"],
+    }
+    config_a = validate_config(
+        _config(repo="pending-work-items", forge=forge), cwd=repo_a_root
+    )
+    config_b = validate_config(
+        _config(repo="pending-work-items", forge=forge), cwd=repo_b_root
+    )
+    assert _resource_key(config_a, 1) != _resource_key(config_b, 1)
+
+
+def test_resource_key_ignores_ambient_git_env_during_identity_probing(tmp_path, monkeypatch):
+    """High-severity regression guard: an ambient `GIT_DIR`/`GIT_WORK_TREE`
+    pointing at an unrelated repo must not redirect the declaring
+    repository's own identity probe -- the probe must resolve `repo_a`'s
+    own remote despite the poisoned environment, not silently adopt
+    `repo_b`'s."""
+    repo_a_root = tmp_path / "repo-a"
+    repo_b_root = tmp_path / "repo-b"
+    _init_git_repo_with_remote(repo_a_root, "git@example.com:org/repo-a.git")
+    _init_git_repo_with_remote(repo_b_root, "git@example.com:org/repo-b.git")
+    (repo_a_root / "scripts").mkdir(parents=True)
+    forge = {
+        "provider": "script",
+        "producer_login": "issue-bot",
+        "command": ["scripts/poller.py"],
+    }
+    clean_config = validate_config(
+        _config(repo="pending-work-items", forge=forge), cwd=repo_a_root
+    )
+    monkeypatch.setenv("GIT_DIR", str(repo_b_root / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(repo_b_root))
+    poisoned_config = validate_config(
+        _config(repo="pending-work-items", forge=forge), cwd=repo_a_root
+    )
+    assert _resource_key(clean_config, 1) == _resource_key(poisoned_config, 1)
+
+
+def test_resource_key_prefers_an_explicit_namespace_over_derivation(tmp_path):
+    """An explicit `forge.namespace` is the only cross-host-stable
+    guarantee strong enough for a correctness-critical redundant
+    deployment -- it must win outright over the best-effort auto-derived
+    identity, even when the auto-derived values would otherwise collide
+    or diverge."""
+    repo_a_root = tmp_path / "repo-a"
+    repo_b_root = tmp_path / "repo-b"
+    _init_git_repo_with_remote(repo_a_root, "git@example.com:org/repo-a.git")
+    _init_git_repo_with_remote(repo_b_root, "git@example.com:org/repo-b.git")
+    (repo_a_root / "scripts").mkdir(parents=True)
+    (repo_b_root / "scripts").mkdir(parents=True)
+    config_a = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["scripts/poller.py"],
+                "namespace": "shared-backlog",
+            },
+        ),
+        cwd=repo_a_root,
+    )
+    config_b = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "issue-bot",
+                "command": ["scripts/poller.py"],
+                "namespace": "shared-backlog",
+            },
+        ),
+        cwd=repo_b_root,
+    )
+    assert _resource_key(config_a, 1) == _resource_key(config_b, 1)
+
+
+def test_validate_config_rejects_an_empty_script_namespace(tmp_path):
+    with pytest.raises(RegistrarError, match="forge.namespace: expected a non-empty string"):
+        validate_config(
+            _config(
+                repo="pending-work-items",
+                forge={
+                    "provider": "script",
+                    "producer_login": "issue-bot",
+                    "command": ["./poller.py"],
+                    "namespace": "",
+                },
+            ),
+            cwd=tmp_path,
+        )
+
+
+def test_resource_key_namespaces_collapse_cosmetic_path_spelling(tmp_path):
+    """`./scripts/poller.py` and `scripts/poller.py` are the same backlog
+    and must produce the same namespace, or an overlapping-loop election
+    between the two spellings would never dedup."""
+    repo_root = tmp_path / "repo"
+    _init_git_repo_with_remote(repo_root, "git@example.com:org/repo.git")
+    (repo_root / "scripts").mkdir(parents=True)
+    base_forge = {"provider": "script", "producer_login": "issue-bot"}
+    config_dotslash = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={**base_forge, "command": ["./scripts/poller.py"]},
+        ),
+        cwd=repo_root,
+    )
+    config_bare = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={**base_forge, "command": ["scripts/poller.py"]},
+        ),
+        cwd=repo_root,
+    )
+    assert _resource_key(config_dotslash, 1) == _resource_key(config_bare, 1)
+
+
+def test_resource_key_namespaces_script_providers_by_producer_login(tmp_path):
+    """Two declarations sharing a `repo` label, script path, and cwd but
+    forwarding a different `producer_login` to the script select distinct
+    backlogs and must not collide."""
+    (tmp_path / "poller.py").write_text("", encoding="utf-8")
+    config_a = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "bot-a",
+                "command": ["./poller.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    config_b = validate_config(
+        _config(
+            repo="pending-work-items",
+            forge={
+                "provider": "script",
+                "producer_login": "bot-b",
+                "command": ["./poller.py"],
+            },
+        ),
+        cwd=tmp_path,
+    )
+    assert _resource_key(config_a, 1) != _resource_key(config_b, 1)
+
+
+def test_resource_key_leaves_github_namespacing_unchanged(tmp_path):
+    config = validate_config(
+        _config(repo="example/project", forge={"provider": "github", "producer_login": "bot"})
+    )
+    assert _resource_key(config, 1) == "forge:github:repository:example/project:issue:1"
+
+
+class _FakePopen:
+    """Minimal stand-in for ``subprocess.Popen`` used by ``ScriptProvider``
+    tests. ``poll()`` always reports already-exited so a timeout path's
+    ``terminate_process_tree(proc)`` call short-circuits immediately
+    rather than attempting a real ``taskkill``/``os.killpg``."""
+
+    def __init__(self, argv, *, kwargs=None, returncode=0, stdout="", stderr="", communicate_exc=None):
+        self.argv = argv
+        self.kwargs = kwargs or {}
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._communicate_exc = communicate_exc
+        self.communicate_calls = []
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_calls.append({"input": input, "timeout": timeout})
+        if self._communicate_exc is not None:
+            raise self._communicate_exc
+        return self._stdout, self._stderr
+
+    def poll(self):
+        return self.returncode
+
+
+@pytest.mark.parametrize("bad_timeout", [0, -1, math.inf, -math.inf, math.nan])
+def test_script_provider_init_rejects_a_non_finite_or_non_positive_timeout(bad_timeout):
+    """Defense-in-depth guard at the lowest-level constructor itself --
+    not every caller is required to route through
+    ``validate_script_forge_config`` first."""
+    from agent_dispatch.script_provider import ScriptProvider
+
+    with pytest.raises(ValueError, match="timeout_seconds must be a finite number > 0"):
+        ScriptProvider(["./poller.py"], timeout_seconds=bad_timeout)
+
+
+@pytest.mark.parametrize("bad_command", ["./poller.py", b"./poller.py"])
+def test_script_provider_init_rejects_string_or_bytes_command(bad_command):
+    """A plain string/bytes satisfies `Sequence[str]` character-by-character,
+    so without an explicit rejection `ScriptProvider("./poller.py")` would
+    be silently accepted and invoked as a nonsensical per-character argv."""
+    from agent_dispatch.script_provider import ScriptProvider
+
+    with pytest.raises(ValueError, match="non-empty list of non-empty strings"):
+        ScriptProvider(bad_command)
+
+
+def test_script_provider_list_open_issues_parses_a_well_formed_response():
+    from agent_dispatch.script_provider import ScriptProvider
+
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return _FakePopen(
+            argv,
+            kwargs=kwargs,
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "issues": [
+                        {
+                            "number": 1,
+                            "title": "Pending item",
+                            "url": "https://example/1",
+                            "labels": ["ready"],
+                            "created_at": 100.0,
+                            "updated_at": 200.0,
+                        }
+                    ]
+                }
+            ),
+        )
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    issues = provider.list_open_issues("my-repo")
+
+    assert issues == [Issue(1, "Pending item", "https://example/1", ("ready",), 100.0, 200.0)]
+    (argv, kwargs) = calls[0]
+    assert argv == ["./poller.py", "--op", "list_open_issues"]
+    assert kwargs["stdin"] == subprocess.PIPE
+    assert kwargs["shell"] is False
+    assert kwargs["encoding"] == "utf-8"
+
+
+def test_script_provider_reserve_claim_release_post_the_expected_payload():
+    from agent_dispatch.script_provider import ScriptProvider
+
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        proc = _FakePopen(argv, kwargs=kwargs, returncode=0, stdout="")
+        original_communicate = proc.communicate
+
+        def communicate(input=None, timeout=None):
+            calls.append((argv, json.loads(input)))
+            return original_communicate(input=input, timeout=timeout)
+
+        proc.communicate = communicate
+        return proc
+
+    provider = ScriptProvider(["./poller.py"], producer_login="issue-bot", popen=fake_popen)
+    issue = Issue(1, "t", "url", (), 0.0, 0.0)
+
+    provider.reserve("my-repo", issue, {"k": "v"})
+    provider.claim("my-repo", issue, {"k": "v"}, "task-1")
+    provider.release("my-repo", issue, {"k": "v"}, "stale")
+
+    ops = [argv[-1] for argv, _ in calls]
+    assert ops == ["reserve", "claim", "release"]
+    reserve_body = calls[0][1]
+    assert reserve_body["repo"] == "my-repo"
+    assert reserve_body["issue"]["number"] == 1
+    assert reserve_body["reservation"] == {"k": "v"}
+    assert reserve_body["producer_login"] == "issue-bot"
+    assert calls[1][1]["task_id"] == "task-1"
+    assert calls[2][1]["reason"] == "stale"
+
+
+def test_script_provider_surfaces_a_non_zero_exit_as_a_real_error():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(argv, kwargs=kwargs, returncode=1, stderr="boom")
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="exited 1: boom"):
+        provider.list_open_issues("my-repo")
+
+
+def test_script_provider_surfaces_a_timeout_as_a_distinct_error():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv,
+            kwargs=kwargs,
+            communicate_exc=subprocess.TimeoutExpired(cmd=argv, timeout=1.0),
+        )
+
+    provider = ScriptProvider(["./poller.py"], timeout_seconds=1.0, popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="timed out after 1.0s"):
+        provider.list_open_issues("my-repo")
+
+
+def test_script_provider_terminates_the_whole_process_tree_on_timeout():
+    """High-severity regression guard: a bare `subprocess.run(timeout=)`
+    kills only the immediate child, leaking descendants (notably a venv
+    `python.exe` launcher's re-exec'd grandchild on Windows). The timeout
+    path must call `terminate_process_tree`, not just let the exception
+    propagate."""
+    from agent_dispatch import procutil
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    terminated = []
+
+    def fake_terminate(proc, **kwargs):
+        terminated.append(proc)
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv,
+            kwargs=kwargs,
+            communicate_exc=subprocess.TimeoutExpired(cmd=argv, timeout=1.0),
+        )
+
+    original = procutil.terminate_process_tree
+    procutil.terminate_process_tree = fake_terminate
+    try:
+        provider = ScriptProvider(["./poller.py"], timeout_seconds=1.0, popen=fake_popen)
+        with pytest.raises(ScriptProviderError, match="timed out"):
+            provider.list_open_issues("my-repo")
+    finally:
+        procutil.terminate_process_tree = original
+    assert len(terminated) == 1
+
+
+def test_script_provider_reaps_the_process_on_an_overflow_error():
+    """Regression guard: an out-of-range `timeout_seconds` reaching the
+    platform wait call raises `OverflowError` before any waiting happens
+    (MAX_TIMEOUT_SECONDS should already prevent this through normal
+    validation, but a directly-constructed provider or a future platform
+    edge case must still reap the still-running process rather than
+    leaking it)."""
+    from agent_dispatch import procutil
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    terminated = []
+
+    def fake_terminate(proc, **kwargs):
+        terminated.append(proc)
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv, kwargs=kwargs, communicate_exc=OverflowError("timeout value too large")
+        )
+
+    original = procutil.terminate_process_tree
+    procutil.terminate_process_tree = fake_terminate
+    try:
+        provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+        with pytest.raises(ScriptProviderError, match="out of range"):
+            provider.list_open_issues("my-repo")
+    finally:
+        procutil.terminate_process_tree = original
+    assert len(terminated) == 1
+
+
+def test_script_provider_rejects_malformed_json_on_stdout():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(argv, kwargs=kwargs, returncode=0, stdout="not json{")
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="invalid JSON"):
+        provider.list_open_issues("my-repo")
+
+
+def test_script_provider_rejects_a_non_object_response():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(argv, kwargs=kwargs, returncode=0, stdout="[1,2,3]")
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="must be a JSON object"):
+        provider.list_open_issues("my-repo")
+
+
+def test_script_provider_rejects_a_malformed_issue_entry():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv,
+            kwargs=kwargs,
+            returncode=0,
+            stdout=json.dumps({"issues": [{"title": "missing number"}]}),
+        )
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="malformed issue entry"):
+        provider.list_open_issues("my-repo")
+
+
+_WELL_FORMED_ISSUE = {
+    "number": 1,
+    "title": "Pending item",
+    "url": "https://example/1",
+    "labels": ["ready"],
+    "created_at": 100.0,
+    "updated_at": 200.0,
+    "reservations": [],
+}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"number": 1.5},
+        {"number": True},
+        {"number": "1"},
+        {"title": None},
+        {"url": 42},
+        {"labels": "ready"},
+        {"labels": [1, 2]},
+        {"created_at": math.inf},
+        {"created_at": math.nan},
+        {"created_at": "100"},
+        {"updated_at": math.inf},
+        {"reservations": "not-a-list"},
+        {"reservations": ["not-a-mapping"]},
+        {"reservations": [{"loop": "backlog", "occurrence": 1, "state": "reserved",
+                            "at": 1.0, "label": "l", "issue": 999}]},
+        {"reservations": [{"loop": "backlog", "occurrence": 1, "state": "reserved",
+                            "at": math.inf, "label": "l", "issue": 1}]},
+        {"reservations": [{"loop": "backlog", "occurrence": 1, "state": "reserved",
+                            "at": math.nan, "label": "l", "issue": 1}]},
+        {"created_at": 10**400},
+    ],
+)
+def test_script_provider_rejects_each_mistyped_issue_field(override):
+    """High-severity regression guard: a script response that passes the
+    'has these keys' check but fails a *type* check must still raise
+    `ScriptProviderError`, never silently coerce (`int(1.5)`, `str(None)`),
+    misinterpret a string as a per-character label list, hand a
+    non-mapping reservation downstream to `_latest_reservations`'s own
+    `.get()` calls, or accept a reservation marker whose own schema
+    (loop/occurrence/state/at/label/issue/task_id/reason) doesn't match --
+    here, an `issue` field that doesn't match the containing issue's own
+    `number`."""
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    issue = {**_WELL_FORMED_ISSUE, **override}
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv, kwargs=kwargs, returncode=0, stdout=json.dumps({"issues": [issue]})
+        )
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="malformed issue entry"):
+        provider.list_open_issues("my-repo")
+
+
+def test_script_provider_accepts_a_well_formed_reservation_marker():
+    from agent_dispatch.script_provider import ScriptProvider
+
+    issue = {
+        **_WELL_FORMED_ISSUE,
+        "reservations": [
+            {
+                "loop": "backlog",
+                "occurrence": 1,
+                "state": "reserved",
+                "at": 1000.0,
+                "label": "agent-reserved",
+                "issue": 1,
+            }
+        ],
+    }
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv, kwargs=kwargs, returncode=0, stdout=json.dumps({"issues": [issue]})
+        )
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    (parsed,) = provider.list_open_issues("my-repo")
+    assert parsed.reservations == (
+        {
+            "loop": "backlog",
+            "occurrence": 1,
+            "state": "reserved",
+            "at": 1000.0,
+            "label": "agent-reserved",
+            "issue": 1,
+        },
+    )
+
+
+def test_script_provider_accepts_an_integer_reservation_timestamp():
+    """Regression guard: `at` as a plain JSON integer (not a float) must
+    not trip the finiteness check at all -- an int is unconditionally
+    finite, and applying `math.isfinite` to one risks `OverflowError` for
+    an arbitrarily large value."""
+    from agent_dispatch.script_provider import ScriptProvider
+
+    issue = {
+        **_WELL_FORMED_ISSUE,
+        "reservations": [
+            {
+                "loop": "backlog",
+                "occurrence": 1,
+                "state": "reserved",
+                "at": 1000,
+                "label": "agent-reserved",
+                "issue": 1,
+            }
+        ],
+    }
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv, kwargs=kwargs, returncode=0, stdout=json.dumps({"issues": [issue]})
+        )
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    (parsed,) = provider.list_open_issues("my-repo")
+    assert parsed.reservations[0]["at"] == 1000
+
+
+def test_script_provider_rejects_duplicate_issue_numbers():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    issue = dict(_WELL_FORMED_ISSUE)
+
+    def fake_popen(argv, **kwargs):
+        return _FakePopen(
+            argv,
+            kwargs=kwargs,
+            returncode=0,
+            stdout=json.dumps({"issues": [issue, dict(issue)]}),
+        )
+
+    provider = ScriptProvider(["./poller.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="duplicate issue number"):
+        provider.list_open_issues("my-repo")
+
+
+def test_script_provider_surfaces_a_start_failure_as_a_real_error():
+    from agent_dispatch.script_provider import ScriptProvider, ScriptProviderError
+
+    def fake_popen(argv, **kwargs):
+        raise FileNotFoundError("no such file")
+
+    provider = ScriptProvider(["./missing.py"], popen=fake_popen)
+    with pytest.raises(ScriptProviderError, match="failed to start"):
+        provider.list_open_issues("my-repo")
 
 
 def _ado_work_item(

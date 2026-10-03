@@ -1107,8 +1107,11 @@ def test_agent_worktrees_capture_preserves_posix_process_semantics(monkeypatch):
 
 
 def test_background_capture_reaps_tree_on_timeout(monkeypatch):
+    from agent_dispatch import companion
+
     class FakeProc:
         returncode = None
+        pid = 4242
 
         def communicate(self, *, timeout):
             raise subprocess.TimeoutExpired("probe", timeout)
@@ -1116,12 +1119,154 @@ def test_background_capture_reaps_tree_on_timeout(monkeypatch):
     fake_proc = FakeProc()
     reaped = []
     monkeypatch.setattr(procutil.subprocess, "Popen", lambda *_a, **_k: fake_proc)
+    monkeypatch.setattr(companion, "process_start_token", lambda _pid: "tok")
     monkeypatch.setattr(
-        procutil, "terminate_process_tree", lambda proc: reaped.append(proc)
+        procutil, "terminate_process_tree",
+        lambda proc, **_kwargs: reaped.append(proc),
     )
 
     assert procutil.run_background_capture(["probe"], timeout=3) is None
     assert reaped == [fake_proc]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group semantics")
+def test_terminate_process_tree_reaps_a_descendant_that_outlives_its_leader(tmp_path):
+    """High-severity regression guard: a leader that exits almost
+    immediately while a forked descendant keeps the leader's own stdout
+    pipe open (so a caller's ``communicate()`` blocks until its own
+    timeout) must still have that descendant reaped -- `proc.poll()`
+    already showing the leader exited must never short-circuit group
+    termination."""
+    marker = tmp_path / "still-alive"
+    script = tmp_path / "leader.py"
+    script.write_text(
+        "import os, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(5)\n"
+        f"    open({str(marker)!r}, 'w').close()\n"
+        "    sys.exit(0)\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.communicate(timeout=0.5)
+    finally:
+        procutil.terminate_process_tree(proc)
+    # The forked descendant sleeps 5s before writing the marker; give the
+    # (now-killed) descendant no realistic chance to still write it.
+    time.sleep(2.0)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group semantics")
+def test_terminate_process_tree_escalates_to_sigkill_when_the_group_ignores_sigterm(
+    tmp_path,
+):
+    """High-severity regression guard: waiting only on `proc` itself (the
+    already-exited leader) would return as soon as the leader is reaped,
+    regardless of a surviving descendant -- silently skipping both the
+    grace period and the SIGKILL escalation. The descendant here ignores
+    SIGTERM, so only an actual wait for group disappearance (not just
+    `proc.wait()`) forces the SIGKILL fallback to run and actually reap
+    it."""
+    marker = tmp_path / "still-alive"
+    script = tmp_path / "leader.py"
+    script.write_text(
+        "import os, signal, sys, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "    time.sleep(10)\n"
+        f"    open({str(marker)!r}, 'w').close()\n"
+        "    sys.exit(0)\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            proc.communicate(timeout=0.5)
+    finally:
+        procutil.terminate_process_tree(proc, grace=1.0)
+    assert not procutil._posix_process_group_alive(proc.pid)
+    time.sleep(1.0)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group semantics")
+def test_terminate_process_tree_signals_a_live_pid_matching_its_start_token(tmp_path):
+    """Direct live-match guard: a correct (matching) `expected_start_token`
+    must not block a genuinely-still-alive, genuinely-owned process from
+    being signaled."""
+    from agent_dispatch import companion
+
+    marker = tmp_path / "still-alive"
+    script = tmp_path / "leader.py"
+    script.write_text(
+        "import sys, time\n"
+        "time.sleep(10)\n"
+        f"open({str(marker)!r}, 'w').close()\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], start_new_session=True,
+    )
+    token = companion.process_start_token(proc.pid)
+    assert token is not None
+    try:
+        procutil.terminate_process_tree(proc, grace=1.0, expected_start_token=token)
+        assert not procutil._posix_process_group_alive(proc.pid)
+        time.sleep(1.0)
+        assert not marker.exists()
+    finally:
+        procutil.terminate_process_tree(proc, grace=0.1)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group semantics")
+def test_terminate_process_tree_refuses_a_stale_or_reused_pid(tmp_path, monkeypatch):
+    """High-severity regression guard: a caller's recorded `expected_start_token`
+    must fence termination against a PID that has since been reused by an
+    unrelated process -- refuse to signal rather than terminating a
+    process tree this call never actually spawned."""
+    marker = tmp_path / "still-alive"
+    script = tmp_path / "leader.py"
+    script.write_text(
+        "import sys, time\n"
+        "time.sleep(10)\n"
+        f"open({str(marker)!r}, 'w').close()\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], start_new_session=True,
+    )
+    try:
+        # Simulate the pid having been reused: the recorded token no longer
+        # matches whatever `process_start_token` reports now.
+        monkeypatch.setattr(
+            "agent_dispatch.companion.process_start_token",
+            lambda _pid: "a-completely-different-token",
+        )
+        procutil.terminate_process_tree(
+            proc, grace=0.2, expected_start_token="original-token"
+        )
+        # Refused: the real process (and marker) is still alive.
+        assert procutil._posix_process_group_alive(proc.pid)
+    finally:
+        monkeypatch.undo()
+        procutil.terminate_process_tree(proc, grace=0.1)
 
 
 def test_background_capture_returns_none_when_spawn_fails(monkeypatch):

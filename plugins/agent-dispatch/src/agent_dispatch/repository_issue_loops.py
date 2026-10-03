@@ -35,6 +35,10 @@ from .registrar import (
     _load_filters,
     load_declaration,
 )
+from .script_provider import (
+    SCRIPT_FORGE_KEYS, build_provider, script_resource_namespace,
+    validate_repo_field, validate_script_forge_config,
+)
 from .worker_identities import load_worker_identity
 
 _TERMINAL = frozenset({"submitted", "completed", "abandoned", "dead_letter"})
@@ -66,9 +70,9 @@ _KNOWN_KEYS = frozenset(
         "rehearsal_mode",
     }
 )
-_FORGE_KEYS = frozenset({"provider", "producer_login", "discovery_scope"})
+_FORGE_KEYS = frozenset({"provider", "producer_login", "discovery_scope"}) | SCRIPT_FORGE_KEYS
 #: Excludes "gitea" (stub only, gitea_provider_stub.py); add back once #4825 lands.
-_SUPPORTED_FORGE_PROVIDERS = frozenset({"github", "azure-devops"})
+_SUPPORTED_FORGE_PROVIDERS = frozenset({"github", "azure-devops", "script"})
 _RESERVATION_KEYS = frozenset({"label", "comment", "orphan_after_seconds"})
 _GITHUB_ISSUE_PAGE_SIZE = 100
 _GITHUB_MAX_ISSUE_PAGES = 10
@@ -235,12 +239,10 @@ def validate_config(data: Mapping[str, Any], *, cwd: str | Path | None = None) -
         raise RegistrarError(
             "repository-issue-loop forge.producer_login: expected a non-empty string"
         )
-    discovery_scope = validate_discovery_scope(forge, provider=forge.get("provider"))
-    if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
-        raise RegistrarError(
-            "repository-issue-loop repo: expected 'owner/name' (GitHub) or "
-            "'organization/project' (Azure DevOps)"
-        )
+    provider_name = forge.get("provider")
+    discovery_scope = validate_discovery_scope(forge, provider=provider_name)
+    script_config = validate_script_forge_config(forge, provider=provider_name, repo_root=cwd)
+    validate_repo_field(repo, provider=provider_name)
 
     reservation = data.get("reservation")
     if not isinstance(reservation, Mapping):
@@ -412,6 +414,7 @@ def validate_config(data: Mapping[str, Any], *, cwd: str | Path | None = None) -
             "provider": forge.get("provider"),
             "producer_login": producer_login,
             "discovery_scope": discovery_scope,
+            **(script_config or {}),
         },
         "reservation": {
             "label": label,
@@ -476,6 +479,9 @@ def occurrence_epoch(now: float, cadence_seconds: float) -> int:
 def _resource_key(config: Mapping[str, Any], issue_number: int) -> str:
     provider = str(config["forge"]["provider"]).casefold()
     repo = str(config["repo"]).casefold()
+    if provider == "script":
+        namespace = script_resource_namespace(config["forge"])
+        return f"forge:script:namespace:{namespace}:repository:{repo}:issue:{issue_number}"
     return f"forge:{provider}:repository:{repo}:issue:{issue_number}"
 
 def _resource_owner(config: Mapping[str, Any], occurrence: int | float) -> str:
@@ -1162,19 +1168,26 @@ class AzureDevOpsProvider:
             self._set_tags(repo, issue, remaining)
 
 
-def _forge_provider_for(config: Mapping[str, Any]) -> ForgeProvider:
-    """Select the provider implementation named by ``config['forge']['provider']``."""
-    provider_name = config["forge"]["provider"]
-    producer_login = config["forge"]["producer_login"]
+def _forge_provider_for(
+    config: Mapping[str, Any], *, cwd: str | Path | None = None
+) -> ForgeProvider:
+    """Select the provider for ``config['forge']['provider']``; ``cwd`` lets
+    ``build_provider`` re-normalize a `script` provider's own repo-root-
+    relative fields for a caller that skipped `validate_config` (see its
+    own docstring)."""
+    forge = config["forge"]
+    provider_name = forge["provider"]
+    producer_login = forge["producer_login"]
     if provider_name == "github":
         return GitHubProvider(producer_login)
     if provider_name == "azure-devops":
         return AzureDevOpsProvider(
-            producer_login,
-            discovery_scope=config["forge"].get("discovery_scope"),
+            producer_login, discovery_scope=forge.get("discovery_scope")
         )
     if provider_name == "gitea":
         return GiteaProvider(producer_login)
+    if provider_name == "script":
+        return build_provider(forge, producer_login=producer_login, repo_root=cwd)
     raise RegistrarError(
         f"repository-issue-loop forge.provider: unsupported provider {provider_name!r}")
 
@@ -1363,7 +1376,7 @@ def run_tick(
     ``cwd`` (declaring repo root, if known) re-threads ``worker_identity``
     to its repo-local override rather than the daemon process's own cwd."""
     config = validate_config(config, cwd=cwd)
-    provider = provider or _forge_provider_for(config)
+    provider = provider or _forge_provider_for(config, cwd=cwd)
     now = clock()
     discovered = plan(client, config, provider=provider, now=now)
     if not dry_run:

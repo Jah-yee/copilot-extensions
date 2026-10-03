@@ -51,6 +51,11 @@ def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> N
     assert "GIT_CONFIG_KEY_0" not in env
     assert env.get("UNRELATED_VAR") == "kept"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    # Without this, even a nominally read-only `git status` against the
+    # real host checkout (`_warn_about_dirty_tracked_files`) can refresh
+    # and rewrite the index, violating the wrapper's read-only-host
+    # guarantee.
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 def test_tracked_paths_defaults_to_cached_only_and_filters_excluded_prefixes() -> None:

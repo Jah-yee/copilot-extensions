@@ -855,3 +855,24 @@ Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
 confirms the warning fires correctly against this PR's own real dirty
 checkout and the larger `/tmp` ceiling doesn't break anything.
 
+### 2026-10-03 — Review round 12: 1 finding addressed (round 10/11's dirty-tracked-files item now marked resolved)
+Automated review confirmed round 11's fix for the "dirty tracked files"
+concern (resolved, no longer listed as open) and raised one new item:
+`_warn_about_dirty_tracked_files` runs `git status` against the REAL host
+checkout (not a throwaway copy, since it exists specifically to inspect the
+host's own dirty state) -- without `GIT_OPTIONAL_LOCKS=0`, even this
+nominally read-only command can refresh and rewrite the index, violating
+this wrapper's own "the host checkout is only ever read, never mutated"
+guarantee and contending with any concurrent `git` process the caller is
+running. Fixed by adding `GIT_OPTIONAL_LOCKS=0` to `_scrubbed_git_env` (now
+applied to every git subprocess call, not just this one), matching the
+same safeguard `tools/agent_bridge_contract_git.py` already uses for the
+identical reason.
+
+Re-validated end-to-end: the full unit test suite (44 tests) passes, a
+fresh Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6
+skipped) confirms the fix doesn't break anything, and a direct `stat` of
+the HOST's own real `.git/index` file (mtime + size) before and after a
+real run confirms it is byte-identical -- proof, not just assertion, that
+the host checkout's index is never touched.
+

@@ -111,7 +111,14 @@ def _scrubbed_git_env() -> dict[str, str]:
     """Ambient environment with every repository-selection variable
     removed -- every git subprocess below supplies its target repository
     explicitly via ``-C``; any of these inherited variables would silently
-    override that."""
+    override that. Also forces ``GIT_OPTIONAL_LOCKS=0``: without it, even a
+    nominally read-only command (``git status`` in
+    ``_warn_about_dirty_tracked_files``, run against the REAL host
+    checkout, not a throwaway copy) can refresh and rewrite the index,
+    violating this wrapper's own read-only-host guarantee and contending
+    with any concurrent `git` process the caller is running -- the same
+    safeguard `tools/agent_bridge_contract_git.py` already applies for the
+    same reason."""
     env = os.environ.copy()
     for name in list(env):
         upper = name.upper()
@@ -122,6 +129,7 @@ def _scrubbed_git_env() -> dict[str, str]:
         ):
             env.pop(name, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     return env
 
 

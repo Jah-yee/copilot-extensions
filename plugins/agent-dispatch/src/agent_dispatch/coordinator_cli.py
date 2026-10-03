@@ -340,6 +340,15 @@ def _cmd_cutover(args: argparse.Namespace) -> int:
     core_time = getattr(cli, "time", time)
     reap_abandoned = _core_helper("_reap_abandoned_passive", _reap_abandoned_passive)
     reap_superseded = _core_helper("_reap_superseded_coordinators", _reap_superseded_coordinators)
+    # Overlay the installed service.env onto this process's own environment
+    # *before* deriving the cutover configuration, so a durable host/port (or
+    # control-token) pin set only in service.env -- not in the triggering
+    # process's own ambient environment -- is honored for the cutover/health-
+    # check bind, not just for the replacement process's own spawn below.
+    from .install_paths import apply_service_env_overlay
+    from .install_paths import install_dir as runtime_install_dir
+
+    apply_service_env_overlay(os.environ, runtime_install_dir())
     cfg = _config.load_config()
     token = _client_token_value()
     wildcard_v4 = ".".join(("0", "0", "0", "0"))
@@ -357,6 +366,9 @@ def _cmd_cutover(args: argparse.Namespace) -> int:
     def spawn_passive(port: int):
         from agent_procutil import detached_kwargs, windowless_python, windowless_python_env
 
+        from .install_paths import apply_service_env_overlay
+        from .install_paths import install_dir as runtime_install_dir
+
         python = _sys.executable
         cmd = [
             windowless_python(python),
@@ -370,8 +382,23 @@ def _cmd_cutover(args: argparse.Namespace) -> int:
             "--passive",
         ]
         child_env = dict(os.environ)
-        child_env["AGENT_DISPATCH_PORT"] = str(port)
         child_env.update(windowless_python_env(python))
+        # Re-apply service.env on top of this process's own inherited
+        # environment -- never assume it already carries the durable installed
+        # config. A cutover can be triggered from any process context (the
+        # systemd/Scheduled-Task supervisor, a plain CLI invocation, a
+        # self-update), and only the supervisor's own happens to have
+        # service.env's settings (e.g. AGENT_DISPATCH_CONTROL_TOKEN_COMMAND)
+        # pre-loaded via its unit's EnvironmentFile; without this overlay a
+        # replacement coordinator spawned from any other context would come
+        # up with no control token at all.
+        apply_service_env_overlay(child_env, runtime_install_dir())
+        # AGENT_DISPATCH_PORT must be set *after* the overlay: the orchestrator
+        # already selected this specific free `port` for the passive process
+        # to bind (and passes it explicitly via `--port` above), and a stale
+        # port pin in service.env must never override that fresh selection --
+        # `server._server_bind_port()` reads the env var, not the CLI flag.
+        child_env["AGENT_DISPATCH_PORT"] = str(port)
         kwargs: dict[str, Any] = {
             "env": child_env,
             "stdin": _subprocess.DEVNULL,

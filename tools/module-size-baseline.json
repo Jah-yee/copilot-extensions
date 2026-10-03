@@ -36,7 +36,7 @@
   "plugins/agent-dispatch/src/agent_dispatch/queue_spawn_reservations.py": 1057,
   "plugins/agent-dispatch/src/agent_dispatch/registrar_registry.py": 1007,
   "plugins/agent-dispatch/src/agent_dispatch/repository_issue_loops.py": 1822,
-  "plugins/agent-dispatch/src/agent_dispatch/supervisor.py": 3728,
+  "plugins/agent-dispatch/src/agent_dispatch/supervisor.py": 3760,
   "plugins/agent-dispatch/src/agent_dispatch/supervisor_daemon.py": 2213,
   "plugins/agent-index/scripts/cell-runtime.py": 5211,
   "plugins/agent-index/scripts/resolve_effective_config.py": 1136,
@@ -72,7 +72,7 @@
   "plugins/agent-worktrees/src/agent_worktrees/front_door_cli.py": 1057,
   "plugins/agent-worktrees/src/agent_worktrees/git_ops.py": 1702,
   "plugins/agent-worktrees/src/agent_worktrees/installer.py": 1781,
-  "plugins/agent-worktrees/src/agent_worktrees/pr_contract.py": 1508,
+  "plugins/agent-worktrees/src/agent_worktrees/pr_contract.py": 1562,
   "plugins/agent-worktrees/src/agent_worktrees/pr_ops.py": 2590,
   "plugins/agent-worktrees/src/agent_worktrees/providers/gitea.py": 1037,
   "plugins/agent-worktrees/src/agent_worktrees/providers/github.py": 1011,
@@ -95,6 +95,6 @@
   "worktree-manager/src/worktree_manager/__main__.py": 1841,
   "worktree-manager/src/worktree_manager/production_picker/picker_tui/data_ssh.py": 2196,
   "worktree-manager/src/worktree_manager/production_picker/picker_tui/derive.py": 1023,
-  "worktree-manager/src/worktree_manager/self_install.py": 1015,
+  "worktree-manager/src/worktree_manager/self_install.py": 1123,
   "worktree-manager/src/worktree_manager/terminal_fragment.py": 1256
 }

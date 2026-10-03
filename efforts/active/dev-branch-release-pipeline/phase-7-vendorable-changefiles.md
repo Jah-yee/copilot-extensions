@@ -390,12 +390,32 @@ changefiles and auto-bumps."
       install contract's own dedicated `commit`/`branch`/`dirty` fields
       (`docs/install-contract.md:1718-1723`), not in `source.path` — those
       fields alone carry the originating-checkout identity; `source.path`
-      stays on the persisted preview snapshot throughout.
+      stays on the persisted preview snapshot throughout. Today's
+      installers derive `commit`/`branch`/`dirty` by running `git -C
+      "$plugin_path/.."` against their own install location, which only
+      works because `plugin_path` IS the source checkout today — once
+      `source.path` is the generated snapshot instead, that same
+      derivation would read the snapshot's own (non-)git state, not the
+      originating checkout's. The preview-install path must therefore
+      capture `commit`/`branch`/`dirty` from the originating checkout
+      explicitly, at preview-generation time, and pass them through to the
+      installed manifest rather than re-deriving them post-hoc from
+      `source.path`. Use a **dirty branch** as the test case and assert all
+      three installed manifest fields match the origin while `source.path`
+      still points at the snapshot.
 - [ ] Two numbered-install preview builds with the SAME computed base
       version but DIFFERENT content (e.g. two dirty checkouts sharing a
-      pending changefile set) mint two distinct numbered slots, never
-      silently overwriting one with the other's bytes; a byte-identical
-      rebuild of the same content may reuse its own slot.
+      pending changefile set) mint two distinct numbered slots AND report
+      two distinct reported version identities — not slot separation
+      alone; a byte-identical rebuild of the same content may reuse its
+      own slot and identity.
+- [ ] A later REAL promoted release supersedes a previously-installed
+      preview build that reported the same base version: reconciliation
+      (`agent_worktrees.reconcile`'s `_versions_equal`/`_version_lt`),
+      downgrade guards, and runtime fallback/GC all correctly deploy the
+      real release rather than treating it as already-equal or a
+      downgrade -- exercise this transition explicitly, not just the
+      preview-vs-preview distinct-slot case above.
 - [ ] Every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       real copies) reads `"0.0.0"` on `dev` alongside the per-plugin
       manifests, and vendorable seeding (above) still recovers its real

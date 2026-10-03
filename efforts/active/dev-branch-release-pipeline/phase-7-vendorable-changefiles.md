@@ -225,7 +225,16 @@ changefiles and auto-bumps."
       checkout's own commit/branch/dirty-state **separately**, in the
       install contract's dedicated `commit`/`branch`/`dirty` fields
       (`docs/install-contract.md:1718-1723`), never by repointing
-      `source.path` itself at the raw checkout.
+      `source.path` itself at the raw checkout. Durable snapshots need an
+      owner and a reclamation rule: the existing runtime GC
+      (`libs/versioned-runtime/versioned_runtime.py:924-972`) only reclaims
+      `versions/*` slots, not this new persisted-snapshot tree, so repeated
+      dirty numbered installs would otherwise leak one payload tree per
+      build forever. Define a retention policy (deferred to
+      implementation) that preserves every snapshot still referenced by a
+      current/fallback/live slot and safely reclaims only unreferenced
+      ones — never a time- or count-based heuristic that could evict a
+      still-referenced snapshot.
 - [ ] Give the numbered-install preview route a concrete enforcement seam,
       not just a stated intent — today's documented local-testing flow
       invokes `plugins/*/scripts/install.*` directly
@@ -416,6 +425,10 @@ changefiles and auto-bumps."
       real release rather than treating it as already-equal or a
       downgrade -- exercise this transition explicitly, not just the
       preview-vs-preview distinct-slot case above.
+- [ ] A removed/superseded numbered slot's persisted preview snapshot is
+      reclaimed once no current/fallback/live slot references it, and a
+      snapshot still referenced by any such slot survives a GC pass that
+      also removes an unrelated unreferenced snapshot.
 - [ ] Every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       real copies) reads `"0.0.0"` on `dev` alongside the per-plugin
       manifests, and vendorable seeding (above) still recovers its real

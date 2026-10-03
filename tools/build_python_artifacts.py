@@ -362,12 +362,27 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
             escaping_refs = uer.find_uv_editable_refs(current)
         except uer.ManifestUnreadable as exc:
             raise ArtifactBuildError(str(exc)) from exc
+        in_tree_refs = find_in_tree_lib_sources(current)
+        in_tree_names = {name for name, _raw_path, _lib in in_tree_refs}
         for name, raw_path, lib, editable in escaping_refs:
             if not editable:
-                # Not the dev-branch live canonical form -- a sibling
-                # in-tree cross-reference, handled by the in-tree branch
-                # below instead (its own `find_in_tree_lib_sources` scan
-                # of this same `current` will pick it up).
+                # Not the dev-branch live canonical form -- expected to be
+                # a sibling in-tree cross-reference that
+                # `find_in_tree_lib_sources`'s own, more tightly
+                # constrained scan of this same `current` also discovered.
+                # If it did NOT (e.g. the target escapes to somewhere
+                # outside every allowed `libs/` location), this reference
+                # would otherwise be silently dropped entirely -- neither
+                # validated-and-included nor rejected -- even though
+                # `materialize_nested_uv_editable_refs` would refuse the
+                # exact same reference. Fail closed instead of omitting it.
+                if name not in in_tree_names:
+                    raise ArtifactBuildError(
+                        f"{current}: {name} -> {raw_path} is not editable = "
+                        "true and does not resolve to an allowed in-tree "
+                        "vendored-lib location -- refusing to silently omit "
+                        "it from the artifact set"
+                    )
                 continue
             # Validated per-entry at EVERY recursion depth (not only via
             # the top-level `uv_editable_problems` call above) -- a nested
@@ -380,7 +395,7 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
                 out, pending, lib=lib, canonical=canonical, label=str(current)
             )
 
-        for name, raw_path, lib in find_in_tree_lib_sources(current):
+        for name, raw_path, lib in in_tree_refs:
             if not uer.is_safe_lib_name(lib):
                 raise ArtifactBuildError(
                     f"{current}: unsafe in-tree vendored-lib name {lib!r} "

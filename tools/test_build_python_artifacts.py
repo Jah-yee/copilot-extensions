@@ -487,6 +487,27 @@ def test_find_in_tree_lib_sources_rejects_cross_plugin_escape(fake_repo: Path):
     assert bpa.find_in_tree_lib_sources(plugin_dir) == []
 
 
+def test_resolve_vendored_libs_cross_plugin_escape_raises_not_silently_omitted(
+    fake_repo: Path,
+):
+    # Regression: the PREVIOUS fix (rejecting this from
+    # find_in_tree_lib_sources) just made resolve_vendored_libs silently
+    # DROP the reference instead of raising -- `escaping_refs`'s own
+    # `continue` for non-editable entries assumed find_in_tree_lib_sources
+    # would always pick it up, which is false here. The artifact build
+    # must fail closed, matching what `materialize_nested_uv_editable_refs`
+    # would do with this same reference, not silently omit the dependency.
+    other_plugin_dir = fake_repo / "plugins" / "other"
+    _seed_in_tree_lib(other_plugin_dir, "widget")
+    plugin_dir = fake_repo / "plugins" / "demo"
+    _write_in_tree_pyproject(
+        plugin_dir, sources={"demo-widget": "../other/libs/widget"}
+    )
+
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.resolve_vendored_libs(plugin_dir)
+
+
 def test_resolve_vendored_libs_in_tree_missing_src_raises(fake_repo: Path):
     plugin_dir = fake_repo / "plugins" / "demo"
     lib_dir = plugin_dir / "libs" / "widget"

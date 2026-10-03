@@ -553,6 +553,19 @@ win grows with build complexity.
   `dist-info/WHEEL` entry would silently trust whichever ZIP member came
   first -- fixed to require exactly one. 59 unit tests now; re-verified
   both plugins build correctly.
+- A ninth review round found the previous round's own first fix was
+  itself incomplete: a non-editable escaping reference was assumed to
+  always be a legitimate sibling in-tree cross-reference that
+  `find_in_tree_lib_sources`'s own (deliberately tighter) scan would
+  "always" pick up -- but if the target escapes to somewhere outside
+  every allowed `libs/` location, that scan also skips it, so the
+  `continue` silently dropped the dependency from the artifact set
+  entirely (the build still "succeeded"), even though
+  `materialize_nested_uv_editable_refs` would refuse the exact same
+  reference. Fixed by cross-checking: every non-editable escaping
+  reference must appear in that same consumer's own in-tree-discovered
+  set, or the build now fails closed naming the exact unaccounted-for
+  reference. 60 unit tests now; re-verified both plugins build correctly.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

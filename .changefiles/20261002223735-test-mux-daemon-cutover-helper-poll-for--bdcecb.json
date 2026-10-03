@@ -1,0 +1,9 @@
+{
+  "comment": "test_mux_daemon_cutover_helper: poll for a just-spawned real process to become mux-daemon-visible instead of a single-shot check",
+  "changes": [
+    {
+      "plugin": "worktree-manager",
+      "type": "dev"
+    }
+  ]
+}

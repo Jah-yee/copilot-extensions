@@ -512,9 +512,21 @@ def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():
     root = Path.home() / ".worktree-manager-test-identity-match"
     proc = _spawn_fake_mux_daemon_process(root)
     try:
-        assert proc.pid in mdc._iter_mux_daemon_pids(), (
-            "the real spawned process was not recognized as a mux-daemon -- "
-            "test setup invalid"
+        # Poll rather than check once: a just-exec'd process's final argv
+        # isn't guaranteed to be visible to `ps`/`/proc` the instant
+        # `Popen.__init__` returns -- on a quiet dev machine this is
+        # effectively instantaneous, but a busier, shared CI runner's
+        # scheduler can add real (if small) exec-visibility latency. A
+        # single-shot check conflates "never became a recognized
+        # mux-daemon" with "wasn't recognized *yet*"; bounded polling
+        # distinguishes them without weakening the actual assertion.
+        _wait_for(
+            lambda: proc.pid in mdc._iter_mux_daemon_pids(),
+            timeout=5,
+            message=(
+                "the real spawned process was not recognized as a mux-daemon -- "
+                "test setup invalid"
+            ),
         )
         assert mdc._terminate_mux_daemon_pid(proc.pid, root=root) is True
         assert proc.wait(timeout=10) is not None
@@ -533,9 +545,15 @@ def test_terminate_mux_daemon_pid_refuses_a_root_mismatched_real_process():
     other_root = Path.home() / ".worktree-manager-test-identity-other"
     proc = _spawn_fake_mux_daemon_process(its_root)
     try:
-        assert proc.pid in mdc._iter_mux_daemon_pids(), (
-            "the real spawned process was not recognized as a mux-daemon -- "
-            "test setup invalid"
+        # See the matched-process test above for why this polls rather
+        # than checking once.
+        _wait_for(
+            lambda: proc.pid in mdc._iter_mux_daemon_pids(),
+            timeout=5,
+            message=(
+                "the real spawned process was not recognized as a mux-daemon -- "
+                "test setup invalid"
+            ),
         )
         assert mdc._terminate_mux_daemon_pid(proc.pid, root=other_root) is False
         assert proc.poll() is None, "a root-mismatched process must never be killed"

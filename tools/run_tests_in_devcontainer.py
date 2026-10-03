@@ -131,11 +131,9 @@ def _scrubbed_git_env() -> dict[str, str]:
     repository -- a host mutation this wrapper exists to prevent -- and a
     locally configured replacement ref could silently substitute different
     history into the bundle than what ``HEAD``/``--base`` actually name.
-    Removing an inherited ``GIT_NO_REPLACE_OBJECTS`` (the prior behavior,
-    since it was only in the removal set above) would have RE-ENABLED
-    replacement objects if the caller's own environment had disabled them;
-    forcing both to ``1`` here closes that gap regardless of what the
-    caller's environment does or doesn't set.
+    Forcing both to ``1`` unconditionally (rather than merely removing an
+    inherited value) closes that gap regardless of what the caller's own
+    environment does or doesn't set.
     """
     env = os.environ.copy()
     for name in list(env):
@@ -378,25 +376,6 @@ def _warn_about_hidden_tracked_file_flags() -> None:
         print(f"  {path}", file=sys.stderr)
 
 
-def _resolve_base_ref(passthrough: list[str]) -> str:
-    """Best-effort extraction of the ``--base`` value a passthrough
-    invocation will use, so ``_materialized_git_dir`` can include exactly
-    that ref's object closure (not the whole repository's history) in the
-    bundled snapshot. Falls back to ``tools/run-plugin-tests.py``'s own
-    ``--base`` default when it isn't present in ``passthrough`` -- mirroring
-    that runner's own argparse default, not guessing at a different one.
-    Mirrors argparse's own last-occurrence-wins behavior for a repeated
-    flag -- keeps scanning instead of returning on the first match, since
-    `run-plugin-tests.py`'s own argparse would use the LAST ``--base``."""
-    resolved = "origin/main"
-    for i, arg in enumerate(passthrough):
-        if arg == "--base" and i + 1 < len(passthrough):
-            resolved = passthrough[i + 1]
-        elif arg.startswith("--base="):
-            resolved = arg.split("=", 1)[1]
-    return resolved
-
-
 # Every `tools/run-plugin-tests.py` flag that consumes a SEPARATE following
 # token as its value (as opposed to a bare `store_true` flag, or the
 # single-token `--flag=value` form, which `.startswith("-")` already
@@ -408,6 +387,65 @@ _VALUE_CONSUMING_FLAGS = frozenset({
     "--plugin-timeout", "--test-timeout", "--max-files-per-sub-suite",
     "--max-processes", "--max-memory-mb", "--max-temp-mb", "--exclude",
 })
+
+# Every bare (`store_true`) `tools/run-plugin-tests.py` flag -- kept in
+# sync by hand alongside `_VALUE_CONSUMING_FLAGS` above, for the same
+# reason: distinguishing a recognized flag from a positional plugin name,
+# never fully re-parsing that runner's CLI.
+_BARE_FLAGS = frozenset({
+    "--all", "--changed", "--reinstall", "--guards", "--collect-only",
+    "--list", "--pre-push", "--allow-explicit-tiers",
+})
+
+_ALL_LONG_FLAGS = _VALUE_CONSUMING_FLAGS | _BARE_FLAGS
+
+
+def _canonicalize_flag(name: str) -> str:
+    """Resolve a bare (no ``=value`` suffix) long-flag token to its
+    canonical name, honoring argparse's own unambiguous-prefix abbreviation
+    support (e.g. ``--bas`` -> ``--base``, since no OTHER known
+    `run-plugin-tests.py` flag also starts with ``--bas``) against
+    `_ALL_LONG_FLAGS` -- mirrors that parser's own matching rather than
+    guessing at a different one. Without this, an abbreviated ``--base``
+    (silently accepted by `run-plugin-tests.py`'s own argparse) would go
+    unrecognized here: `_resolve_base_ref` would keep the wrong
+    (`origin/main`) default instead of the ref actually in play, and
+    `_changed_mode_active` would misclassify the abbreviated flag's VALUE
+    token as a positional plugin name -- in combination, silently building
+    a snapshot against the wrong base AND disabling the fail-loud
+    unresolvable-base guard for it. Returns `name` unchanged when it isn't
+    a recognized abbreviation of exactly one known flag (ambiguous, a short
+    flag like ``-k``, or genuinely unknown) -- callers fall through to
+    their own existing unrecognized-flag handling in that case."""
+    if name in _ALL_LONG_FLAGS or not name.startswith("--") or len(name) <= 2:
+        return name
+    matches = [flag for flag in _ALL_LONG_FLAGS if flag.startswith(name)]
+    return matches[0] if len(matches) == 1 else name
+
+
+def _resolve_base_ref(passthrough: list[str]) -> str:
+    """Best-effort extraction of the ``--base`` value a passthrough
+    invocation will use, so ``_materialized_git_dir`` can include exactly
+    that ref's object closure (not the whole repository's history) in the
+    bundled snapshot. Falls back to ``tools/run-plugin-tests.py``'s own
+    ``--base`` default when it isn't present in ``passthrough`` -- mirroring
+    that runner's own argparse default, not guessing at a different one.
+    Mirrors argparse's own last-occurrence-wins behavior for a repeated
+    flag -- keeps scanning instead of returning on the first match, since
+    `run-plugin-tests.py`'s own argparse would use the LAST ``--base``.
+    Recognizes an unambiguous abbreviated form too (``--bas``, ``--ba``,
+    ...), since that runner's own argparse silently accepts one -- see
+    `_canonicalize_flag`."""
+    resolved = "origin/main"
+    for i, arg in enumerate(passthrough):
+        name, eq, value = arg.partition("=")
+        if _canonicalize_flag(name) != "--base":
+            continue
+        if eq:
+            resolved = value
+        elif i + 1 < len(passthrough):
+            resolved = passthrough[i + 1]
+    return resolved
 
 
 def _changed_mode_active(passthrough: list[str]) -> bool:
@@ -425,9 +463,15 @@ def _changed_mode_active(passthrough: list[str]) -> bool:
         if skip_next:
             skip_next = False
             continue
-        if arg == "--all":
+        # A single-token `--flag=value` form never consumes a SEPARATE
+        # following token, so it needs no canonicalization here -- it
+        # either already is (or isn't) recognized by the plain
+        # `.startswith("-")` check below, and either way can't
+        # misclassify a later arg as a positional.
+        canonical = _canonicalize_flag(arg) if "=" not in arg else arg
+        if canonical == "--all":
             has_all = True
-        elif arg in _VALUE_CONSUMING_FLAGS:
+        elif canonical in _VALUE_CONSUMING_FLAGS:
             skip_next = True
         elif arg.startswith("-"):
             continue
@@ -663,6 +707,16 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     ``containerEnv`` entries (the one sanctioned way around the check that
     doesn't require a repo-local, and therefore untrusted-input-
     controllable, config file).
+
+    The final permission-opening pass only targets regular files and
+    directories, never a symlink entry: ``chmod`` on a symlink PATH
+    dereferences it and affects whatever it points AT, not the link
+    itself (Linux symlinks have no meaningful permission bits of their
+    own). Passing symlink paths through ``find -exec chmod`` would
+    therefore either fail outright for an intentionally preserved
+    dangling symlink (nothing to dereference), or silently chmod a LIVE
+    symlink's target -- which, for an absolute or ``..``-escaping
+    symlink, could reach a path entirely outside the workspace volume.
     """
     chmod_root = subprocess.run(
         ["docker", "exec", "-u", "root", container_id,
@@ -694,7 +748,8 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
         )
     chmod = subprocess.run(
         ["docker", "exec", "-u", REMOTE_USER, container_id,
-         "find", CONTAINER_WORKSPACE, "-mindepth", "1", "-exec",
+         "find", CONTAINER_WORKSPACE, "-mindepth", "1",
+         "(", "-type", "f", "-o", "-type", "d", ")", "-exec",
          "chmod", "u+rwX", "{}", "+"],
         capture_output=True, text=True, timeout=120,
     )

@@ -240,6 +240,36 @@ def test_changed_mode_not_active_with_explicit_plugin_name() -> None:
     assert wrapper._changed_mode_active(["--base", "origin/dev", "agent-worktrees"]) is False
 
 
+def test_canonicalize_flag_resolves_unambiguous_abbreviations() -> None:
+    # `run-plugin-tests.py`'s own argparse silently accepts any unambiguous
+    # prefix of a long flag -- `--base` is the only known flag starting
+    # with `--b`, so `--b`/`--ba`/`--bas` must all canonicalize to it.
+    for abbrev in ("--b", "--ba", "--bas", "--base"):
+        assert wrapper._canonicalize_flag(abbrev) == "--base"
+
+
+def test_canonicalize_flag_leaves_ambiguous_or_unknown_tokens_unchanged() -> None:
+    assert wrapper._canonicalize_flag("--max") == "--max"  # ambiguous: 3 --max-* flags
+    assert wrapper._canonicalize_flag("--nope") == "--nope"
+    assert wrapper._canonicalize_flag("-k") == "-k"
+
+
+def test_resolve_base_ref_recognizes_abbreviated_base_flag() -> None:
+    # The exact gap an abbreviated `--base` would otherwise open: silently
+    # keeping the wrong (`origin/main`) default instead of the ref the
+    # in-container `run-plugin-tests.py` invocation will actually use.
+    assert wrapper._resolve_base_ref(["--changed", "--bas", "origin/dev"]) == "origin/dev"
+    assert wrapper._resolve_base_ref(["--changed", "--bas=origin/dev"]) == "origin/dev"
+
+
+def test_changed_mode_active_with_abbreviated_base_flag_does_not_misclassify_value() -> None:
+    # Without abbreviation-awareness, `--bas`'s value token
+    # (`origin/dev`) would be misclassified as a positional plugin name,
+    # wrongly reporting changed-mode as NOT active.
+    assert wrapper._changed_mode_active(["--bas", "origin/dev"]) is True
+    assert wrapper._changed_mode_active(["--bas=origin/dev"]) is True
+
+
 def test_git_rev_parse_returns_sha_on_success() -> None:
     fake_result = mock.Mock(returncode=0, stdout="deadbeef\n", stderr="")
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
@@ -494,6 +524,37 @@ def test_write_tar_of_repo_skips_tracked_path_deleted_from_working_tree(tmp_path
     assert "deleted.txt" not in names
 
 
+def test_write_tar_of_repo_includes_a_tracked_dangling_symlink(tmp_path: Path, monkeypatch) -> None:
+    # A tracked symlink whose target doesn't exist on disk must still be
+    # archived (`os.path.lexists` reports True for a dangling symlink,
+    # unlike a symlink-following `Path.exists()`) -- this is the
+    # complementary half of the symlink-handling fix: the SNAPSHOT still
+    # includes a dangling symlink entry as-is (never dereferenced), while
+    # the separate `_populate_workspace` permission pass must not try to
+    # `chmod` it (regression coverage for that lives in the
+    # `_populate_workspace` tests, which assert the `find` invocation
+    # excludes symlink entries entirely).
+    fake_git_dir = tmp_path / "fake-git"
+    fake_git_dir.mkdir()
+    (fake_git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    dangling_link = tmp_path / "dangling-link.txt"
+    dangling_link.symlink_to(tmp_path / "does-not-exist.txt")
+
+    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack, passthrough: fake_git_dir)
+    monkeypatch.setattr(wrapper, "_tracked_paths",
+                         lambda *, include_untracked: ["dangling-link.txt"])
+    monkeypatch.setattr(wrapper, "REPO", tmp_path)
+    monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
+    monkeypatch.setattr(wrapper, "_warn_about_hidden_tracked_file_flags", lambda: None)
+
+    dest = tmp_path / "out.tar"
+    wrapper._write_tar_of_repo(dest, [], include_untracked=False)
+    with tarfile.open(dest) as tar:
+        member = tar.getmember("dangling-link.txt")
+    assert member.issym()
+
+
 def test_write_tar_of_repo_does_not_recurse_into_submodule_directory(tmp_path: Path, monkeypatch) -> None:
     # `git ls-files` lists an initialized submodule as a single path that
     # happens to be a real DIRECTORY on disk. `tarfile.add` recursively
@@ -668,8 +729,17 @@ def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) ->
 
     chmod_args = run.call_args_list[2].args[0]
     assert chmod_args[:4] == ["docker", "exec", "-u", wrapper.REMOTE_USER]
+    assert "find" in chmod_args
     assert "chmod" in chmod_args
     assert wrapper.CONTAINER_WORKSPACE in chmod_args
+    # Only regular files and directories are chmod'd -- `chmod` on a
+    # symlink PATH dereferences it and would either fail outright (a
+    # dangling symlink) or affect whatever a LIVE symlink points at,
+    # possibly outside the workspace tree entirely.
+    type_values = [
+        chmod_args[i + 1] for i, arg in enumerate(chmod_args) if arg == "-type"
+    ]
+    assert set(type_values) == {"f", "d"}
 
 
 def test_populate_workspace_raises_when_opening_up_the_empty_volume_fails(monkeypatch) -> None:

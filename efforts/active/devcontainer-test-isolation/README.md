@@ -1043,3 +1043,40 @@ with it). Docker cleanup (`docker ps -a`, `docker volume ls`) and host
 `git status --short` were reconfirmed clean of anything beyond this
 round's own diff after every validation pass, including the orphaned
 `--keep` containers/volumes from the debugging process itself.
+
+### 2026-10-03 — Review round 15 (continued again): 2 findings addressed (symlink-safe permission pass, abbreviated-flag awareness)
+A third review pass of the same round confirmed the prior three fixes
+(resolved) and raised two more. HIGH: `_populate_workspace`'s final
+permission-opening pass (`find ... -exec chmod u+rwX {} +`) followed
+every symlink entry, since `chmod` on a symlink PATH dereferences it
+rather than acting on the link itself (Linux symlinks have no meaningful
+permission bits of their own) -- an intentionally preserved dangling
+symlink (already correctly archived via `os.path.lexists`) would make the
+whole pass fail outright (nothing to dereference), while a live symlink
+could silently chmod whatever it points at, possibly outside the
+workspace volume entirely for an absolute or `..`-escaping target. Fixed
+by scoping the `find` to `( -type f -o -type d )`, excluding symlink
+entries from the chmod pass altogether -- they need no permission change
+regardless, since the snapshot never follows them. MEDIUM:
+`_resolve_base_ref` and `_changed_mode_active` only recognized a literal
+`--base`/`--base=`, but `run-plugin-tests.py`'s own argparse silently
+accepts any unambiguous prefix abbreviation (e.g. `--bas`, the only known
+flag starting with `--b`) -- an abbreviated invocation would keep the
+wrong (`origin/main`) snapshot base AND have its value token
+misclassified as a positional plugin name, together disabling the
+fail-loud unresolvable-base guard for exactly the case it exists to
+catch. Fixed with a new `_canonicalize_flag` helper that mirrors
+argparse's own unambiguous-prefix matching against the full known
+`run-plugin-tests.py` flag set (extending the existing hand-synced
+`_VALUE_CONSUMING_FLAGS` precedent with a parallel `_BARE_FLAGS` set), and
+wired it into both functions.
+
+Re-validated end-to-end: the full unit test suite (64 tests, including 2
+new `_canonicalize_flag` tests, 2 new abbreviated-`--base` tests, 1 new
+`_populate_workspace` assertion confirming the `find` scope excludes
+symlinks, and 1 new real-symlink regression test proving a tracked
+dangling symlink is still archived as-is) passes; a fresh Docker-backed
+end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms the
+common case still works; Docker cleanup (`docker ps -a`, `docker volume
+ls`) and host `git status --short` reconfirmed clean of anything beyond
+this round's own diff.

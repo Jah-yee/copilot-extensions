@@ -59,6 +59,15 @@ def _declaration_summary(decl: ProfileDeclaration) -> dict[str, Any]:
             "spec": dict(decl.spec),
             "filters": filters,
         }
+    body: dict[str, Any] = {"type": decl.body.type, "agent": decl.body.agent}
+    if decl.body.charter:
+        body["charter"] = decl.body.charter
+    if decl.body.headless_labels:
+        body["headless_labels"] = list(decl.body.headless_labels)
+    if decl.body.cli_labels:
+        body["cli_labels"] = list(decl.body.cli_labels)
+    if decl.body.disposable_cli_labels:
+        body["disposable_cli_labels"] = list(decl.body.disposable_cli_labels)
     return {
         "name": decl.name,
         "owner": decl.owner,
@@ -66,7 +75,7 @@ def _declaration_summary(decl: ProfileDeclaration) -> dict[str, Any]:
         "repos": decl.repos,
         "concurrency": decl.concurrency,
         "max_active_processes": decl.concurrency,
-        "body": {"type": decl.body.type, "agent": decl.body.agent},
+        "body": body,
         "filters": filters,
     }
 

@@ -3616,6 +3616,12 @@ class _PickupClient:
 def test_consume_baton_completes_on_pickup(monkeypatch, capsys):
     from agent_dispatch import __main__, identity
 
+    # Isolated from any ambient real session identity: this test exercises
+    # plain baton-mode completion, not the separate session-fencing feature
+    # (covered by its own tests below) -- without this, running inside a
+    # real Copilot session (COPILOT_AGENT_SESSION_ID set) inserts an extra
+    # bind_owner_session transition this test never expects.
+    monkeypatch.delenv("COPILOT_AGENT_SESSION_ID", raising=False)
     fake = _PickupClient("proposed")
     monkeypatch.setattr(__main__, "_client", lambda args: fake)
     monkeypatch.setattr(identity, "resolve_identity", lambda: ("m", "wt"))
@@ -3631,6 +3637,9 @@ def test_consume_baton_completes_on_pickup(monkeypatch, capsys):
 def test_consume_defer_complete_stops_at_started(monkeypatch, capsys):
     from agent_dispatch import __main__, identity
 
+    # See test_consume_baton_completes_on_pickup's comment -- isolates this
+    # from ambient session-fencing, which this test doesn't exercise.
+    monkeypatch.delenv("COPILOT_AGENT_SESSION_ID", raising=False)
     fake = _PickupClient("proposed")
     monkeypatch.setattr(__main__, "_client", lambda args: fake)
     monkeypatch.setattr(identity, "resolve_identity", lambda: ("m", "wt"))
@@ -4005,6 +4014,12 @@ def test_consume_accepts_an_initially_started_task_owned_by_this_invocation(
     the task's owner) proceeds normally."""
     from agent_dispatch import __main__, identity
 
+    # Isolated from ambient session-fencing -- see
+    # test_consume_baton_completes_on_pickup's comment; this test's own
+    # matching-owner contract is exercised with the env var unset, deliberately
+    # distinct from test_consume_without_session_identity_skips_bind_as_before's
+    # own, narrower "no identity at all" case below.
+    monkeypatch.delenv("COPILOT_AGENT_SESSION_ID", raising=False)
     fake = _PickupClient("started", owner="m/wt")
     monkeypatch.setattr(__main__, "_client", lambda args: fake)
     monkeypatch.setattr(identity, "resolve_identity", lambda: ("m", "wt"))

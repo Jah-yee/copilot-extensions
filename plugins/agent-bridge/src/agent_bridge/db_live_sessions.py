@@ -406,12 +406,10 @@ class _LiveSessionsMixin:
                 f"DELETE FROM live_messages WHERE session_id IN ({_in(dead_ids)})",
                 tuple(dead_ids),
             )
-            self.execute_write(
+            self.execute_write(  # its aliases go with it (live_sessions_drop_orphaned_aliases),
+                # in the same statement: a separate cleanup could delete an alias
+                # a registration re-created for a purged id in between.
                 f"DELETE FROM live_sessions WHERE session_id IN ({_in(dead_ids)})",
-                tuple(dead_ids),
-            )
-            self.execute_write(  # by purged target only: a rollover since may alias a dead id
-                f"DELETE FROM live_session_aliases WHERE target_session_id IN ({_in(dead_ids)})",
                 tuple(dead_ids),
             )
         return demoted

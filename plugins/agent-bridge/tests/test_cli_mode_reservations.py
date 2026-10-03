@@ -777,6 +777,32 @@ def test_an_older_daemons_delete_of_the_current_id_takes_its_aliases(tmp_db: Dat
     assert tmp_db.get_live_session_exact("placeholder") is not None
 
 
+def test_a_registration_right_after_the_purge_keeps_its_new_alias(
+    tmp_db: Database, monkeypatch,
+) -> None:
+    """The reaper purges an expired ``resumed`` row; before its sweep ends, the
+    resumed process registers that id again and folds the live placeholder into
+    it. The new ``placeholder -> resumed`` alias must survive the sweep."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)  # placeholder, pid 4242, live
+    assert _register(tmp_db, "resumed", "wt-X", now + 1, pid=4242) == "live"
+    tmp_db.execute_write("UPDATE live_sessions SET status='expired', updated_at=0 WHERE session_id='resumed'")
+    real_write = tmp_db.execute_write
+
+    def _register_after_the_purge(sql, params=()):
+        cur = real_write(sql, params)
+        if sql.startswith("DELETE FROM live_sessions WHERE session_id IN"):
+            assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+        return cur
+
+    monkeypatch.setattr(tmp_db, "execute_write", _register_after_the_purge)
+    tmp_db.reap_stale_live_sessions(now=now + 3, stale_seconds=10**9, purge_seconds=60,
+                                    pid_alive=lambda _p: True)
+    monkeypatch.undo()
+    assert tmp_db.resolve_live_session_id("placeholder") == "resumed"
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"
+
+
 def test_a_reused_pid_never_inherits_a_confirmed_dead_registration(tmp_db: Database) -> None:
     now = time.time()
     _claimed_placeholder(tmp_db, now)

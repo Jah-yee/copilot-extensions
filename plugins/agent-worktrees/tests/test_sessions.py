@@ -1953,6 +1953,16 @@ def test_a_stale_interrupt_footer_above_a_shell_is_not_ready():
     assert pane_readiness.ready_signature("❯ \npress esc to interrupt\n") == "interrupt-footer"
 
 
+@pytest.mark.parametrize("prompt", ["$", "#", "%", "❯"])
+def test_a_bare_shell_prompt_holding_the_footer_words_is_not_ready(prompt):
+    """``$ press esc to interrupt`` typed at a bare prompt is a shell line, not
+    Copilot's footer: seeding it would run the seed as a shell command."""
+    from agent_worktrees import pane_readiness
+
+    assert pane_readiness.ready_signature(f"{prompt} press esc to interrupt\n") is None
+    assert pane_readiness.ready_signature(f"  {prompt} press esc to interrupt\n") is None
+
+
 def test_ordinary_output_under_a_stale_prompt_is_not_ready():
     """Only Copilot's own footer rows may sit under the box, and the legacy cue
     must be the live bottom line -- not merely free of shell-like tails."""

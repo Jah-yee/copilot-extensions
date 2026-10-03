@@ -68,6 +68,19 @@ class _SchemaMixin:
                 "CREATE INDEX IF NOT EXISTS idx_live_session_aliases_target "
                 "ON live_session_aliases(target_session_id)"
             )
+            # A retired (aliased) id never registers again as its own row. This
+            # daemon resolves an alias before writing, but an older daemon still
+            # serving the same database during a cutover doesn't: its old-id
+            # heartbeat would recreate the folded-away predecessor, which the
+            # worktree's delivery check then picks over the resumed session.
+            # Fenced here, in the database, the old write is a silent no-op.
+            conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS live_sessions_retired_id_fence "
+                "BEFORE INSERT ON live_sessions "
+                "WHEN EXISTS (SELECT 1 FROM live_session_aliases "
+                "WHERE alias_session_id = NEW.session_id) "
+                "BEGIN SELECT RAISE(IGNORE); END"
+            )
             # The registering process's start time: with the pid, it tells a
             # same-process resume from an unrelated process that reused the pid.
             if "process_started_at" not in {

@@ -73,9 +73,10 @@ def _live_box(capture: str) -> bool:
 
 
 #: A shell prompt at the start of a line, even with typed text after it
-#: (``user@host:~/dir$ ...``, ``PS C:\repo> ...``, ``C:\repo> ...``).
+#: (``user@host:~/dir$ ...``, ``PS C:\repo> ...``, ``C:\repo> ...``, or a bare
+#: ``$ ...`` / ``# ...`` / ``% ...`` / ``❯ ...``).
 _SHELL_HEAD = re.compile(
-    r"^\s*(?:[\w.-]+@[\w.-]+(?::\S*)?\s*[$#%>]|PS\s+\S[^>]*>|[A-Za-z]:\\[^>]*>)"
+    r"^\s*(?:[\w.-]+@[\w.-]+(?::\S*)?\s*[$#%>]|PS\s+\S[^>]*>|[A-Za-z]:\\[^>]*>|[$#%❯](?:\s|$))"
 )
 
 

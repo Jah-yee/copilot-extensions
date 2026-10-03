@@ -865,3 +865,28 @@ def test_an_id_only_heartbeat_never_revives_a_registration_on_an_owned_worktree(
         heartbeat_id, machine=None, cwd=None, worktree_id=None, repo=None, branch=None,
         pid=None, role=None, now=now + 4) == "reserved"
     assert tmp_db.get_live_session("resumed")["updated_at"] < now + 4
+
+def test_an_older_daemons_old_id_heartbeat_cannot_recreate_a_rolled_over_predecessor(
+    tmp_db: Database,
+) -> None:
+    """Mixed generations during a cutover: a protocol-20 daemon upserts the old
+    id verbatim (no alias resolution). The database itself must refuse to bring
+    the folded-away predecessor back, or delivery would pick it over the
+    resumed session."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    conn = tmp_db._get_conn()
+    with tmp_db._write_lock:
+        cur = conn.execute(
+            "INSERT INTO live_sessions (session_id, machine, cwd, worktree_id, pid, role, "
+            "status, registered_at, updated_at) VALUES ('placeholder', 'm', '/w', 'wt-R', 4242, "
+            "'picker', 'live', ?, ?) ON CONFLICT(session_id) DO UPDATE SET status='live', "
+            "updated_at=excluded.updated_at",
+            (now + 3, now + 3),
+        )
+        conn.commit()
+    assert cur.rowcount == 0
+    rows = conn.execute("SELECT session_id FROM live_sessions WHERE worktree_id='wt-R'").fetchall()
+    assert [r["session_id"] for r in rows] == ["resumed"]
+    assert tmp_db.get_live_session("placeholder")["session_id"] == "resumed"

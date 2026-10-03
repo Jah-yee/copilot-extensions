@@ -13,7 +13,19 @@ import {
   PROMPT_REPLY_GUIDANCE,
   controlPlan,
   modeApplied,
+  adoptSessionId,
 } from "../extensions/agent-bridge/delivery.mjs";
+
+test("a same-process resume switches registration to the resumed id", () => {
+  const state = { sessionId: null, registered: false };
+  assert.equal(adoptSessionId(state, "placeholder"), true); // late id: register it
+  state.registered = true;
+  assert.equal(adoptSessionId(state, "placeholder"), false); // same id: nothing to do
+  assert.equal(adoptSessionId(state, undefined), false); // an event without an id
+  assert.equal(adoptSessionId(state, "resumed"), true); // the resume renamed it
+  assert.deepEqual(state, { sessionId: "resumed", registered: false });
+  assert.equal(adoptSessionId(state, "resumed"), false);
+});
 
 test("buildDeliveredSendOptions always tags an explicit non-user source", () => {
   const options = buildDeliveredSendOptions({

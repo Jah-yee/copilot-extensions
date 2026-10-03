@@ -162,3 +162,16 @@ export function controlPlan(msg) {
 export function modeApplied(result) {
   return !!result && result.modeApplied !== false;
 }
+
+// Follow the conversation this extension serves. Its id comes from SESSION_ID
+// or the first event; a resume in the same process then switches the events to
+// the resumed conversation's id. Registering that id while the placeholder is
+// still live is what lets the bridge fold the placeholder into it (its claim,
+// handle and queued messages), so a change is adopted, never ignored. Returns
+// true when the caller must register the (new) id.
+export function adoptSessionId(state, eventSessionId) {
+  if (!eventSessionId || eventSessionId === state.sessionId) return false;
+  state.sessionId = eventSessionId;
+  state.registered = false;
+  return true;
+}

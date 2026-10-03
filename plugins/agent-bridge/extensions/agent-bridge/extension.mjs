@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
-import { InFlightMessages, controlPlan, deliveryPlan, modeApplied } from "./delivery.mjs";
+import { InFlightMessages, adoptSessionId, controlPlan, deliveryPlan, modeApplied } from "./delivery.mjs";
 import { firstLoadThisSession } from "./announce.mjs";
 import { makeBridgeEndpoint } from "./bridge-endpoint.mjs";
 import { resolveMetadataAsync } from "./metadata.mjs";
@@ -375,17 +375,17 @@ const session = await joinSession({
 });
 
 // Observe-only, non-blocking: the ONLY work done on the CLI event loop. Just
-// note that the session is alive and capture the session id if the env var was
-// missing. No I/O, no await -- returns immediately (hot-potato). Bridge writes
+// note that the session is alive and follow its session id (a missing env var,
+// or a resume that renamed the conversation). No I/O, no await -- returns immediately (hot-potato). Bridge writes
 // happen on the heartbeat timer below. Phase 5 will extend this to buffer
 // events into a bounded queue that a decoupled flusher drains to the bridge.
 session.on((event) => {
   try {
     state.lastEventAt = Date.now();
     state.inFlight.observe(event);
-    if (!state.sessionId && event?.sessionId) {
-      state.sessionId = event.sessionId;
-      // Late session id -> kick a one-off registration off the event loop.
+    if (adoptSessionId(state, event?.sessionId)) {
+      // A late id, or a resume that renamed this conversation: register it
+      // off the event loop (the bridge folds a renamed placeholder into it).
       setTimeout(() => register().catch(() => {}), 0);
     }
     // Represent (Phase 5): enqueue whitelisted events for the flusher. This is

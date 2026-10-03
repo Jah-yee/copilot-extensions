@@ -14,6 +14,7 @@ import {
   controlPlan,
   modeApplied,
   adoptSessionId,
+  serializedRegister,
 } from "../extensions/agent-bridge/delivery.mjs";
 
 test("a same-process resume switches registration to the resumed id", () => {
@@ -25,6 +26,54 @@ test("a same-process resume switches registration to the resumed id", () => {
   assert.equal(adoptSessionId(state, "resumed"), true); // the resume renamed it
   assert.deepEqual(state, { sessionId: "resumed", registered: false });
   assert.equal(adoptSessionId(state, "resumed"), false);
+});
+
+function deferredPoster() {
+  const calls = [];
+  const post = (id) => new Promise((resolve) => calls.push({ id, resolve }));
+  return { calls, post };
+}
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test("a rename while the old id's registration is in flight registers the new id before ready", async () => {
+  const state = { sessionId: "placeholder", registered: false };
+  const { calls, post } = deferredPoster();
+  const register = serializedRegister(state, post);
+  const first = register();
+  await tick();
+  adoptSessionId(state, "resumed");
+  const second = register();  // the rename's own registration
+  calls[0].resolve(true);     // the old id's request completes first
+  await tick();
+  assert.equal(state.registered, false);  // not ready: the current id isn't registered yet
+  assert.deepEqual(calls.map((c) => c.id), ["placeholder", "resumed"]);
+  calls[1].resolve(true);
+  await first;
+  await tick();
+  assert.equal(state.registered, true);
+  calls.slice(2).forEach((c) => c.resolve(true));
+  await second;
+  assert.ok(calls.slice(1).every((c) => c.id === "resumed"));
+});
+
+test("a heartbeat queued before a rename never registers the old id after the new one", async () => {
+  const state = { sessionId: "placeholder", registered: true };
+  const { calls, post } = deferredPoster();
+  const register = serializedRegister(state, post);
+  const inFlight = register();
+  const heartbeat = register();  // queued behind it, before the rename
+  await tick();
+  adoptSessionId(state, "resumed");
+  const renamed = register();
+  for (let i = 0; i < 6 && calls.some((c) => !c.done); i++) {
+    for (const c of calls) if (!c.done) { c.done = true; c.resolve(true); }
+    await tick();
+  }
+  await Promise.all([inFlight, heartbeat, renamed]);
+  const ids = calls.map((c) => c.id);
+  assert.equal(ids[0], "placeholder");
+  assert.ok(ids.slice(1).every((id) => id === "resumed"), ids.join(","));
+  assert.equal(state.registered, true);
 });
 
 test("buildDeliveredSendOptions always tags an explicit non-user source", () => {

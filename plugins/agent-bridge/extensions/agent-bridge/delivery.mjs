@@ -175,3 +175,26 @@ export function adoptSessionId(state, eventSessionId) {
   state.registered = false;
   return true;
 }
+
+// One registration at a time (initial, heartbeat, and the one a rename kicks
+// off all share it). Each request reads the id when its turn comes, and is
+// ready only if that is still the current id: a rename while it was in flight
+// registers the new id first. Serialized, a late request for the old id can't
+// land after the new one and fold the alias back.
+export function serializedRegister(state, post, onRegistered = () => {}) {
+  let chain = Promise.resolve();
+  const once = async () => {
+    for (;;) {
+      const id = state.sessionId;
+      if (!id) return false;
+      const ok = await post(id);
+      if (state.sessionId !== id) continue; // renamed meanwhile
+      if (ok && !state.registered) {
+        state.registered = true;
+        onRegistered(id);
+      }
+      return ok;
+    }
+  };
+  return () => (chain = chain.then(once, once));
+}

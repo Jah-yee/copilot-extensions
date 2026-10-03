@@ -762,6 +762,21 @@ def test_a_rename_keeps_its_place_behind_a_newer_process(tmp_db: Database) -> No
     assert tmp_db.current_live_session_for_worktree("wt-R", now=now + 3) == "newer"
 
 
+def test_an_older_daemons_delete_of_the_current_id_takes_its_aliases(tmp_db: Database) -> None:
+    """A protocol-20 daemon deregisters with a bare row delete; the database
+    drops the aliases that pointed at that row, so the retired id isn't left
+    dangling and fenced off from ever registering again."""
+    now = time.time()
+    _claimed_placeholder(tmp_db, now)
+    assert _register(tmp_db, "resumed", "wt-R", now + 2, pid=4242) == "live"
+    assert tmp_db.resolve_live_session_id("placeholder") == "resumed"
+    tmp_db.execute_write("DELETE FROM live_sessions WHERE session_id=?", ("resumed",))  # the old SQL path
+    assert tmp_db.execute_read("SELECT * FROM live_session_aliases") == []
+    assert tmp_db.resolve_live_session_id("placeholder") == "placeholder"
+    assert _register(tmp_db, "placeholder", "wt-R", now + 3, pid=4242) == "live"
+    assert tmp_db.get_live_session_exact("placeholder") is not None
+
+
 def test_a_reused_pid_never_inherits_a_confirmed_dead_registration(tmp_db: Database) -> None:
     now = time.time()
     _claimed_placeholder(tmp_db, now)

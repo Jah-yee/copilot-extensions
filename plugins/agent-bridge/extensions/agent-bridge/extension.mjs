@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
-import { InFlightMessages, adoptSessionId, controlPlan, deliveryPlan, modeApplied } from "./delivery.mjs";
+import { InFlightMessages, adoptSessionId, controlPlan, deliveryPlan, modeApplied, serializedRegister } from "./delivery.mjs";
 import { firstLoadThisSession } from "./announce.mjs";
 import { makeBridgeEndpoint } from "./bridge-endpoint.mjs";
 import { resolveMetadataAsync } from "./metadata.mjs";
@@ -172,15 +172,11 @@ async function bridgeGetJson(path) {
   }
 }
 
-async function register() {
-  if (!state.sessionId) return;
-  const payload = { session_id: state.sessionId, ...(state.meta || {}) };
-  const ok = await bridgeFetch("POST", "/api/v1/live-sessions", payload);
-  if (ok && !state.registered) {
-    state.registered = true;
-    extLog(`registered live session ${state.sessionId} with local bridge`);
-  }
-}
+const register = serializedRegister(
+  state,
+  (id) => bridgeFetch("POST", "/api/v1/live-sessions", { session_id: id, ...(state.meta || {}) }),
+  (id) => extLog(`registered live session ${id} with local bridge`),
+);
 
 async function deregister() {
   if (!state.sessionId) return;

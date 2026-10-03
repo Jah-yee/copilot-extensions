@@ -81,6 +81,18 @@ class _SchemaMixin:
                 "WHERE alias_session_id = NEW.session_id) "
                 "BEGIN SELECT RAISE(IGNORE); END"
             )
+            # An alias outlives its target only by mistake: an older daemon
+            # deregistering the current id deletes just its row, which would
+            # leave the retired ids pointing at nothing -- and, through the
+            # fence above, unable ever to register again. Cleaned up here, in
+            # the database, every daemon's delete takes its aliases with it.
+            # (A rollover repoints aliases before deleting the predecessor.)
+            conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS live_sessions_drop_orphaned_aliases "
+                "AFTER DELETE ON live_sessions "
+                "BEGIN DELETE FROM live_session_aliases "
+                "WHERE target_session_id = OLD.session_id; END"
+            )
             # The registering process's start time: with the pid, it tells a
             # same-process resume from an unrelated process that reused the pid.
             if "process_started_at" not in {

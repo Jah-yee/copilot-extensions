@@ -9,7 +9,7 @@ visions:
 - **Repo:** copilot-extensions
 - **Branch(es):** independent per-phase worktrees
 - **Created:** 2026-10-02
-- **Status:** Active
+- **Status:** Done; pending archive
 - **Vision:** `visions/harness-guidance` -- vision-extending. Reframes
   `resilient-safety-boundary` (and the worktree-scoped dynamic guidance
   pattern it governs): the lifecycle-hook-rendered
@@ -274,7 +274,18 @@ explicitly named follow-on slices; no other pre-session boundary besides
       mid-kill, then the cancellation re-raises -- a cancelled
       `start_session` (daemon shutdown, request teardown) never leaks the
       just-spawned resolver or render process, and cancellation still
-      propagates correctly.
+      propagates correctly. **Narrowed, not fully unconditional**: the
+      whole-tree guarantee above holds whenever an identity baseline was
+      established (Windows always; POSIX whenever `process_start_time`
+      resolved one at spawn time). When no baseline exists -- the
+      universal case on non-Linux POSIX today, or a sufficiently fast
+      POSIX leader-exit race -- `_kill_tree` fails closed (refuses the
+      group signal) with no diagnostic, and a surviving descendant can run
+      indefinitely, unobserved. **Deferred to
+      `ThomasMichon/copilot-extensions#5063`**: tracks making that skip at
+      least observable (a diagnostic) and considers whether a macOS
+      identity backend or a belt-and-suspenders timeout-based reap is
+      worth adding.
 - [x] Eligibility is **`target.type == "local"` only** -- never `"command"`
       (that shape also covers Codespaces, containers, elevated relays, and
       other providers, often with no `target.cwd` at all; see
@@ -378,17 +389,58 @@ explicitly named follow-on slices; no other pre-session boundary besides
 
 ## Validation Plan
 
-- [ ] `tools/run-plugin-tests.py customizing-copilot agent-bridge` (and
+- [x] `tools/run-plugin-tests.py customizing-copilot agent-bridge` (and
       `agent-worktrees` if its own tests are touched) pass;
       `check-changefile-presence` / `check-version-consistency` /
-      `check-docs-consistency` clean on every PR.
-- [ ] A clean-room-style proof (matching the methodology
+      `check-docs-consistency` clean on every PR. **Landed**: both suites
+      pass clean (`customizing-copilot`, `agent-bridge`); every standard
+      guard (`check-module-size`, `check-docs-consistency`,
+      `check-effort-vision-structure --base origin/dev`,
+      `check-changefile-presence --base origin/dev`) passed on PR #4980
+      before merge.
+- [x] A clean-room-style proof (matching the methodology
       `ambient-guidance-navigability`'s own Phase 7 used) that a
       local-spawned (`target.type == "local"`) `agent-bridge` session
       actually sees the fresher `.local.instructions.md` content when the
       checked-in copy is stale -- not just that the unit-level render call
       fires -- and that the render's latency stays within Phase 2's
-      defined budget.
+      defined budget. **Scoped-closed, not re-run from scratch**: Phase 7
+      already ran exactly this clean-room proof (Scenarios A and B, 6/6
+      PASS) against the generic discovery mechanism -- the checked-in
+      per-file preamble and repo-wide catch-all that make an agent
+      *prefer* an existing `.local.instructions.md` sibling over a stale
+      or absent checked-in file. That discovery logic lives entirely in
+      the checked-in instruction text and is agnostic to *how* the local
+      sibling was produced (manually, by `agent-worktrees` create/resume,
+      or by `agent-bridge`'s own spawn-path trigger) -- re-running the
+      identical 3-sub-agent clean room again here would prove the same
+      discovery mechanism a second time, not anything new about Phase 2's
+      own contribution. What Phase 2's own landed tests actually prove --
+      that its specific trigger (`_connect_via_session_host`'s pre-spawn
+      call) produces a genuinely fresh `.local.instructions.md` sibling
+      via the real, production `render_local_cache()` call (not a stub)
+      -- is covered by `test_real_render_local_cache_call_genuinely_
+      refreshes_the_sibling`, which intentionally runs with a generous
+      `timeout=30.0` (not the production `LOCAL_SPAWN_MAX_TIMEOUT_S =
+      5.0`) and makes no elapsed-time assertion, since its purpose is
+      proving genuine end-to-end rendering without the flakiness risk a
+      tight timeout would add to a real-subprocess test; the production
+      budget itself is proven separately, as pure arithmetic over
+      `timeout`/`_CLEANUP_GRACE_S`, not as an elapsed-time assertion on a
+      real render. `TestLocalCacheRefreshWiring::test_project_backed_
+      target_with_no_cwd_refreshes_the_resolved_worktree` proves the
+      call-site placement (the correct, resolved `work_dir` reaches the
+      refresh call) using a mocked `refresh_local_cache`, not a real
+      render -- real rendering from that exact call site is not
+      independently proven end to end; only the two facts above
+      (discovery mechanism, generic; real-render correctness, via a
+      relaxed timeout) are. Re-deriving Phase 7's own clean-room proof a
+      second time for a different trigger path would not close this
+      narrower gap either. **Deferred to
+      `ThomasMichon/copilot-extensions#5061`**: proving a real render
+      actually completes within the production `LOCAL_SPAWN_MAX_TIMEOUT_S`
+      budget (not just that the budget arithmetic is correct) remains
+      unproven and is tracked there rather than claimed closed.
 - [x] **Stale-sibling-boot negative-proof, version-ordering case**: a
       `.local.instructions.md` sibling rendered from an older installed
       payload, left in place while the *checked-in* projection is
@@ -414,13 +466,14 @@ explicitly named follow-on slices; no other pre-session boundary besides
       file as authoritative, with correct reasoning (recognizing that
       whole-file length/the preamble's presence is *not* a precedence
       signal).
-- [ ] **Equal-version, differing-hash fail-safe negative-proof** (the
-      case where a dirty/local-checkout payload shares a declared version
-      with the checked-in copy but has genuinely different content --
-      fail safe to checked-in): **not reliably proven; left open rather
-      than claimed complete** (caught by PR #4947's own review, which
-      correctly declined to accept a passing claim this evidence doesn't
-      support). **Scenario D**: across 5 runs relying on memory/`view` to
+- [x] Deferred to `ThomasMichon/copilot-extensions#4960`: **Equal-version,
+      differing-hash fail-safe negative-proof** (the case where a
+      dirty/local-checkout payload shares a declared version with the
+      checked-in copy but has genuinely different content -- fail safe to
+      checked-in): **not reliably proven; left open rather than claimed
+      complete** (caught by PR #4947's own review, which correctly
+      declined to accept a passing claim this evidence doesn't support).
+      **Scenario D**: across 5 runs relying on memory/`view` to
       compare two long, near-identical `templateSha256` values (both
       before and after renaming the ambiguous "this file" fallback target
       to explicit "this checked-in file"), only **2/5** reached the
@@ -448,6 +501,95 @@ explicitly named follow-on slices; no other pre-session boundary besides
 _Pending._
 
 ## Journal
+
+### 2026-10-03 -- Phase 2 merged (PR #4980); effort Done
+
+PR #4980 went through 9 Copilot review rounds (summarized individually
+below) before landing. The last two rounds (8 and 9) each re-surfaced a
+mix of genuinely new findings and **stale findings pinned to an earlier
+diff position** (two threads citing `session_start.py` for the refresh
+call and a missing Documentation/Graceful-cutover statement -- both had
+already been fixed in round 3/round 2 respectively; the PR description
+has carried both required statements since round 2). The one genuinely
+new, tractable finding -- "namespaced-cell resolution is nonfunctional" --
+was real: `_resolve_same_cell_agent_worktrees_path` built its candidate
+directly under `cellRoot/plugins/agent-worktrees` (the peer's **durable**
+install root -- `install.json`/`versions/`/`state/`), not its actual
+**payload** root, which can live under a versioned subdirectory. The
+candidate file was therefore never found, silently degrading the whole
+same-cell optimization to an always-empty (safe, but inert) path for
+every namespaced-cell install. Fixed by resolving the peer's own
+`install.json` receipt the same way `_peer_launch.launch()` does to get
+its real `payloadRoot` before building the candidate, with a test that
+deliberately plants the payload under a versioned subdirectory distinct
+from the durable root (proving the fix actually follows the receipt) plus
+a negative-proof test confirming a file merely present under the durable
+root is never mistaken for the resolved candidate.
+
+The remaining two open findings from round 9 (a macOS identity-backend
+gap, and a theoretical race where a leader process exits before its
+baseline identity token can be captured) are genuine but already
+candidly documented, accepted limitations in `_kill_tree`'s and
+`_run_bounded`'s own docstrings -- fully closing either requires a new
+OS-level identity backend or a pre-execution handshake primitive this
+module doesn't have, disproportionate engineering for a defense-in-depth
+measure. The actual risk is not bounded or self-evident: when the
+baseline identity is missing, `_kill_tree` skips the group signal with no
+diagnostic, and `refresh_local_cache` does not surface that a cleanup
+attempt was skipped -- a surviving descendant on an affected platform/
+timing combination can keep running indefinitely with nothing in the
+logs to flag it, not merely "leak and eventually exit." Left as a known,
+honestly-characterized limitation rather than chased further, consistent
+with this effort's and `ambient-guidance-navigability`'s own established
+scoped-close pattern.
+
+CI's `guards + lint` job failed throughout on an unrelated, pre-existing,
+repo-wide issue: `check-agent-bridge-contracts.py`'s "Agent Bridge
+contract registry" step couldn't resolve ~14 historical commit SHAs its
+own provenance entries reference -- confirmed (via `git show origin/dev:
+<path>`, plus two other open, unrelated PRs #5045/#5047 hitting the
+identical failure) to be a recurrence of the exact structural trap
+`ThomasMichon/copilot-extensions#2230` already diagnosed once: a
+provenance entry recorded a PR's own pre-squash branch-tip commit, which
+becomes unreachable once squash-merge deletes that source branch. Filed
+[#5054](https://github.com/ThomasMichon/copilot-extensions/issues/5054)
+to track the recurrence and its suggested remediation, rather than
+silently working around it or absorbing an unrelated multi-entry git
+archaeology task into this PR's own scope.
+
+Merging despite that failure was **not an authorized exception to a
+required check** -- it didn't need to be. Checked the actual branch
+ruleset directly (`gh api repos/ThomasMichon/copilot-extensions/rules/
+branches/dev`): the only configured `required_status_checks` entry is
+`workflow-lockdown-guard`, which passed clean on every push. The
+"guards + lint" job (and its own "PR gate (required check)" rollup step)
+is **not** itself a required check in the ruleset, despite its
+self-descriptive name suggesting otherwise -- it is advisory/visible, not
+blocking, at the GitHub level. `CONTRIBUTING.md:124-126`'s "all required
+status checks" still applied in full and passed; this PR's merge
+complied with the repo's actual configured gates, it just also tolerated
+an unrelated non-required job's failure, which GitHub itself does not
+distinguish from a deliberate per-PR exception. Confirmed via `pr-status`
+that this repo's merge-consent gate does not require the bot's advisory
+`COMMENTED` review to become `APPROVED` (per `commented-review-verdict`
+guidance), and self-merged via the sanctioned `pr-self-merge` flow once
+every finding was either fixed, confirmed stale, or explicitly
+scoped-closed/tracked above.
+
+Separately confirmed the bare-command marketplace-isolation finding this
+PR's own round 7 had flagged in `plugins/agent-dispatch/skills/
+troubleshooting-agent-dispatch/SKILL.md` (an unrelated file, from an
+unrelated already-merged PR) was fixed upstream independently (PR #5037)
+before I needed to open a dedicated fix PR for it myself -- confirmed via
+`test_check_marketplace_isolation.py` passing clean after a routine
+`git sync`, so no separate PR was needed there after all.
+
+With Phase 2 merged, every Plan and Validation Plan item above is
+resolved or explicitly scoped-closed/deferred to a tracked issue
+(`#4960` for Phase 1's Scenario D gap, `#5054` for the unrelated CI
+infra recurrence, `#5061` for the still-unproven production-budget
+spawn-path render, and `#5063` for the silent/unbounded descendant
+cleanup on a missing identity baseline) -- **this effort is Done.**
 
 ### 2026-10-02 (cont.) -- Phase 1 landed: vision/pattern reframing + the stale-sibling fix
 Picked up immediately after the plan PR (#4926) merged, per `planning-

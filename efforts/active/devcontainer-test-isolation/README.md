@@ -945,3 +945,43 @@ unused default base being unresolvable, while `--changed --base
 <nonexistent-ref>` now exits 1 with a clear message (confirmed via a
 real, unpiped exit-code check) instead of silently degrading.
 
+### 2026-10-03 — Review round 15: 2 findings addressed (supply-chain pin, hidden index flags)
+Automated review confirmed round 14's three fixes (resolved) and raised
+two new items. HIGH: `onCreateCommand` installed `uv` via an unpinned,
+unverified `curl ... astral.sh/uv/install.sh | sh` pipeline -- a
+supply-chain risk specific to this wrapper's threat model, since the
+container has outbound network access AND a copy of the repo's tracked
+files present simultaneously, so a compromised installer response could
+both read the snapshot and exfiltrate it in the same session. Fixed by
+replacing the shell-installer pipeline with a pinned-version,
+SHA-256-verified direct download of the release tarball (matching this
+repo's own existing precedent in `libs/installer-engine/installer-engine.sh`'s
+`ensure_uv`): `uv` 0.12.6, per-arch (`x86_64`/`aarch64` Linux-gnu, matching
+this wrapper's Linux-only scope) expected hashes checked with `sha256sum
+-c` before extraction, aborting the build (`set -eu`) on any mismatch.
+MEDIUM: `_warn_about_dirty_tracked_files`'s `git status` check cannot see
+a tracked file carrying a Git assume-unchanged or skip-worktree index
+flag -- `git status` deliberately suppresses on-disk-modification
+reporting for such paths, yet the wrapper's `_tracked_paths`/tar-building
+logic still reads and copies the file's real current content regardless
+of the flag, so a locally flagged file's live modifications could reach
+the egress-enabled container without ever appearing in the existing
+warning. Fixed with a new `_warn_about_hidden_tracked_file_flags` function
+(`git ls-files -v --cached`, flagging any lowercase letter or `S` per
+that command's own documented flag semantics) wired into
+`_write_tar_of_repo` alongside the existing dirty-files warning, and
+built to the same fail-closed contract (aborts if `git ls-files -v`
+itself fails, rather than silently proceeding).
+
+Re-validated end-to-end: the full unit test suite (53 tests, including
+three new tests for the hidden-flags warning plus updated mocks in the
+three `_write_tar_of_repo` tests) passes; a fresh Docker-backed
+end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms `uv`
+installs correctly via the new pinned/verified script and the run
+completes normally with teardown leaving no orphan containers/volumes
+and no host `git status` changes beyond this round's own diff; and a
+dedicated live check (`git update-index --assume-unchanged TESTING.md`,
+run the warning function directly, then `--no-assume-unchanged` to
+revert) confirms the new warning fires by name for the flagged path and
+that the flag doesn't persist after revert.
+

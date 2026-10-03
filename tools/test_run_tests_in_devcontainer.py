@@ -454,6 +454,7 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
     monkeypatch.setattr(wrapper, "_tracked_paths", lambda *, include_untracked: ["tracked.txt"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
     monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
+    monkeypatch.setattr(wrapper, "_warn_about_hidden_tracked_file_flags", lambda: None)
 
     dest = tmp_path / "out.tar"
     wrapper._write_tar_of_repo(dest, ["agent-worktrees"], include_untracked=False)
@@ -481,6 +482,7 @@ def test_write_tar_of_repo_skips_tracked_path_deleted_from_working_tree(tmp_path
                          lambda *, include_untracked: ["present.txt", "deleted.txt"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
     monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
+    monkeypatch.setattr(wrapper, "_warn_about_hidden_tracked_file_flags", lambda: None)
 
     dest = tmp_path / "out.tar"
     wrapper._write_tar_of_repo(dest, [], include_untracked=False)
@@ -511,6 +513,7 @@ def test_write_tar_of_repo_does_not_recurse_into_submodule_directory(tmp_path: P
                          lambda *, include_untracked: ["vendor/some-submodule"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
     monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
+    monkeypatch.setattr(wrapper, "_warn_about_hidden_tracked_file_flags", lambda: None)
 
     dest = tmp_path / "out.tar"
     wrapper._write_tar_of_repo(dest, [], include_untracked=False)
@@ -577,6 +580,41 @@ def test_warn_about_dirty_tracked_files_fails_closed_when_status_itself_fails() 
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
         try:
             wrapper._warn_about_dirty_tracked_files()
+        except SystemExit as exc:
+            assert "not a git repository" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
+
+
+def test_warn_about_hidden_tracked_file_flags_reports_assume_unchanged_and_skip_worktree(capsys) -> None:
+    # `H` is an ordinary cached entry (no flag); a lowercase letter means
+    # assume-unchanged, and `S` means skip-worktree -- both suppress `git
+    # status`'s own on-disk-modification reporting for that path, while
+    # the snapshot still archives its real current content regardless.
+    fake_result = mock.Mock(
+        returncode=0,
+        stdout=b"H normal.txt\nh assumed-unchanged.txt\nS skip-worktree.txt\n",
+        stderr=b"",
+    )
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        wrapper._warn_about_hidden_tracked_file_flags()
+    err = capsys.readouterr().err
+    assert "assumed-unchanged.txt" in err
+    assert "skip-worktree.txt" in err
+    assert "normal.txt" not in err
+
+
+def test_warn_about_hidden_tracked_file_flags_silent_when_none_flagged() -> None:
+    fake_result = mock.Mock(returncode=0, stdout=b"H normal.txt\n", stderr=b"")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        wrapper._warn_about_hidden_tracked_file_flags()
+
+
+def test_warn_about_hidden_tracked_file_flags_fails_closed_when_ls_files_fails() -> None:
+    fake_result = mock.Mock(returncode=128, stdout=b"", stderr=b"not a git repository")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        try:
+            wrapper._warn_about_hidden_tracked_file_flags()
         except SystemExit as exc:
             assert "not a git repository" in str(exc)
         else:

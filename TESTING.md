@@ -223,9 +223,16 @@ normally carries secrets," never "every byte currently in it is safe." The
 wrapper prints an explicit stderr warning naming every dirty tracked file
 before building the snapshot, so this residual exposure is surfaced at the
 moment it's actually relevant, not only here (and fails closed -- aborts
-rather than proceeding -- if that check itself cannot run). A fresh,
-per-invocation volume means no state (including prior test artifacts)
-carries over between runs.
+rather than proceeding -- if that check itself cannot run). The same
+residual exposure applies to a tracked file carrying a Git
+assume-unchanged or skip-worktree index flag: `git status` deliberately
+will not report an on-disk modification for such a path, but the wrapper
+still copies the file's real current content. The wrapper separately warns
+about any such flagged path before building the snapshot (and likewise
+fails closed if that check itself cannot run), so a locally "hidden"
+modification doesn't go unnoticed just because `git status` stays quiet
+about it. A fresh, per-invocation volume means no state (including prior
+test artifacts) carries over between runs.
 
 An unresolvable `--base` is a HARD failure, not a silent degradation, when
 changed-selection is actually in play (an explicit `--changed`, or

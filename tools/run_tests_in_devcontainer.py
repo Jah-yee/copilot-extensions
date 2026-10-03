@@ -309,6 +309,55 @@ def _warn_about_dirty_tracked_files() -> None:
         print(f"  {path}", file=sys.stderr)
 
 
+def _warn_about_hidden_tracked_file_flags() -> None:
+    """Print a clear, explicit stderr warning naming every tracked file
+    whose index entry carries ``assume-unchanged`` or ``skip-worktree``.
+
+    ``git status`` (and therefore ``_warn_about_dirty_tracked_files``) is
+    NOT a fail-closed dirty-content check for these paths: both flags
+    instruct git to SUPPRESS reporting an on-disk difference for that
+    path, while ``_tracked_paths``/``_write_tar_of_repo`` still archive its
+    actual current bytes regardless -- so a locally customized tracked
+    file (a config override, for instance) carrying either flag could
+    enter the network-enabled container with no warning at all. ``git
+    ls-files -v`` marks a flagged entry with a lowercase letter
+    (assume-unchanged) or an uppercase ``S`` (skip-worktree); an ordinary,
+    unflagged entry is uppercase (``H`` for a normal cached entry).
+
+    Fails CLOSED (raises) if ``git ls-files -v`` itself cannot be run, for
+    the same reason ``_warn_about_dirty_tracked_files`` does: an unknown
+    state must never be silently treated as safe."""
+    res = subprocess.run(
+        ["git", "-C", str(REPO), "ls-files", "-v", "--cached"],
+        capture_output=True, timeout=60, env=_scrubbed_git_env(),
+    )
+    if res.returncode != 0:
+        raise SystemExit(
+            "failed to check tracked files for assume-unchanged/skip-worktree "
+            f"flags (refusing to build a snapshot with an unknown state): "
+            f"{res.stderr.decode(errors='replace').strip()}"
+        )
+    flagged: list[str] = []
+    for line in os.fsdecode(res.stdout).splitlines():
+        if not line.strip():
+            continue
+        flag, _, path = line.partition(" ")
+        if flag.islower() or flag == "S":
+            flagged.append(path)
+    if not flagged:
+        return
+    print(
+        "warning: the following tracked file(s) carry a Git "
+        "assume-unchanged/skip-worktree flag -- `git status` will NOT report "
+        "an on-disk modification for them, but their CURRENT (possibly "
+        "locally customized) content is still copied into the "
+        "test-isolation container, which has outbound network access:",
+        file=sys.stderr,
+    )
+    for path in flagged:
+        print(f"  {path}", file=sys.stderr)
+
+
 def _resolve_base_ref(passthrough: list[str]) -> str:
     """Best-effort extraction of the ``--base`` value a passthrough
     invocation will use, so ``_materialized_git_dir`` can include exactly
@@ -542,13 +591,16 @@ def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked:
     no submodules today, but the guard costs nothing and must not regress
     silently if one is ever added.
 
-    Also warns (``_warn_about_dirty_tracked_files``) about any tracked file
-    with an uncommitted modification before copying anything -- a known,
-    accepted residual exposure of the tracked-files boundary (which governs
-    which PATHS are copied, not which bytes) is surfaced explicitly at the
-    moment it's actually relevant.
+    Also warns (``_warn_about_dirty_tracked_files``,
+    ``_warn_about_hidden_tracked_file_flags``) about any tracked file with
+    an uncommitted modification, or an assume-unchanged/skip-worktree flag
+    that could hide one, before copying anything -- known, accepted
+    residual exposures of the tracked-files boundary (which governs which
+    PATHS are copied, not which bytes) are surfaced explicitly at the
+    moment they're actually relevant.
     """
     _warn_about_dirty_tracked_files()
+    _warn_about_hidden_tracked_file_flags()
     with tarfile.open(dest, mode="w") as tar, contextlib.ExitStack() as stack:
         tar.add(_materialized_git_dir(stack, passthrough), arcname=".git")
         for rel_path in _tracked_paths(include_untracked=include_untracked):

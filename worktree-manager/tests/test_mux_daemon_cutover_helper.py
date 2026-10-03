@@ -503,6 +503,25 @@ def _spawn_fake_mux_daemon_process(root: Path) -> subprocess.Popen:
     )
 
 
+def _wait_until_recognized_as_mux_daemon(pid: int, *, timeout: float = 5.0) -> bool:
+    """Poll ``_iter_mux_daemon_pids`` until ``pid`` shows up or ``timeout``
+    elapses.
+
+    The real root cause of this ever flaking (``ps``'s ``args`` field
+    getting silently truncated under an inherited ``$COLUMNS``, cutting off
+    the very tokens ``_is_mux_daemon_cmdline`` looks for) is fixed in
+    ``_iter_mux_daemon_pids`` itself. This poll is kept as cheap defense in
+    depth against ordinary fork/exec scheduling latency on a loaded
+    runner -- it does not weaken what's actually asserted.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pid in mdc._iter_mux_daemon_pids():
+            return True
+        time.sleep(0.05)
+    return pid in mdc._iter_mux_daemon_pids()
+
+
 def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():
     """``_terminate_mux_daemon_pid`` must actually terminate a REAL process
     that is both a genuine mux-daemon (by command-line shape) and bound to
@@ -512,7 +531,7 @@ def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():
     root = Path.home() / ".worktree-manager-test-identity-match"
     proc = _spawn_fake_mux_daemon_process(root)
     try:
-        assert proc.pid in mdc._iter_mux_daemon_pids(), (
+        assert _wait_until_recognized_as_mux_daemon(proc.pid), (
             "the real spawned process was not recognized as a mux-daemon -- "
             "test setup invalid"
         )
@@ -533,7 +552,7 @@ def test_terminate_mux_daemon_pid_refuses_a_root_mismatched_real_process():
     other_root = Path.home() / ".worktree-manager-test-identity-other"
     proc = _spawn_fake_mux_daemon_process(its_root)
     try:
-        assert proc.pid in mdc._iter_mux_daemon_pids(), (
+        assert _wait_until_recognized_as_mux_daemon(proc.pid), (
             "the real spawned process was not recognized as a mux-daemon -- "
             "test setup invalid"
         )

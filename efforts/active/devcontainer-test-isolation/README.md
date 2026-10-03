@@ -1339,3 +1339,42 @@ works; a dedicated `--changed --base origin/dev~1` run confirms
 changed-mode still correctly bundles the base closure. Docker cleanup and
 host `git status --short` reconfirmed clean of anything beyond this
 round's own diff.
+
+### 2026-10-03 — Review round 15 (eleventh pass): 3 findings addressed (pinned base image digest, cleanup-body masking, misleading name)
+An eleventh review pass of the same round confirmed the base-closure
+scoping fix resolved, and raised three more -- one new, two previously
+missed. HIGH: `.devcontainer/devcontainer.json`'s base image was still
+selected by a mutable tag (`mcr.microsoft.com/devcontainers/python:1-3.
+12-bookworm`), even though it IS the trust root for the entire isolation
+posture -- a retag or registry compromise could replace the whole
+runtime with no reviewed source change, bypassing the integrity posture
+already applied to the pinned/verified `uv` install. Fixed by pinning to
+the reviewed image's immutable digest
+(`mcr.microsoft.com/devcontainers/python@sha256:7876580d...`), confirmed
+via `docker pull`/`docker inspect`, with a trailing comment recording
+which human-readable tag it corresponds to for future deliberate
+refreshes. MEDIUM (previously missed, against the signal-masking fix
+from two passes ago): that fix only guarded against a primary exception
+already in flight when `_sigterm_deferred` (now renamed, see below) was
+entered -- if the cleanup BODY itself (e.g. a real `_tear_down` failure)
+raised AFTER a signal had already been recorded during that same call,
+the `finally` block would still replay the signal and replace the
+cleanup failure. Fixed by checking `sys.exc_info()` once, AFTER `yield`
+(not before) -- confirmed via direct experimentation that this single
+check correctly covers BOTH cases (an exception already active when
+entered, and one newly raised by the cleanup body), since Python sets
+the thread's exception state for the whole dynamic extent of either.
+LOW (previously missed): `_sigterm_deferred` now covers both `SIGINT`
+and `SIGTERM`, so its `SIGTERM`-only name -- kept "for continuity with
+this PR's own review history" -- embedded transient review narration
+into a durable function name. Renamed to `_cleanup_signals_deferred`
+throughout (definition, both call sites, and every test).
+
+Re-validated end-to-end: the full unit test suite (81 tests, including a
+new base-image-digest structural test and a new sibling masking test
+proving a cleanup-BODY failure also isn't replaced by a replayed signal)
+passes; `check-module-size.py --changed-since origin/dev` passes; a fresh
+Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms the common case still works with the pinned digest. Docker
+cleanup and host `git status --short` reconfirmed clean of anything
+beyond this round's own diff.

@@ -864,46 +864,45 @@ def _raise_on_sigterm(signum: int, frame: object) -> None:
 
 # `SIGINT` (Ctrl-C) already becomes `KeyboardInterrupt` via Python's own
 # default handling -- only `SIGTERM` needs `_raise_on_sigterm` above. Both
-# still need deferring during cleanup itself (`_sigterm_deferred`), so a
-# REPEAT signal mid-cleanup can't interrupt it partway.
+# still need deferring during cleanup itself (`_cleanup_signals_deferred`),
+# so a REPEAT signal mid-cleanup can't interrupt it partway.
 _CLEANUP_DEFERRED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 @contextlib.contextmanager
-def _sigterm_deferred():
+def _cleanup_signals_deferred():
     """Defer both `_CLEANUP_DEFERRED_SIGNALS` for a cleanup step
     (``_tear_down``/``_cleanup_orphan``): RECORD receipt instead of acting
     immediately, restore the previous handlers once cleanup finishes, then
-    raise `_TerminationRequested` if one was recorded AND no primary
-    failure is already in flight. Plain ``signal.SIG_IGN`` would DISCARD a
-    signal outright (not defer it) -- for the ordinary (non-exceptional)
-    teardown path, that would let `main` silently return 0 for a cancelled
-    run. Replaying unconditionally has its own failure mode: it could
-    REPLACE a genuine primary failure already propagating (a raised
-    exception the caller is mid-handling, or the startup failure
-    `_cleanup_orphan`'s own caller is about to re-`raise`) -- exactly the
-    masking this wrapper's teardown logic elsewhere exists to prevent.
-    ``sys.exc_info()`` at entry already reflects any such in-flight
-    exception (set by Python for the whole dynamic extent of the handling
-    ``except``/``finally``, including nested calls), so no extra signaling
-    from callers is needed. Kept under its original ``SIGTERM``-only name
-    for continuity across this PR's own review history."""
+    raise `_TerminationRequested` if one was recorded AND no exception is
+    propagating. Plain ``signal.SIG_IGN`` would DISCARD a signal outright
+    (not defer it) -- for the ordinary (non-exceptional) teardown path,
+    that would let `main` silently return 0 for a cancelled run. Replaying
+    unconditionally has its own failure mode: it could REPLACE a genuine
+    failure already propagating -- either one already in flight when this
+    context is entered (the caller mid-handling an exception, e.g. the
+    startup-failure branch's pending `raise`), OR one the cleanup BODY
+    itself raises (e.g. a real `_tear_down` failure) -- exactly the
+    masking this wrapper's teardown logic elsewhere exists to prevent. A
+    single ``sys.exc_info()`` check after ``yield`` covers both cases:
+    Python sets it for the whole dynamic extent of an already-active
+    ``except``/``finally`` (including nested calls) and ALSO when an
+    exception newly thrown into this generator is still propagating."""
     received: list[int] = []
     previous = {
         sig: signal.signal(sig, lambda signum, frame: received.append(signum))
         for sig in _CLEANUP_DEFERRED_SIGNALS
     }
-    primary_exception_in_flight = sys.exc_info()[0] is not None
     try:
         yield
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-        if received and primary_exception_in_flight:
+        if received and sys.exc_info()[0] is not None:
             print(
                 f"warning: received signal {received[0]} during cleanup, "
-                "but a primary failure is already in flight -- not "
-                "replacing it; the signal itself is not re-raised",
+                "but a failure is already propagating -- not replacing "
+                "it; the signal itself is not re-raised",
                 file=sys.stderr,
             )
         elif received:
@@ -916,7 +915,7 @@ def main(argv: list[str] | None = None) -> int:
     # `_TerminationRequested`'s docstring. SIGINT needs no equivalent
     # handler for the FIRST signal: Python already raises
     # `KeyboardInterrupt` for it by default, which the same
-    # `except BaseException` paths already catch -- `_sigterm_deferred`
+    # `except BaseException` paths already catch -- `_cleanup_signals_deferred`
     # (used around the cleanup calls below) is what protects against a
     # REPEAT of either signal during cleanup itself.
     signal.signal(signal.SIGTERM, _raise_on_sigterm)
@@ -955,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
             _create_bounded_volume(volume_name)
             container_id = _bring_up(instance_label, config_path)
         except BaseException:
-            with _sigterm_deferred():
+            with _cleanup_signals_deferred():
                 _cleanup_orphan(instance_label, volume_name)
             raise
         # The primary test path's own result (a nonzero exit code) OR
@@ -980,7 +979,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if not ns.keep:
                 try:
-                    with _sigterm_deferred():
+                    with _cleanup_signals_deferred():
                         _tear_down(container_id, volume_name)
                 except BaseException as teardown_exc:
                     if not primary_failed:

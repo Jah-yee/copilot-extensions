@@ -1110,7 +1110,7 @@ def test_main_installs_a_sigterm_handler(monkeypatch) -> None:
     with mock.patch.object(wrapper.signal, "signal",
                             side_effect=lambda *a: signal_calls.append(a)) as signal_mock:
         wrapper.main([])
-    # `_sigterm_deferred` (wrapping the `_tear_down` call below) also
+    # `_cleanup_signals_deferred` (wrapping the `_tear_down` call below) also
     # calls `signal.signal` -- assert the INITIAL handler registration
     # specifically, not a total call count.
     assert signal_mock.call_count >= 1
@@ -1119,7 +1119,7 @@ def test_main_installs_a_sigterm_handler(monkeypatch) -> None:
     assert registered_handler is wrapper._raise_on_sigterm
 
 
-def test_sigterm_deferred_records_signals_instead_of_ignoring_them(monkeypatch) -> None:
+def test_cleanup_signals_deferred_records_signals_instead_of_ignoring_them(monkeypatch) -> None:
     # `SIG_IGN` would DISCARD a signal outright (nothing delivered or
     # queued later) -- this context manager must instead install a
     # handler that RECORDS receipt, so a signal arriving mid-cleanup can
@@ -1134,7 +1134,7 @@ def test_sigterm_deferred_records_signals_instead_of_ignoring_them(monkeypatch) 
         return previous
 
     with mock.patch.object(wrapper.signal, "signal", side_effect=fake_signal):
-        with wrapper._sigterm_deferred():
+        with wrapper._cleanup_signals_deferred():
             sigterm_handler = installed_handlers[wrapper.signal.SIGTERM]
             sigint_handler = installed_handlers[wrapper.signal.SIGINT]
             assert sigterm_handler is not wrapper.signal.SIG_IGN
@@ -1146,7 +1146,7 @@ def test_sigterm_deferred_records_signals_instead_of_ignoring_them(monkeypatch) 
     assert installed_handlers[wrapper.signal.SIGINT] is sentinel_handler
 
 
-def test_sigterm_deferred_replays_a_signal_received_during_cleanup() -> None:
+def test_cleanup_signals_deferred_replays_a_signal_received_during_cleanup() -> None:
     # The exact gap a bare `SIG_IGN` would leave open: a signal arriving
     # while NORMAL (non-exceptional) cleanup is running must not be
     # silently discarded, or a cancelled invocation could report success.
@@ -1156,7 +1156,7 @@ def test_sigterm_deferred_replays_a_signal_received_during_cleanup() -> None:
     previous_sigint = signal.getsignal(signal.SIGINT)
     try:
         try:
-            with wrapper._sigterm_deferred():
+            with wrapper._cleanup_signals_deferred():
                 # Simulate a signal arriving mid-cleanup by invoking the
                 # now-installed handler directly, exactly as the OS would.
                 signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
@@ -1174,9 +1174,9 @@ def test_sigterm_deferred_replays_a_signal_received_during_cleanup() -> None:
         signal.signal(signal.SIGINT, previous_sigint)
 
 
-def test_sigterm_deferred_does_not_mask_a_primary_exception_already_in_flight(capsys) -> None:
+def test_cleanup_signals_deferred_does_not_mask_a_primary_exception_already_in_flight(capsys) -> None:
     # Replaying a deferred signal UNCONDITIONALLY would let it REPLACE a
-    # genuine primary failure already propagating when `_sigterm_deferred`
+    # genuine primary failure already propagating when `_cleanup_signals_deferred`
     # is entered -- exactly the masking this wrapper's teardown logic
     # elsewhere exists to prevent. The signal must be reported (not
     # silently dropped), but the ORIGINAL exception must win.
@@ -1186,7 +1186,7 @@ def test_sigterm_deferred_does_not_mask_a_primary_exception_already_in_flight(ca
         try:
             raise ValueError("original primary failure")
         except ValueError:
-            with wrapper._sigterm_deferred():
+            with wrapper._cleanup_signals_deferred():
                 # Simulate a signal arriving mid-cleanup while an
                 # exception is already being handled.
                 signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
@@ -1199,6 +1199,32 @@ def test_sigterm_deferred_does_not_mask_a_primary_exception_already_in_flight(ca
         )
     else:
         raise AssertionError("expected the original ValueError to propagate")
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    assert "signal" in capsys.readouterr().err.lower()
+
+
+def test_cleanup_signals_deferred_does_not_mask_a_failure_raised_by_the_cleanup_body(capsys) -> None:
+    # The sibling case: the cleanup BODY itself (e.g. a real `_tear_down`
+    # failure) raises, AFTER a signal was already recorded during that
+    # same cleanup call -- the cleanup failure must still win, not be
+    # replaced by the replayed signal.
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    try:
+        try:
+            with wrapper._cleanup_signals_deferred():
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                raise RuntimeError("cleanup body failure")
+        except RuntimeError as exc:
+            assert str(exc) == "cleanup body failure"
+        except wrapper._TerminationRequested:
+            raise AssertionError(
+                "the deferred signal must not replace the cleanup body's own failure"
+            )
+        else:
+            raise AssertionError("expected the cleanup body's RuntimeError to propagate")
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
@@ -1573,3 +1599,13 @@ def test_devcontainer_config_exempts_the_workspace_from_dubious_ownership_checks
     assert env.get("GIT_CONFIG_KEY_0") == "safe.directory"
     assert env.get("GIT_CONFIG_VALUE_0") == wrapper.CONTAINER_WORKSPACE
     assert env.get("GIT_CONFIG_COUNT") == "1"
+
+
+def test_devcontainer_config_pins_the_base_image_to_an_immutable_digest() -> None:
+    # The base image IS the trust root for everything else in this spec --
+    # a mutable tag could be silently retagged/replaced to something else
+    # entirely, with no reviewed source change, bypassing the integrity
+    # posture the pinned/verified uv install otherwise provides.
+    config = _load_devcontainer_config()
+    assert "@sha256:" in config["image"]
+    assert config["image"].startswith("mcr.microsoft.com/devcontainers/python@sha256:")

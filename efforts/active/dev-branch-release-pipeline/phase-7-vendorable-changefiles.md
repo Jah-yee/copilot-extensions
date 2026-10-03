@@ -218,12 +218,14 @@ changefiles and auto-bumps."
       (`tools/preview_release.py:151-172`), so this sidestep only works
       once the preview build is also taught to write the computed version
       into every one of those copied, generated files, not just report it.
-      It must also preserve the originating checkout's own commit/branch/
-      dirty-state provenance (not the scratch preview-tree path) in
-      whatever the install contract records as source identity
-      (`docs/install-contract.md:1729-1741`), since `preview_release.py`
-      defaults to a temporary scratch tree today and a naive wiring would
-      silently corrupt that tracking.
+      It must also persist the generated preview snapshot durably (not a
+      scratch tree that may be cleaned up) and write it as `source.path` —
+      the operative payload location runtime consumers actually
+      dereference and execute from — while recording the originating
+      checkout's own commit/branch/dirty-state **separately**, in the
+      install contract's dedicated `commit`/`branch`/`dirty` fields
+      (`docs/install-contract.md:1718-1723`), never by repointing
+      `source.path` itself at the raw checkout.
 - [ ] Give the numbered-install preview route a concrete enforcement seam,
       not just a stated intent — today's documented local-testing flow
       invokes `plugins/*/scripts/install.*` directly
@@ -364,20 +366,21 @@ changefiles and auto-bumps."
       preview-aware variant) on a `dev` checkout either transparently
       routes through the preview build or is explicitly rejected/redirected
       — it never silently installs the raw `"0.0.0"` placeholder.
-- [ ] The install contract's recorded source identity (commit/branch/
-      dirty-state provenance) after a preview-routed numbered install still
-      reflects the originating checkout, not `preview_release.py`'s scratch
-      tree path. The two are deliberately NOT the same field: `source.path`/
-      provenance records the originating checkout for traceability, while
-      `payload-dir` — what the self-provisioning binstub actually
-      dereferences and installs from (e.g. `loop_governance.py:69-78`,
-      `agent-bridge/scripts/install.sh:1307-1319`) — must point at a
-      **durable, persisted copy of the generated preview snapshot** (not a
+- [ ] After a preview-routed numbered install, the install contract's
+      `source.path` (and `payload-dir`, where present) resolve to the
+      **durable, persisted generated preview snapshot** — never a
       scratch/temp directory that may be cleaned up, and never back at the
-      raw originating checkout, which would rerun the unrewritten `"0.0.0"`
-      installer and silently bypass the preview's materialized content).
-      Validate both: provenance names the originating checkout, and
-      `payload-dir` resolves to the persisted preview snapshot.
+      raw originating checkout. `source.path` is the operative payload
+      location runtime consumers actually dereference and execute from
+      (e.g. `agent_bridge/loop_governance.py:58-64`,
+      `agent-bridge/scripts/install.sh:1307-1319`); pointing it at the raw
+      checkout would let reconciliation/bootstrap execute the unrewritten
+      `"0.0.0"` payload and silently bypass the preview. Origin
+      traceability (which checkout this build came from) lives in the
+      install contract's own dedicated `commit`/`branch`/`dirty` fields
+      (`docs/install-contract.md:1718-1723`), not in `source.path` — those
+      fields alone carry the originating-checkout identity; `source.path`
+      stays on the persisted preview snapshot throughout.
 - [ ] Two numbered-install preview builds with the SAME computed base
       version but DIFFERENT content (e.g. two dirty checkouts sharing a
       pending changefile set) mint two distinct numbered slots, never

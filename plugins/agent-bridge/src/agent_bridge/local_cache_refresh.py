@@ -360,7 +360,20 @@ def _resolve_same_cell_agent_worktrees_path() -> str | None:
     deliberate, bounded, documented trade-off: a narrow execution-time
     TOCTOU window is preferred over silently discarding the whole
     same-cell-rendering feature for every namespaced-cell install, which
-    is what skipping the render entirely would do. Returns ``None`` on
+    is what skipping the render entirely would do.
+
+    ``cellRoot/plugins/agent-worktrees`` is only the peer's **durable**
+    installation root (``install.json``, ``versions/``, ``state/`` --
+    stable across upgrades); the actual payload (where ``bin/payload/
+    agent-worktrees`` lives) is wherever that peer's own receipt
+    currently points, which can be a versioned subdirectory. Resolving
+    the binstub candidate directly under the durable root -- as an
+    earlier revision of this function did -- is always wrong for that
+    layout, so the candidate is never found and this silently degraded
+    to an always-empty (safe, but non-functional) same-cell path. This
+    reads the peer's own ``install.json`` receipt the same way
+    ``_peer_launch.launch()`` does to get its real, current
+    ``payloadRoot`` before building the candidate. Returns ``None`` on
     any resolution failure or when no receipt is present at all, never
     raising."""
     try:
@@ -374,7 +387,17 @@ def _resolve_same_cell_agent_worktrees_path() -> str | None:
         own = _peer_launch.validate_owner(
             "agent-bridge", _agent_bridge_owner_root(), explicit_context
         )
-        peer_root = Path(own["cellRoot"]) / "plugins" / "agent-worktrees"
+        cell = Path(own["cellRoot"])
+        durable = cell.parent.parent
+        primitive = _peer_launch._load_primitive(
+            Path(_peer_launch.__file__).with_name("_installation_context.py"),
+            "_owner_installation_context",
+        )
+        peer_receipt = cell / "plugins" / "agent-worktrees" / "install.json"
+        peer = _peer_launch._active_context(
+            primitive, peer_receipt, durable, "agent-worktrees", cell, {}
+        )
+        peer_root = Path(peer["payloadRoot"])
         name = "agent-worktrees.cmd" if sys.platform == "win32" else "agent-worktrees"
         candidate = peer_root / "bin" / "payload" / name
         return str(candidate) if candidate.is_file() else None

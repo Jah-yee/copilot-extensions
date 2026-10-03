@@ -522,12 +522,18 @@ class TestRefreshLocalCache:
         assert lcr._resolve_same_cell_agent_worktrees_path() is None
 
     @pytest.mark.asyncio
-    async def test_resolve_same_cell_agent_worktrees_path_uses_the_resolved_cell_root(
+    async def test_resolve_same_cell_agent_worktrees_path_uses_the_peer_receipts_payload_root(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        payload_dir = (
-            tmp_path / "cell" / "plugins" / "agent-worktrees" / "bin" / "payload"
+        # The payload deliberately lives under a *versioned* subdirectory,
+        # not directly under cellRoot/plugins/agent-worktrees (the peer's
+        # durable install root) -- proving resolution follows the peer's
+        # own install.json receipt rather than assuming the durable root
+        # doubles as the payload root.
+        payload_root = (
+            tmp_path / "cell" / "plugins" / "agent-worktrees" / "versions" / "v3"
         )
+        payload_dir = payload_root / "bin" / "payload"
         payload_dir.mkdir(parents=True)
         name = "agent-worktrees.cmd" if sys.platform == "win32" else "agent-worktrees"
         expected = payload_dir / name
@@ -542,7 +548,52 @@ class TestRefreshLocalCache:
             "agent_bridge._peer_launch.validate_owner",
             lambda *a, **k: {"cellRoot": str(tmp_path / "cell")},
         )
+        monkeypatch.setattr(
+            "agent_bridge._peer_launch._active_context",
+            lambda *a, **k: {"payloadRoot": str(payload_root)},
+        )
         assert lcr._resolve_same_cell_agent_worktrees_path() == str(expected)
+
+    @pytest.mark.asyncio
+    async def test_resolve_same_cell_agent_worktrees_path_does_not_misresolve_to_the_durable_root(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A candidate built directly under cellRoot/plugins/agent-worktrees
+        (the peer's durable root, not its payload root) must never be
+        returned just because a file happens to exist there -- confirms
+        the fix actually consults the receipt's payloadRoot rather than
+        falling back to the pre-fix (wrong) root."""
+        durable_payload_dir = (
+            tmp_path / "cell" / "plugins" / "agent-worktrees" / "bin" / "payload"
+        )
+        durable_payload_dir.mkdir(parents=True)
+        name = "agent-worktrees.cmd" if sys.platform == "win32" else "agent-worktrees"
+        (durable_payload_dir / name).write_text("", encoding="utf-8")
+
+        real_payload_root = (
+            tmp_path / "cell" / "plugins" / "agent-worktrees" / "versions" / "v3"
+        )
+        (real_payload_root / "bin" / "payload").mkdir(parents=True)
+        (real_payload_root / "bin" / "payload" / name).write_text(
+            "", encoding="utf-8"
+        )
+
+        monkeypatch.setenv("COPILOT_EXTENSIONS_CONTEXT", "some-receipt")
+        monkeypatch.setattr(
+            "agent_bridge.session_lifecycle_cli._agent_bridge_owner_root",
+            lambda: tmp_path / "cell" / "plugins" / "agent-bridge",
+        )
+        monkeypatch.setattr(
+            "agent_bridge._peer_launch.validate_owner",
+            lambda *a, **k: {"cellRoot": str(tmp_path / "cell")},
+        )
+        monkeypatch.setattr(
+            "agent_bridge._peer_launch._active_context",
+            lambda *a, **k: {"payloadRoot": str(real_payload_root)},
+        )
+        resolved = lcr._resolve_same_cell_agent_worktrees_path()
+        assert resolved == str(real_payload_root / "bin" / "payload" / name)
+        assert resolved != str(durable_payload_dir / name)
 
     @pytest.mark.asyncio
     async def test_resolve_same_cell_agent_worktrees_path_never_raises(

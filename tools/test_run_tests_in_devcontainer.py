@@ -1292,6 +1292,30 @@ def test_cleanup_signals_deferred_does_not_mask_a_failure_raised_by_the_cleanup_
     assert "signal" in capsys.readouterr().err.lower()
 
 
+def test_main_rejects_allow_host_state() -> None:
+    # --allow-host-state's documented contract (preserve the caller's
+    # real HOME/config/credentials) cannot be honored through this
+    # wrapper -- the container always gets a fresh, credential-free
+    # tmpfs $HOME by design. Silently accepting the flag would let a
+    # credential-dependent test proceed without the credentials it
+    # asked for, invisibly.
+    try:
+        wrapper.main(["agent-worktrees", "--allow-host-state"])
+    except SystemExit as exc:
+        assert "--allow-host-state" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+
+
+def test_main_rejects_abbreviated_allow_host_state() -> None:
+    try:
+        wrapper.main(["agent-worktrees", "--allow-host"])
+    except SystemExit as exc:
+        assert "--allow-host-state" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+
+
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:
     calls: list[list[str]] = []
 

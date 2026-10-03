@@ -157,14 +157,13 @@ def _per_instance_config(instance_label: str) -> tuple[Path, str]:
     """Write a copy of ``DEVCONTAINER_CONFIG`` with its workspace volume
     name made unique to this invocation, so each run gets its own fresh,
     isolated workspace instead of reusing (and accumulating state in) one
-    fixed, shared volume across every invocation. Returns the temp config
-    path and the volume name it declares, so the caller can remove that
-    exact volume at teardown.
+    fixed, shared volume. Returns the temp config path and the volume
+    name it declares, so the caller can remove that exact volume at
+    teardown.
 
     Written into a fresh temp DIRECTORY as literally ``devcontainer.json``
-    (not a uniquely-named temp file) -- the devcontainer CLI rejects any
-    ``--config`` path whose basename isn't ``devcontainer.json`` or
-    ``.devcontainer.json``."""
+    -- the devcontainer CLI rejects any ``--config`` path whose basename
+    isn't ``devcontainer.json`` or ``.devcontainer.json``."""
     volume_name = f"{BASE_VOLUME_NAME}-{instance_label}"
     text = DEVCONTAINER_CONFIG.read_text()
     if BASE_VOLUME_NAME not in text:
@@ -376,7 +375,7 @@ _VALUE_CONSUMING_FLAGS = frozenset({
 # never fully re-parsing that runner's CLI.
 _BARE_FLAGS = frozenset({
     "--all", "--changed", "--reinstall", "--guards", "--collect-only",
-    "--list", "--pre-push", "--allow-explicit-tiers",
+    "--list", "--pre-push", "--allow-explicit-tiers", "--allow-host-state",
 })
 
 _ALL_LONG_FLAGS = _VALUE_CONSUMING_FLAGS | _BARE_FLAGS
@@ -548,7 +547,6 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     """Return a path to a self-contained ``.git`` directory to copy into
     the container, containing ONLY the object closure of ``HEAD`` and the
     ``--changed`` diff base -- never the full repository history.
-
     Copying the full local git database (every branch, stash, reflog, and
     unreachable object) into a container that deliberately keeps outbound
     networking would let an adversarial/buggy test enumerate and exfiltrate
@@ -649,45 +647,38 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
 
 def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked: bool) -> None:
     """Write a tarball of the host checkout to ``dest`` on disk (never held
-    in memory as one ``bytes`` object -- a checkout with a large object
-    store or build artifacts could otherwise need several times its own
-    size in process memory, between an in-memory buffer and ``subprocess``'s
-    own copy of an ``input=`` payload). Only ever READS the host tree --
-    ``.git`` is handled via ``_materialized_git_dir``, which builds a
-    separate, temporary, minimal-history copy rather than touching the real
-    one; everything else comes from ``_tracked_paths``, so gitignored (and,
-    unless ``include_untracked`` is explicitly set, untracked) files are
-    never included.
+    in memory as one ``bytes`` object -- a large object store could
+    otherwise need several times its own size in process memory). Only
+    ever READS the host tree -- ``.git`` is handled via
+    ``_materialized_git_dir``, a separate temporary copy; everything else
+    comes from ``_tracked_paths``, so gitignored (and, unless
+    ``include_untracked`` is set, untracked) files are never included.
 
-    ``git ls-files --cached`` still lists a path for an unstaged (not yet
-    `git add`-ed) deletion -- the index entry exists even though the file
-    itself is gone from the working tree -- so each path is checked with
-    ``os.path.lexists`` (not a symlink-following ``Path.exists()``, which
-    would wrongly skip an intact symlink whose target happens to be
-    missing) before being archived; a path absent from the working tree is
-    silently skipped rather than raising. The rebuilt index (see
-    ``_materialized_git_dir``'s ``git read-tree HEAD``) already represents
-    that deletion correctly for `git status`/`git diff` -- only the
-    physical tar entry is skipped.
+    ``git ls-files --cached`` still lists a path for an unstaged deletion
+    -- the index entry exists even though the file is gone from the
+    working tree -- so each path is checked with ``os.path.lexists`` (not
+    a symlink-following ``Path.exists()``, which would wrongly skip an
+    intact symlink whose target happens to be missing) before being
+    archived; an absent path is silently skipped rather than raising. The
+    rebuilt index (``_materialized_git_dir``'s ``git read-tree HEAD``)
+    already represents that deletion correctly for `git status`/`diff` --
+    only the physical tar entry is skipped.
 
     ``git ls-files`` also lists an initialized submodule as a single
     ``160000``-mode path that happens to be a real DIRECTORY on disk --
     ``tarfile.add`` recursively archives directories by default, which
-    would copy that submodule's entire working tree (including its own
-    ignored/untracked files and `.git` metadata) wholesale, defeating the
-    tracked-files-only boundary this function exists to enforce.
-    ``recursive=False`` below means a submodule path is still added (as an
-    empty directory entry), but never its contents -- this repository has
-    no submodules today, but the guard costs nothing and must not regress
-    silently if one is ever added.
+    would copy that submodule's entire working tree wholesale, defeating
+    the tracked-files-only boundary. ``recursive=False`` below means a
+    submodule path is still added (as an empty directory entry), but
+    never its contents -- no submodules exist today, but the guard costs
+    nothing and must not regress silently if one is ever added.
 
     Also warns (``_warn_about_dirty_tracked_files``,
-    ``_warn_about_hidden_tracked_file_flags``) about any tracked file with
-    an uncommitted modification, or an assume-unchanged/skip-worktree flag
-    that could hide one, before copying anything -- known, accepted
-    residual exposures of the tracked-files boundary (which governs which
-    PATHS are copied, not which bytes) are surfaced explicitly at the
-    moment they're actually relevant.
+    ``_warn_about_hidden_tracked_file_flags``) about an uncommitted
+    modification, or an assume-unchanged/skip-worktree flag that could
+    hide one, before copying anything -- known, accepted residual
+    exposures of the tracked-files boundary (paths, not bytes) are
+    surfaced at the moment they're relevant.
     """
     _warn_about_dirty_tracked_files()
     _warn_about_hidden_tracked_file_flags()
@@ -703,7 +694,6 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     """Copy a point-in-time snapshot of the host checkout into the
     container's workspace VOLUME (never a host bind -- see
     ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
-
     A freshly created Docker volume is root-owned, so a one-off root
     ``chmod`` opens up its empty PERMISSION bits first (root remains the
     OWNER; `--cap-drop=ALL` means even root can't `chown`). Extraction then
@@ -713,7 +703,6 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     `CONTAINER_WORKSPACE`'s own mountpoint stays root-owned regardless for
     the container's whole lifetime; `.devcontainer/devcontainer.json`'s own
     `safe.directory` `containerEnv` exemption covers that residual gap.
-
     The final permission-opening pass only targets regular files and
     directories, never a symlink: `chmod` on a symlink PATH dereferences
     it, which would either fail on a dangling symlink or chmod whatever a
@@ -798,21 +787,17 @@ def _tear_down(container_id: str, volume_name: str) -> None:
 
 def _cleanup_orphan(instance_label: str, volume_name: str) -> None:
     """Best-effort cleanup when ``devcontainer up`` itself fails (timeout,
-    a failure during ``onCreateCommand`` after the container already
-    exists, or unparseable output): a container may have been created under
-    this instance's id-label even though ``_bring_up`` never returned an
-    id. Finds and removes it by label, then removes the volume, so a failed
-    startup never leaks either. Every subprocess call here is individually
-    guarded against ``subprocess.SubprocessError``/``OSError`` (a
-    ``TimeoutExpired``, or the ``docker`` binary vanishing mid-cleanup) so
-    one failing step never skips the rest, and this function itself never
-    raises -- it runs while an already-failing startup error is
-    propagating, and that original error is what must surface, not a
-    secondary cleanup failure. Every failure (a nonzero exit OR a raised
-    exception, at any step) is still reported to stderr -- silently
-    treating a failed ``docker ps`` as "no orphan exists" would leave a
-    partially created container un-removable with no indication to the
-    user that manual cleanup is needed."""
+    a failure during ``onCreateCommand``, or unparseable output): a
+    container may have been created under this instance's id-label even
+    though ``_bring_up`` never returned an id. Finds and removes it by
+    label, then removes the volume. Every subprocess call here is
+    individually guarded against ``subprocess.SubprocessError``/``OSError``
+    so one failing step never skips the rest, and this function itself
+    never raises -- it runs while an already-failing startup error is
+    propagating, and that original error must surface, not a secondary
+    cleanup failure. Every failure is still reported to stderr -- treating
+    a failed ``docker ps`` as "no orphan exists" would leave a partially
+    created container un-removable with no indication to the user."""
     container_ids: list[str] = []
     try:
         find = subprocess.run(
@@ -935,6 +920,24 @@ def main(argv: list[str] | None = None) -> int:
         # leading one), since it can appear anywhere in the extras list
         # (e.g. ``--all -- -k some_filter`` leaves it in the MIDDLE).
         passthrough = [arg for arg in passthrough if arg != "--"]
+        # `--allow-host-state`'s documented contract (preserve the
+        # caller's real HOME/config/credentials) cannot be honored here --
+        # the container always gets a fresh, credential-free tmpfs $HOME
+        # by design. Reject rather than silently proceed without the
+        # credentials a credential-dependent test asked for.
+        if any(
+            _canonicalize_flag(arg.partition("=")[0]) == "--allow-host-state"
+            for arg in passthrough
+        ):
+            raise SystemExit(
+                "--allow-host-state is not supported through "
+                "tools/run_tests_in_devcontainer.py: its documented contract "
+                "(preserve the caller's real HOME/config/credentials) cannot "
+                "be honored here -- the container always gets a fresh, "
+                "credential-free tmpfs $HOME by design. Run "
+                "tools/run-plugin-tests.py directly (outside the "
+                "devcontainer) for an --allow-host-state check instead."
+            )
         # Rewriting `--base` to its resolved SHA here (before EITHER the
         # snapshot is built or the in-container command is assembled) means
         # both consistently see and use the SAME resolved commit, including

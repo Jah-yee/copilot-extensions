@@ -259,6 +259,22 @@ snapshot even though the underlying commit object is present. A bare SHA
 has no such problem -- it resolves against any clone containing its
 object, named ref or not.
 
+Two of `run-plugin-tests.py`'s own flags cannot retain their documented
+semantics through this wrapper, for the same structural reason (a fresh,
+credential-free tmpfs `$HOME` per container): `--allow-host-state` is
+rejected outright with a clear error (its whole contract is preserving
+the caller's real HOME/config/credentials, which this isolation boundary
+specifically does not expose) -- run `tools/run-plugin-tests.py` directly
+for that case instead. `--admission-wait`/the host-wide heavy-test-slot
+lease it waits for is a known, accepted residual gap: that lease lives
+under `$HOME`/`XDG_CACHE_HOME`, which is a fresh tmpfs per container
+invocation, so concurrent wrapped runs acquire unrelated per-container
+leases rather than coordinating against one shared host-wide slot. A
+genuine fix needs a host-side admission mechanism (acquired before
+container startup) rather than relying on the inner runner's own
+container-local lease; tracked as an open Phase 2 item, not silently
+worked around here.
+
 Every git subprocess the wrapper runs on the HOST (bundling, cloning,
 reading the dirty/hidden-flag warnings, etc.) forces
 `GIT_NO_LAZY_FETCH=1` and `GIT_NO_REPLACE_OBJECTS=1` in addition to the

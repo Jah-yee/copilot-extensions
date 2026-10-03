@@ -369,6 +369,14 @@ verbatim ask.
       (split dependency-resolution and test-execution into separate
       network-enabled/network-disconnected passes), or explicitly decide
       the added complexity isn't worth it yet and record that decision.
+- [ ] Close the host-wide admission-lease residual gap: `--admission-wait`
+      coordinates against a lease stored under `$HOME`/`XDG_CACHE_HOME`,
+      which is a fresh tmpfs per container invocation, so concurrent
+      wrapped runs acquire unrelated per-container leases instead of one
+      shared host-wide slot. Needs a host-side admission mechanism
+      acquired before container startup (or an explicit decision that the
+      added cross-process coordination isn't worth it yet, recorded here
+      rather than left silently broken).
 
 ## Validation Plan
 
@@ -392,6 +400,9 @@ verbatim ask.
       is either closed (network-disconnected test-execution pass) or
       explicitly re-affirmed as an accepted, documented tradeoff rather than
       left open indefinitely.
+- [ ] Phase 2: the host-wide admission-lease residual gap is either closed
+      (a real host-side lease mechanism) or explicitly re-affirmed as an
+      accepted, documented tradeoff.
 
 ## Proposal
 
@@ -1450,3 +1461,39 @@ origin/dev~1` run confirms changed-mode still resolves and diffs
 correctly through the peeled commit check. Docker cleanup and host
 `git status --short` reconfirmed clean of anything beyond this round's
 own diff.
+
+### 2026-10-03 — Review round 15 (fourteenth pass): 2 findings addressed (reject --allow-host-state, document the admission-lease gap)
+A fourteenth review pass of the same round confirmed the git-env-scrub
+and commit-peeling fixes resolved, and raised no genuinely new findings
+-- only two more previously-missed ones, both about flags inherited from
+`run-plugin-tests.py` whose documented contracts can't actually survive
+this wrapper's isolation boundary. MEDIUM: `--allow-host-state`'s whole
+contract is preserving the caller's real HOME/config/credentials for
+opt-in credential-dependent checks, but this wrapper always gives the
+container a fresh, credential-free tmpfs `$HOME` by design -- silently
+accepting the flag would let a credential-dependent test proceed without
+the credentials it asked for, invisibly. Fixed by rejecting it outright
+(bare flag or an unambiguous abbreviation) with a clear error directing
+the caller to run `run-plugin-tests.py` directly instead, rather than
+attempting a partial/unsafe credential-injection mechanism. MEDIUM:
+`--admission-wait`'s host-wide heavy-test-slot lease lives under
+`$HOME`/`XDG_CACHE_HOME`, a fresh tmpfs per container invocation -- so
+concurrent wrapped runs acquire unrelated per-container leases rather
+than coordinating against one shared host-wide slot, silently defeating
+the concurrency-limiting contract `TESTING.md` otherwise documents for
+the un-wrapped runner. A genuine fix needs a host-side admission
+mechanism acquired before container startup, which is a substantial
+cross-process-coordination feature, not a small fix -- rather than
+silently attempt or silently ignore it, documented as a known, named,
+open residual gap (mirroring the existing networking-scope precedent)
+in both `TESTING.md` and a new Phase 2 Plan/Validation Plan item.
+
+Re-validated end-to-end: the full unit test suite (86 tests, including
+2 new tests for the `--allow-host-state` rejection, bare and
+abbreviated) passes; `check-module-size.py --changed-since origin/dev`
+passes; a fresh Docker-backed end-to-end run (`ai-attribution`, 98
+passed / 6 skipped) confirms the common case still works; a dedicated
+live check confirms `--allow-host-state` is rejected with a clear error
+before any container is even brought up (no Docker resources touched).
+Docker cleanup and host `git status --short` reconfirmed clean of
+anything beyond this round's own diff.

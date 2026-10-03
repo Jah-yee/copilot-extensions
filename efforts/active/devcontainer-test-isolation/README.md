@@ -1562,3 +1562,45 @@ inside the container and `git status --short` reports only this round's
 own genuine in-progress changes, never a false "deleted" entry. Docker
 cleanup and host `git status --short` reconfirmed clean of anything
 beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (seventeenth pass): 2 findings addressed (blanket GIT_* strip, move off the canonical devcontainer path)
+A seventeenth review pass of the same round confirmed the `.devcontainer`-
+exclusion fix resolved, and raised two more -- one new, one previously
+missed. HIGH: `_scrubbed_git_env`'s allowlist-removal approach
+(`_REPOSITORY_CONTEXT_ENV`, a frozenset of specific variable names to
+strip) could only ever anticipate names someone had already thought of --
+a BEHAVIORFUL variable not in that list (e.g. `GIT_TRACE` appending to an
+arbitrary host path, `GIT_EXEC_PATH` redirecting which git helper
+binaries run) would still pass through from the ambient caller
+environment, violating the wrapper's read-only-host guarantee in a way
+flag-by-flag scrubbing structurally can't close. Fixed by switching to a
+blanket strip of every inherited `GIT_*`-prefixed variable (matching
+`tools/agent_bridge_contract_git.py`'s own precedent exactly), then
+re-applying the same small, deliberate safe set afterward -- this made
+the entire `_REPOSITORY_CONTEXT_ENV` frozenset dead code, removed
+outright (freeing real room under the module-size cap in the process).
+MEDIUM (previously missed): `.devcontainer/devcontainer.json` lived at
+the CANONICAL root path, which standard "Reopen in Container"/
+`devcontainer up` auto-discovery (and this repo's own Codespaces
+tooling) picks up with no explicit choice required -- but this volume
+starts empty and only this Python wrapper ever populates it, so a direct
+user opening the repo normally would silently get an empty workspace
+instead of a real development environment. Fixed by moving the spec to
+a NAMED alternate config path (`.devcontainer/test-isolation/
+devcontainer.json`), confirmed live via `devcontainer read-configuration`
+that auto-discovery at the repo root now correctly fails (exit 1, no
+config found) rather than silently picking up this isolation-only spec.
+
+Re-validated end-to-end: the full unit test suite (88 tests, including 2
+new regression tests -- one for an arbitrary, otherwise-unlisted `GIT_*`
+variable confirming the blanket strip catches it, one extending the
+existing scrub-set test with `GIT_TRACE`/`GIT_EXEC_PATH`) passes;
+`check-module-size.py --changed-since origin/dev` passes with real
+margin now (971 lines, well under the cap after the dead-code removal);
+a fresh Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6
+skipped) confirms the common case still works with the relocated config;
+a dedicated `devcontainer read-configuration --workspace-folder .` (no
+`--config` flag) at the repo root confirmed no canonical config is
+auto-discovered anymore. Docker cleanup and host `git status --short`
+reconfirmed clean of anything beyond this round's own diff (a clean git
+rename, not a copy-and-delete).

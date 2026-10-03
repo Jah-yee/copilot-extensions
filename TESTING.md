@@ -113,7 +113,7 @@ already-small, single-contract files is not required.
 
 `tools/run_tests_in_devcontainer.py` is an opt-in wrapper around the turn-key
 runner above that additionally runs it inside a hardened, ephemeral
-devcontainer (`.devcontainer/devcontainer.json`) -- a real OS-level
+devcontainer (`.devcontainer/test-isolation/devcontainer.json`, a named alternate config -- never the canonical `.devcontainer/devcontainer.json` root path, which would let a direct "Reopen in Container" pick up an empty, wrapper-only workspace by accident) -- a real OS-level
 filesystem/privilege boundary on top of (not instead of) the turn-key
 runner's own process-level containment. **Networking is NOT yet part of
 that boundary** -- the container keeps Docker's default bridge network with
@@ -147,7 +147,7 @@ the host is rewritten to its resolved commit SHA (or appended, when
 changed-selection is active and `--base` was omitted entirely) before the
 in-container invocation is assembled; see below for why. The wrapper:
 
-1. Writes a per-invocation copy of `.devcontainer/devcontainer.json` with
+1. Writes a per-invocation copy of `.devcontainer/test-isolation/devcontainer.json` with
    its workspace volume name made unique to this run, creates that volume
    explicitly as a size-bounded (4 GiB), tmpfs-backed Docker volume (not
    the default unbounded local-disk volume), then brings the container up

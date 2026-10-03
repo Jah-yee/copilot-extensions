@@ -3,7 +3,7 @@
 
 Phase 1 of the ``devcontainer-test-isolation`` effort
 (``efforts/active/devcontainer-test-isolation/README.md``): invokes the
-``.devcontainer/devcontainer.json`` spec and runs
+``.devcontainer/test-isolation/devcontainer.json`` spec and runs
 ``tools/run-plugin-tests.py`` *inside* it, for a real OS-level filesystem/
 privilege boundary on top of (not instead of) that runner's existing
 process-level containment. Networking is NOT (yet) part of that boundary --
@@ -45,17 +45,27 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-DEVCONTAINER_CONFIG = REPO / ".devcontainer" / "devcontainer.json"
+# A NAMED alternate config (``.devcontainer/<name>/devcontainer.json``),
+# never the canonical ``.devcontainer/devcontainer.json`` root path --
+# this spec is a narrow, test-isolation-only container, not a general
+# development environment, but the canonical path is exactly what
+# standard "Reopen in Container"/`devcontainer up` auto-discovery (and
+# this repo's own Codespaces tooling) picks up with NO explicit choice
+# required. Living at the canonical path would silently hand a direct
+# user an empty workspace (this volume starts empty; only this wrapper
+# ever populates it) instead of a real development environment.
+DEVCONTAINER_CONFIG = REPO / ".devcontainer" / "test-isolation" / "devcontainer.json"
 CONTAINER_WORKSPACE = "/workspaces/copilot-extensions"
-#: Must match ``.devcontainer/devcontainer.json``'s ``remoteUser``/
+#: Must match ``.devcontainer/test-isolation/devcontainer.json``'s ``remoteUser``/
 #: ``containerUser`` -- the non-root user tests actually run as.
 REMOTE_USER = "vscode"
 
-# Must match the literal volume name baked into ``.devcontainer/
-# devcontainer.json``'s ``workspaceMount`` -- ``_per_instance_config``
-# below rewrites this to a unique, per-invocation name so concurrent and
-# successive runs each get their own isolated, fresh workspace volume
-# instead of silently sharing (and accumulating state in) one fixed volume.
+# Must match the literal volume name baked into
+# ``.devcontainer/test-isolation/devcontainer.json``'s ``workspaceMount``
+# -- ``_per_instance_config`` below rewrites this to a unique,
+# per-invocation name so concurrent and successive runs each get their
+# own isolated, fresh workspace volume instead of silently sharing (and
+# accumulating state in) one fixed volume.
 BASE_VOLUME_NAME = "copilot-extensions-test-isolation-ws"
 
 # The workspace volume's size is bounded (a tmpfs-backed Docker volume, not
@@ -82,70 +92,31 @@ EXCLUDED_TOP_LEVEL = {
     "__pycache__",
 }
 
-#: Ambient Git repository-selection variables that must never leak into a
-#: subprocess here -- if the calling environment has e.g. `GIT_DIR` or
-#: `GIT_WORK_TREE` set, it silently overrides our own explicit `-C REPO`,
-#: so the snapshot could be built from an entirely different repository
-#: than the one we were asked about. Mirrors
-#: `tools/coverage_guided_selection/ancestor_resolution.py`'s
-#: `scrubbed_git_env` (kept in sync by hand, not by import, matching that
-#: module's own "dependency-free by design" precedent).
-_REPOSITORY_CONTEXT_ENV = frozenset({
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_CONFIG",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_NOSYSTEM",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_SYSTEM",
-    "GIT_DIR",
-    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_GRAFT_FILE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_INTERNAL_SUPER_PREFIX",
-    "GIT_NAMESPACE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_PREFIX",
-    "GIT_QUARANTINE_PATH",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_SHALLOW_FILE",
-    "GIT_WORK_TREE",
-})
-
 
 def _scrubbed_git_env() -> dict[str, str]:
-    """Ambient environment with every repository-selection variable
-    removed (including the config-selector trio `GIT_CONFIG_GLOBAL`/
-    `GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`) -- every git subprocess
-    below supplies its target repository explicitly via `-C`; any
-    inherited variable would silently override that. Also forces
+    """Ambient environment with EVERY inherited ``GIT_*`` variable removed
+    outright (a blanket strip, not an allowlist of specific names to drop
+    -- matching `tools/agent_bridge_contract_git.py`'s own hardened
+    environment): every git subprocess below supplies its target
+    repository explicitly via `-C`, so any inherited repository-selection
+    variable (`GIT_DIR`, `GIT_WORK_TREE`, etc.) would silently override
+    that, and a BEHAVIORFUL one not in some narrower allowlist (e.g.
+    `GIT_TRACE` appending to an arbitrary host path, `GIT_EXEC_PATH`
+    redirecting which git helper binaries run) could violate this
+    wrapper's read-only-host guarantee in ways specific flag-by-flag
+    scrubbing can't anticipate. Then forces a small, deliberate safe set:
     `GIT_OPTIONAL_LOCKS=0` (a read-only `git status` can otherwise
-    refresh/rewrite the index), unconditionally `GIT_NO_LAZY_FETCH=1`/
+    refresh/rewrite the index), `GIT_NO_LAZY_FETCH=1`/
     `GIT_NO_REPLACE_OBJECTS=1` (a partial clone could lazily fetch
     objects INTO the host repo, or a local replacement ref could
-    substitute history into the bundle), and unconditionally disables
-    global/system config (`GIT_CONFIG_GLOBAL=os.devnull`,
-    `GIT_CONFIG_NOSYSTEM=1`) plus forces `core.fsmonitor=false` via the
-    `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
-    env-override -- without the latter, a configured `core.fsmonitor`
-    hook (global, system, or the repo's own local config, none of which
-    `-C`/`GIT_DIR` scrubbing touches) would still execute as part of an
-    ostensibly read-only probe against the REAL host checkout, running
-    arbitrary host code. All mirror
-    `tools/agent_bridge_contract_git.py`'s own hardened environment."""
-    env = os.environ.copy()
-    for name in list(env):
-        upper = name.upper()
-        if (
-            upper in _REPOSITORY_CONTEXT_ENV
-            or upper.startswith("GIT_CONFIG_KEY_")
-            or upper.startswith("GIT_CONFIG_VALUE_")
-        ):
-            env.pop(name, None)
+    substitute history into the bundle), global/system config disabled
+    (`GIT_CONFIG_GLOBAL=os.devnull`, `GIT_CONFIG_NOSYSTEM=1`), and
+    `core.fsmonitor=false` forced via the `GIT_CONFIG_COUNT`/
+    `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` env-override -- without the
+    latter, a configured fsmonitor hook (global, system, or the repo's
+    own local config) would still execute arbitrary host code as part of
+    an ostensibly read-only probe."""
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_NO_LAZY_FETCH"] = "1"
@@ -695,7 +666,7 @@ def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked:
 def _populate_workspace(container_id: str, passthrough: list[str], *, include_untracked: bool) -> None:
     """Copy a point-in-time snapshot of the host checkout into the
     container's workspace VOLUME (never a host bind -- see
-    ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
+    ``.devcontainer/test-isolation/devcontainer.json``'s workspace-storage-model comment).
     A freshly created Docker volume is root-owned, so a one-off root
     ``chmod`` opens up its empty PERMISSION bits first (root remains the
     OWNER; `--cap-drop=ALL` means even root can't `chown`). Extraction then
@@ -703,7 +674,7 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     ``vscode``-owned -- matters beyond writability, since modern Git's
     "dubious ownership" check inspects the working-tree ROOT's owner, and
     `CONTAINER_WORKSPACE`'s own mountpoint stays root-owned regardless for
-    the container's whole lifetime; `.devcontainer/devcontainer.json`'s own
+    the container's whole lifetime; `.devcontainer/test-isolation/devcontainer.json`'s own
     `safe.directory` `containerEnv` exemption covers that residual gap.
     The final permission-opening pass only targets regular files and
     directories, never a symlink: `chmod` on a symlink PATH dereferences

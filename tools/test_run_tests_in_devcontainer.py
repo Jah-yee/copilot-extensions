@@ -50,10 +50,18 @@ def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> N
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/somewhere/else/.gitconfig")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/somewhere/else/gitconfig")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "0")
+    # Behaviorful variables with no bearing on repository SELECTION, which
+    # a narrower, name-by-name allowlist could miss entirely -- the
+    # blanket `GIT_*` strip must catch these too, not just the ones this
+    # wrapper happens to have anticipated.
+    monkeypatch.setenv("GIT_TRACE", "/somewhere/else/trace.log")
+    monkeypatch.setenv("GIT_EXEC_PATH", "/somewhere/else/git-core")
     monkeypatch.setenv("UNRELATED_VAR", "kept")
     env = wrapper._scrubbed_git_env()
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
+    assert "GIT_TRACE" not in env
+    assert "GIT_EXEC_PATH" not in env
     # The caller's own injected `GIT_CONFIG_KEY_0` is stripped -- but the
     # wrapper forces its OWN `GIT_CONFIG_KEY_0=core.fsmonitor` afterward
     # (see below), so the key is present again with the wrapper's value,
@@ -830,6 +838,16 @@ def test_warn_about_dirty_tracked_files_reports_modified_tracked_paths(
     err = capsys.readouterr().err
     assert "tracked.txt" in err
     assert "warning" in err.lower()
+
+
+def test_scrubbed_git_env_strips_an_otherwise_unlisted_git_variable(monkeypatch) -> None:
+    # The exact regression this closes: a narrower, name-by-name
+    # allowlist of variables to strip can only ever anticipate the ones
+    # someone thought of -- the blanket `GIT_*` strip must catch a
+    # completely made-up, never-enumerated-anywhere variable too.
+    monkeypatch.setenv("GIT_TOTALLY_MADE_UP_VARIABLE_NOBODY_LISTED", "host-value")
+    env = wrapper._scrubbed_git_env()
+    assert "GIT_TOTALLY_MADE_UP_VARIABLE_NOBODY_LISTED" not in env
 
 
 def test_scrubbed_git_env_prevents_a_configured_fsmonitor_hook_from_running(

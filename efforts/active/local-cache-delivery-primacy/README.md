@@ -207,42 +207,174 @@ explicitly named follow-on slices; no other pre-session boundary besides
       `ThomasMichon/copilot-extensions#4960`.
 
 ### Phase 2 -- `agent-bridge` local spawn-path wiring
-- [ ] Add an `agent_bridge`-side equivalent of
+- [x] Add an `agent_bridge`-side equivalent of
       `agent_worktrees.local_cache_refresh` (resolve customizing-copilot's
       declared `render-local-cache` CLI the same bounded-timeout,
       never-raising, global-activation-scoped way Phase 7's
       `agent_worktrees.local_cache_refresh` does -- no cross-plugin
       reach-around; see `docs/patterns/a-la-carte-independence.md`).
-- [ ] Eligibility is **`target.type == "local"` only** -- never `"command"`
+      **Landed**: `plugins/agent-bridge/src/agent_bridge/local_cache_
+      refresh.py`. Translated to asyncio idioms rather than copied
+      verbatim -- `agent_worktrees.local_cache_refresh` is free to block
+      its own one-shot CLI process, but this call sits inside
+      `agent-bridge`'s own long-lived event loop, shared by every
+      concurrent session the daemon serves. Every subprocess call is
+      natively async (`asyncio.create_subprocess_exec` +
+      `asyncio.wait_for`, never a thread a timeout could only abandon, not
+      stop), including plugin-identity resolution, which still runs in
+      its own throwaway subprocess (this module's own `__main__`) rather
+      than in-process, for the same reason the original isolates it:
+      `resolve_active_plugins()` can spawn unbounded Git child processes,
+      and calling it in-process here would block every other concurrent
+      session, not just this one spawn. Resolves the sibling
+      `agent-worktrees` binstub through same-cell-validated peer
+      resolution (`session_lifecycle_cli._agent_worktrees_launch_prefix`)
+      when that shape fits `--agent-worktrees-path`'s single-string
+      contract; when a same-cell receipt resolves to a shape that
+      argument can't carry, the render is skipped entirely for that round
+      rather than silently falling through to the downstream CLI's own
+      ambient lookup, which would discard the only same-cell evidence
+      available and risk rendering from the wrong marketplace
+      installation cell (`docs/patterns/marketplace-installation-
+      cells.md`); a genuinely receipt-less, unresolvable lookup still
+      degrades to simply omitting the flag, since there was no same-cell
+      evidence to discard in the first place.
+      Whole-tree kill: Windows spawns via `agent_procutil.spawn_in_
+      kill_on_close_job` (a per-invocation kill-on-close Job Object, with
+      `no_window_flags()` so the captured child never allocates a visible
+      console window) and closes that job unconditionally in a `finally`
+      -- on success *and* failure, not only on timeout -- because a
+      descendant can outlive the direct child via inherited stdio handles
+      even on an otherwise clean completion. Job arming is mandatory, not
+      best-effort: if the Job Object itself fails to attach, the
+      already-resumed, unprotected process is killed immediately and the
+      call reports failure rather than ever using a process this module's
+      own whole-tree guarantee couldn't actually honor. POSIX spawns with
+      `start_new_session=True` (the same arrangement every agent spawn in
+      `transport.py` uses) and signals the whole process group directly
+      via `os.killpg(proc.pid, ...)` -- not a live `os.getpgid(pid)`
+      lookup (as `procgroup.safe_killpg` does), which breaks once a
+      quick-exiting direct child has already been reaped by asyncio's own
+      SIGCHLD watcher even though the group (and a surviving descendant in
+      it) is still alive; `proc.pid` is a safe stand-in for the pgid here
+      specifically because of the `start_new_session=True` invariant.
+      This repository's PID-destruction rule requires identity
+      verification before any destructive termination by numeric ID
+      (an exited, reaped PID is eventually reusable): the identity token
+      (`zdd.diagnostics.process_start_time`) is captured immediately after
+      spawn, before any reaping could occur, and re-checked immediately
+      before the `killpg` call -- a confirmed, live, *differing* identity
+      there refuses the signal outright; a `None` reading (the common
+      case this whole fix targets -- the leader already reaped, nothing
+      new yet claiming that number) is not itself evidence of a mismatch
+      and does not block the signal.
+      Cancellation (`asyncio.CancelledError`, a `BaseException`, not an
+      `Exception`) is caught separately from an ordinary timeout/failure:
+      the same tree cleanup runs, shielded so it isn't itself cancelled
+      mid-kill, then the cancellation re-raises -- a cancelled
+      `start_session` (daemon shutdown, request teardown) never leaks the
+      just-spawned resolver or render process, and cancellation still
+      propagates correctly.
+- [x] Eligibility is **`target.type == "local"` only** -- never `"command"`
       (that shape also covers Codespaces, containers, elevated relays, and
       other providers, often with no `target.cwd` at all; see
       `session_start.py`/`agent_registry_resolver.py`). Confirm the
       resolved `target.cwd` is a real, local, trusted directory before
-      calling the renderer.
-- [ ] Call it from `session_start.py`'s `target.type == "local"` branch,
-      after `target.cwd` is resolved and before the Copilot CLI process is
-      actually spawned, bounded by a **short, explicit latency budget**
-      (a few seconds -- sized against this plugin's own existing
+      calling the renderer. **Landed**: gated on `target.type == "local"`
+      at the `else:` branch of `_connect_via_session_host`'s own
+      `remote_child_argv`/local split (never reached for a remote-
+      boundary call), and on the resolved `work_dir` being a real
+      directory on disk. "Trusted" is left to the render CLI's own
+      `validate_repository_root()` fail-closed check (it already runs with
+      `require_trust=False` for this exact operation), rather than a
+      second, cross-plugin reach-around into `agent-worktrees`' own
+      trustedFolders registry format.
+- [x] Call it from the authoritative local-spawn-path boundary, after the
+      real worktree directory is resolved and before the Copilot CLI
+      process is actually spawned, bounded by a **short, explicit latency
+      budget** (a few seconds -- sized against this plugin's own existing
       `SESSIONSTART_MAX_TIMEOUT_S`-style precedent, not the create/resume
       path's more generous 30s default, since this sits directly in the
       spawn's own critical path) -- completing the render before spawn
       necessarily gates spawn for up to that bound; it is never
       unbounded, and a timeout or any other render failure is absorbed
       (spawn proceeds against whatever the checked-in floor already has)
-      rather than failing the spawn itself.
-- [ ] Guard test: a synthetic repo with a stale checked-in projection and
+      rather than failing the spawn itself. **Landed**: `LOCAL_SPAWN_MAX_
+      TIMEOUT_S = 5.0` bounds each bounded subprocess's own `wait_for`
+      call (mirrors the cited precedent); the genuine hard ceiling on the
+      call's **total** wall time is `timeout + _CLEANUP_GRACE_S` (`1.5s`,
+      a tight bound explicit to this fast local-process use). The call
+      site lives in `session_host_connection.py`'s `_connect_via_session_
+      host`, right after `resolve_local_launch` resolves `work_dir` and
+      strictly before that same method's own `spawner.spawn()` actually
+      launches the process -- not at `session_start.py`'s own `target.
+      type == "local"` entry, which cannot see the authoritative directory
+      for a project-backed target (`cwd=None`) at all until `resolve_
+      local_launch` resolves one. Wrapped in `contextlib.suppress(
+      Exception)` at the call site itself -- defense in depth, independent
+      of `refresh_local_cache`'s own internal absorption, so a call site
+      must never depend solely on a callee's internal promise never being
+      violated; a genuine `asyncio.CancelledError` is explicitly exempted
+      and always propagates (never suppressed), matching the asyncio
+      convention that cancellation itself is not a failure to absorb.
+- [x] Guard test: a synthetic repo with a stale checked-in projection and
       a divergent installed payload gets its `.local.instructions.md`
       sibling refreshed by a local-spawn (`target.type == "local"`)
       `start_session` call, proven against the real `render_local_cache()`
       call (not a stub), completing within the defined latency budget.
-- [ ] Negative-proof test: customizing-copilot not installed, the repo not
+      **Landed, narrower than originally scoped**: `test_local_cache_
+      refresh.py::TestRefreshLocalCache::test_real_render_local_cache_
+      call_genuinely_refreshes_the_sibling` drives `refresh_local_cache`
+      itself (not a hand-reconstructed argv) with `_resolve_cli_script`
+      pointed at a small stand-in CLI that calls the real, production
+      `instruction_projections.render_local_cache()` (not a stub) against
+      a repo starting with **no** sibling (not a stale one), and asserts
+      the real render call creates it with the expected content --
+      proving the whole call chain genuinely refreshes the cache, not
+      just that some subprocess exits zero. `test_session_manager.py::
+      TestLocalCacheRefreshWiring::test_project_backed_target_with_no_
+      cwd_refreshes_the_resolved_worktree` separately proves the full
+      `start_session` path end to end (a real `LocalSpawner` + a tiny fake
+      ACP agent subprocess) for the project-backed-target case the
+      call-site placement above addresses.
+- [x] Negative-proof test: customizing-copilot not installed, the repo not
       yet trusted, or a render failure must never fail the spawn itself,
       and the render call is proven bounded by the defined latency budget
       (not merely asserted zero-delay, which is unachievable for a
-      synchronous pre-spawn render).
-- [ ] Negative-proof test: a `target.type == "command"` (or any non-local)
+      synchronous pre-spawn render). **Landed**: `test_session_manager.py
+      ::TestLocalCacheRefreshWiring` drives the real `start_session`
+      path end to end (real `LocalSpawner` + fake ACP agent) proving a
+      direct-cwd target and a project-backed (`cwd=None`) target both
+      refresh using the correct, resolved directory, and that an
+      artificially-raising `refresh_local_cache` stub still leaves the
+      session `IDLE` (never `FAILED`); `test_local_cache_refresh.py`
+      proves the module's own budget math (resolution + render shares of
+      `timeout`), three real descendant-survival (whole-tree kill)
+      regression tests -- a hung direct child, a direct child that exits
+      immediately leaving only an inherited-handle descendant alive, and
+      an in-flight cancellation -- and a dedicated cancellation-specific
+      regression proving `asyncio.CancelledError` both propagates and
+      still reaches the descendant. Only the hung-direct-child and
+      cancellation regressions assert elapsed wall time against `timeout +
+      _CLEANUP_GRACE_S`; the immediate-exit regression asserts descendant
+      cleanup without that additional timing assertion. All three carry
+      the same identity-checked `finally` cleanup (the same PID-reuse-
+      proof pattern `agent_worktrees/tests/test_git_ops.py` uses) so a
+      regression in the kill path can never itself leak a process into
+      the suite, and are skipped on platforms where the identity-token
+      backend (`_process_start_time`) has no implementation (today: any
+      POSIX platform other than Linux) rather than claim unverified
+      coverage there.
+- [x] Negative-proof test: a `target.type == "command"` (or any non-local)
       spawn never invokes the local renderer at all, including the
       specific case of a `"command"` target with no `target.cwd` present.
+      **Landed**: `test_a_remote_boundary_call_never_invokes_resolve_
+      local_launch_or_refresh` calls the real `_connect_via_session_host`
+      directly with `remote_child_argv` set (the CodeSpace/mesh shape) and
+      a stub spawner, proving neither `resolve_local_launch` nor the
+      refresh is ever reached on that branch -- not merely inferred from
+      the `if`/`else` code structure. Full regression: `tools/run-plugin-
+      tests.py agent-bridge` passing on both Windows and Linux CI.
 
 ## Validation Plan
 
@@ -434,6 +566,343 @@ tie-break fix above:
 - Re-ran `tools/run-plugin-tests.py customizing-copilot` after the test
   fix (310 passed, 8 skipped) and the module-size/budget checks after the
   doc-example edits (prose-only, no code/byte-budget impact).
+
+### 2026-10-02 (cont.) -- Phase 2 landed: `agent-bridge` local spawn-path wiring
+PR #4947 (Phase 1) merged clean on the fourth review round. Picked up
+Phase 2 directly in a fresh per-phase worktree, per the operator's explicit
+"continue" at the phase boundary.
+
+- **New module**: `plugins/agent-bridge/src/agent_bridge/local_cache_
+  refresh.py` -- the `agent-bridge` counterpart to `agent_worktrees.local_
+  cache_refresh`, but translated to asyncio idioms rather than copied
+  verbatim. The key design difference from the Phase 7 precedent: `agent_
+  worktrees.local_cache_refresh` runs as an ordinary one-shot CLI command,
+  free to block its own process; this call instead sits inside `agent-
+  bridge`'s own long-lived daemon event loop, shared by every concurrent
+  session the daemon serves. A synchronous `resolve_active_plugins()` call
+  in-process (as `cold_store_sources.py`/`provider_sources.py` already do
+  elsewhere in this plugin, for different, non-hot-path call sites) would
+  have blocked every other concurrent session for the duration of its own
+  unbounded Git child-process verification -- not just gated this one
+  spawn. Every subprocess call here is therefore natively async
+  (`asyncio.create_subprocess_exec` + `asyncio.wait_for`, never a
+  background thread a timeout could only abandon, not actually stop),
+  including identity resolution, which still runs in its own throwaway
+  subprocess (mirroring the original's own reasoning for isolating it) --
+  just via an asyncio-native tree-kill on timeout
+  (`procgroup.terminate_windows_tree` on Windows; direct `proc.kill()` on
+  POSIX) rather than `push_timeout.run_bounded`.
+- Reused existing agent-bridge precedent rather than reinventing
+  resolution plumbing: `agent_registry._agent_worktrees_bin()` for the
+  sibling `agent-worktrees` binstub (this plugin's own existing resolver,
+  not a new one), the same `agent-plugin-activation` dependency this
+  plugin already declares and uses in-process elsewhere.
+- **Wiring**: `session_start.py`'s `target.type == "local"` branch calls
+  the refresh immediately on entry -- after `target.cwd` is resolved,
+  before `_connect_via_session_host` (which actually launches the
+  process) -- gated on `target.cwd and os.path.isdir(target.cwd)`.
+  "Trusted" is deliberately left to the render CLI's own `validate_
+  repository_root()` fail-closed check (already run with `require_trust=
+  False` for this exact operation) rather than a second, cross-plugin
+  reach-around into `agent-worktrees`' own trustedFolders registry
+  format -- the CLI already owns failing closed on anything that doesn't
+  resemble a projected-instruction repo.
+- **A test caught a real gap in the first draft**: `refresh_local_cache`
+  itself absorbs every internal failure and never raises -- but nothing
+  at the `session_start.py` call site enforced that independently. An
+  artificially-raising stub propagated all the way out of `start_session`
+  and marked the session `FAILED` instead of `IDLE`, violating the Plan's
+  own "a render failure must never fail the spawn itself" requirement as
+  a property of the call site, not just the callee's internal contract.
+  Fixed with `contextlib.suppress(Exception)` around the call itself --
+  defense in depth, matching the explicit negative-proof test the Plan
+  calls for.
+- **Tests**: `test_local_cache_refresh.py` (new) mirrors Phase 7's own
+  `agent_worktrees` test suite shape -- pure resolution-logic tests
+  (`_select_global_root`), subprocess-wiring tests (`_resolve_cli_script`,
+  mocking `_run_bounded`), `refresh_local_cache`'s own argv/budget-math
+  tests, a real (non-mocked) round trip through the actual shipped
+  `manage-instruction-projections.py` CLI, and a real descendant-survival
+  regression test (a stand-in script spawns a grandchild and hangs; the
+  grandchild must not survive the bound -- proving the whole process
+  *tree* is killed, not just the direct child). `test_session_manager.py`
+  gained `TestLocalCacheRefreshWiring`: a real local spawn with a genuine
+  tmp-dir cwd invokes the refresh with the expected argument; a missing or
+  nonexistent cwd, a `target.type == "command"` spawn (even with a cwd
+  that looks locally real), and a raising stub all leave the session at
+  `IDLE`, never invoking the renderer or failing the spawn. Full
+  regression: `tools/run-plugin-tests.py agent-bridge` -- 652 + 397 + 55
+  passed (1 skip, 3 skips), no existing test broken.
+- Phase 2's every Plan item is now landed; `local-cache-delivery-primacy`
+  has no further phases planned. The Validation Plan's Scenario D gap
+  (`ThomasMichon/copilot-extensions#4960`) remains open and tracked
+  separately -- it does not block this phase.
+
+### 2026-10-02 (cont.) -- PR #4980 review: a Linux CI catch + five more findings
+CI's Linux `agent-bridge` job caught a real cross-platform bug the
+Windows dev box couldn't reproduce: the first POSIX `_kill_tree` draft did
+a bare `proc.kill()` on the direct child only, never reaching a descendant
+the child itself spawns -- the exact gap the regression test exists to
+catch. Fixed by spawning with `start_new_session=True` on POSIX (matching
+`transport.py`'s own existing spawn arrangement) and killing the whole
+process group via `procgroup.safe_killpg`. The automated reviewer then
+caught five further issues against that fix:
+
+- **A genuine cancellation leak** (high severity): `asyncio.CancelledError`
+  is a `BaseException`, not an `Exception` -- the original `except
+  Exception` around the bounded subprocess's `communicate()` call let a
+  cancelled `start_session` (daemon shutdown, request teardown) skip tree
+  cleanup entirely, leaking the just-spawned resolver/render process.
+  Fixed by catching `BaseException`, shielding the same cleanup (the
+  pattern `session_host/endpoints.py`'s own SSH probe cleanup already
+  uses) so cleanup isn't itself cancelled mid-kill, then re-raising.
+- **An unbounded Windows cleanup tail**: `terminate_windows_tree`'s own
+  defaults (`grace=3.0, kill_timeout=5.0`, tuned for a slow remote SSH
+  shell to notice and self-exit) could add up to 8 more seconds on top of
+  the stated 5-second budget -- a hidden ~13s worst case, not the
+  documented bound. Fixed with an explicit, much tighter `_CLEANUP_GRACE_S
+  = 1.5` passed into `terminate_windows_tree` (and a matching bound on
+  POSIX's own `proc.wait()`), and the Plan prose now states the honest
+  total ceiling (`timeout + _CLEANUP_GRACE_S`) instead of implying
+  `timeout` alone.
+- **A test that proved less than it claimed**: the guard test exercised a
+  hand-reconstructed argv rather than `refresh_local_cache` itself, and
+  never actually verified a sibling got refreshed. Rewrote it to call
+  `refresh_local_cache` directly (with `_resolve_cli_script` pointed at
+  the real CLI), seed a genuinely stale `.local.instructions.md` sibling,
+  and assert the real render call brings it current.
+- **A regression test that could itself leak a process**: the descendant-
+  survival test disables process containment with no `finally` safety
+  net -- if tree-killing ever regressed again, the grandchild could
+  survive the assertion failure and escape into the suite. Added
+  identity-checked cleanup in `finally` (the same PID-reuse-proof pattern
+  `agent_worktrees/tests/test_git_ops.py` already uses), plus an explicit
+  elapsed-wall-time assertion against the corrected ceiling.
+- **Process/documentation nits**: the changefile requested a `minor`
+  release with no maintainer direction for one (repo policy defaults to
+  `patch`/`dev`) -- changed to `patch`. The effort doc itself had drifted
+  into describing the pre-fix POSIX behavior and baked review chronology
+  ("a round-2 test caught...") into Plan prose that should describe
+  timeless behavior -- both corrected in place (see the Plan items above).
+  The PR description gained the required Documentation impact and
+  Graceful cutover impact statements.
+- Re-ran the full `tools/run-plugin-tests.py agent-bridge` suite after
+  every fix; CI (Linux + Windows) is the authoritative cross-platform
+  check this Windows dev box cannot itself perform for the POSIX path.
+
+### 2026-10-02 (cont.) -- PR #4980 review round 3: a genuine Windows architectural gap
+Four more findings, one of them high severity and a real pre-existing
+architectural gap neither prior round caught:
+
+- **Windows descendants could survive even a successful completion, not
+  just a timeout** (high severity). `terminate_windows_tree`'s own logic
+  infers "whole tree gone" from "the direct child's own `proc.wait()`
+  returned" -- true for the direct child, **false** when a descendant
+  inherited the child's stdout/stderr handles and kept them open: the
+  real CLI's own grandchildren (Git, an `agent-worktrees` lookup) are
+  spawned this way by default. In that shape, `proc.communicate()` blocks
+  on the descendant's own pipe close long after the direct child already
+  exited -- and once the overall timeout fires, the old cleanup path saw
+  the direct child already gone, never even attempted a forceful kill, and
+  left the real survivor untouched. Fixed by switching the Windows spawn
+  to `agent_procutil.spawn_in_kill_on_close_job` -- a per-invocation
+  kill-on-close Job Object, closed unconditionally in `_run_bounded`'s own
+  `finally` (on success *and* failure, not only on timeout) -- which is
+  authoritative regardless of the direct child's own state. Added a
+  dedicated regression test reproducing the exact gap (direct child exits
+  immediately; a grandchild inheriting its stdio handles is the only
+  thing still running) alongside the original hung-direct-child test.
+- **The refresh ran too early for a project-backed target** (medium
+  severity, real correctness bug): `start_session`'s own `target.type ==
+  "local"` entry point doesn't yet know the authoritative worktree
+  directory for a `SpawnTarget(cwd=None, project=...)` -- that only
+  becomes known inside `_connect_via_session_host` once `resolve_local_
+  launch` resolves it. The original placement either skipped the refresh
+  entirely for that shape, or risked refreshing a stale/wrong directory.
+  Moved the call into `session_host_connection.py`, right after `work_dir`
+  is resolved and `target.cwd` is backfilled, still strictly before
+  `spawner.spawn()` actually launches the process -- the Plan's own
+  wording ("after `target.cwd` is resolved and before the Copilot CLI
+  process is actually spawned") now genuinely describes where the call
+  lives, not just where it was first (incorrectly) placed. Added a
+  dedicated end-to-end test for exactly this shape, plus rewrote the
+  wiring tests generally to drive the real `start_session` path (a real
+  `LocalSpawner` + a tiny fake ACP agent subprocess, matching `test_
+  session_host.py`'s own established pattern) instead of the lighter
+  `_connect_via_session_host`-stub fixture other tests use -- that stub
+  would have skipped the very code path these tests exist to prove,
+  which is exactly how the original placement bug went undetected.
+- **The effort's own landed-test record overclaimed** (low severity,
+  caught against the actual test file): named a test
+  (`test_real_cli_round_trip`) that only exercises `_run_bounded`
+  directly against a hand-built argv, not `refresh_local_cache` or a
+  genuine sibling-refresh assertion -- the actual guard test is `test_
+  real_render_local_cache_call_genuinely_refreshes_the_sibling`, and it
+  starts from no sibling, not a stale one. Corrected the record (see the
+  Plan item above) rather than leaving a stronger claim than the evidence
+  supports.
+- **Missing Documentation impact / Graceful cutover impact statements**
+  (low severity) were flagged again: the PR description edit from the
+  previous round hadn't actually landed by the time this round's review
+  ran against the pushed commit; re-confirmed both statements are present
+  on the PR.
+- Full regression: `tools/run-plugin-tests.py agent-bridge` -- all three
+  sub-suites passing (including the new Job Object and project-backed-
+  target regression tests), on this Windows dev box; CI remains the
+  authoritative cross-platform signal.
+
+### 2026-10-02 (cont.) -- PR #4980 review round 4 (and a real CI catch of round 3's own fix): POSIX reap-ordering bug, mandatory Job arming, same-cell peer resolution
+CI (Linux) caught a genuine bug in round 3's own POSIX fix before the next
+review round even ran: `_kill_tree`'s `proc.kill()` + `await proc.wait()`
+(reaping the direct child) ran *before* the group-kill attempt. For a
+direct child that exits quickly, asyncio's own SIGCHLD watcher had often
+already reaped it by the time the timeout fired, making a live
+`os.getpgid(pid)` lookup fail with `ProcessLookupError` even though the
+group (and the surviving descendant in it) was still alive. Fixed by
+computing the target pgid directly from `proc.pid` (valid because
+`start_new_session=True` makes a POSIX child its own session/group leader
+at creation, regardless of whether the leader later exits or is reaped)
+and signaling the group with `os.killpg` directly, before any reap --
+never depending on `procgroup.safe_killpg`'s own live-process-dependent
+resolution for this specific caller.
+
+The next review round then found five more issues:
+
+- **Windows Job Object setup failure could leave an unprotected process
+  running** (high severity): `spawn_in_kill_on_close_job`'s own contract
+  still resumes the child even when Job arming itself fails, handing back
+  `job_handle=None` so "existing cleanup paths remain in charge" -- but
+  neither the Job-close path nor the POSIX group-kill path actually fires
+  for that shape on Windows, so the fallback `proc.kill()` alone would
+  leak a descendant exactly as before the Job Object fix. Made arming
+  mandatory instead of best-effort: on `job_handle is None` (Windows), the
+  already-resumed process is killed immediately and the call reports
+  failure, rather than ever calling `communicate()` against a process this
+  module's own whole-tree guarantee couldn't actually honor.
+- **Missing Windows no-window flags** (medium severity): the short-lived
+  captured children this module spawns omitted the repository's required
+  headless flag, risking a visible console window or stolen focus under
+  agent-bridge's own windowless resident daemon. Fixed by passing
+  `agent_procutil.no_window_flags()` alongside the Job Object setup.
+- **Ambient agent-worktrees resolution could trust the wrong marketplace
+  cell** (medium severity): `_agent_worktrees_bin()`'s ambient `PATH`/
+  `~/.local/bin` lookup could resolve a *different* installation cell's
+  binstub than this exact agent-bridge install belongs to. Added
+  `_resolve_agent_worktrees_path()`, preferring `session_lifecycle_cli
+  ._agent_worktrees_launch_prefix()`'s same-cell-validated resolution when
+  its result fits `--agent-worktrees-path`'s single-string contract (the
+  common case: no `COPILOT_EXTENSIONS_CONTEXT` receipt, which degrades to
+  the same ambient lookup as a single-element list), and omitting the flag
+  entirely -- never falling back to the ambient-only lookup -- when it
+  doesn't (a receipt-validated multi-token launch prefix is a different
+  invocation shape that flag was never designed to carry).
+- **Missing cancellation-specific regression coverage** (medium severity):
+  the cancellation-safety branch in `_run_bounded` had no test cancelling
+  it mid-flight. Added a dedicated regression: cancel the awaiting task
+  after a direct child and its own grandchild have both started, assert
+  `CancelledError` propagates, and assert the grandchild is gone.
+- **The real-descendant tests claimed unverified macOS coverage**
+  (medium severity): `_process_start_time` (the identity-checked `finally`
+  cleanup's own PID-reuse guard) has a Windows and a Linux (`/proc`)
+  backend only -- on macOS it silently returns `None`, which would make
+  that same safety net skip cleanup if the tree-kill under test ever
+  regressed, leaking a real process. Gated the real-descendant/cancellation
+  tests to the two platforms this facility's own CI actually exercises
+  (Windows, Linux) rather than claim coverage CI never verifies.
+- Several accompanying documentation findings (stale `session_start.py`
+  references in this file, the pattern doc, and test module headers that
+  predated the round-3 relocation fix; an overstated wall-time-validation
+  claim for the narrower descendant regression; review chronology baked
+  into Plan prose and test docstrings) were corrected in place -- see the
+  Plan items above and this entry's own Journal-appropriate citations here
+  rather than in that prose.
+- Full regression: `tools/run-plugin-tests.py agent-bridge` passing,
+  including the new mandatory-Job-arming, same-cell-resolution, and
+  cancellation regression tests.
+
+### 2026-10-02 (cont.) -- PR #4980 review round 5: identity-verified termination, fail-closed same-cell resolution
+Two more genuine findings, both HIGH severity:
+
+- **The POSIX group kill derived its target solely from a possibly-stale
+  `proc.pid`** -- an exited, reaped PID is eventually reusable by an
+  unrelated process; signaling by bare numeric ID without identity
+  verification violates this repository's own established PID-destruction
+  rule (`docs/patterns/graceful-daemon-cutover.md`'s "Common review
+  findings" -- identity-bound termination plus a dedicated mismatch/
+  refusal test). Fixed by capturing an identity token
+  (`zdd.diagnostics.process_start_time`, already a transitive dependency
+  via `agent-zdd`) immediately after spawn, before any reaping could
+  occur, and re-verifying it immediately before the `killpg` call -- a
+  confirmed, live, differing identity refuses the signal outright; a
+  `None` reading (the expected steady state for the exact scenario this
+  whole fix targets) does not block it, since there is no live, differing
+  occupant to protect. Reused `zdd`'s own shared primitive rather than
+  reimplementing identity tokens a third time in this one module.
+- **The same-cell `agent-worktrees` resolution added last round wasn't
+  actually fail-closed** -- when a `COPILOT_EXTENSIONS_CONTEXT` receipt
+  *was* present but resolved to the multi-token, receipt-validated launch
+  prefix (a shape `--agent-worktrees-path` can't carry), omitting the flag
+  let the downstream CLI fall back to its own ambient lookup -- exactly
+  the wrong-cell risk the receipt's presence was meant to close, just one
+  level removed. Fixed by distinguishing that case explicitly:
+  `_resolve_agent_worktrees_path()` now returns `(path, must_skip_render)`,
+  and `refresh_local_cache` skips the render entirely for that round
+  rather than ever letting it proceed ambient-only when same-cell
+  evidence existed but couldn't be passed through. A genuinely
+  receipt-less, unresolvable lookup still degrades to the original
+  "just omit the flag" behavior, since there was no evidence to discard.
+- Also corrected a stale code comment (`_CLEANUP_GRACE_S`'s own docstring
+  still described the retired `terminate_windows_tree` grace/kill_timeout
+  split after the Job Object switch).
+- Full regression: `tools/run-plugin-tests.py agent-bridge` passing,
+  including the new identity-mismatch-refusal and fail-closed-skip tests.
+
+### 2026-10-02 (cont.) -- PR #4980 review round 6: macOS fail-closed gap, feature preserved for namespaced cells, a test-leak fix
+Three more findings:
+
+- **The identity check from round 5 was ineffective on macOS and any
+  other non-Linux POSIX host** (high severity): `zdd.diagnostics.
+  process_start_time()` has a Linux (`/proc`) and a Windows backend only
+  -- on every other POSIX platform it always returns `None`, and treating
+  `None` as "no mismatch" meant the group kill still proceeded on an
+  entirely unverified numeric pid there, exactly the gap the round-5 fix
+  was supposed to close. Fixed by distinguishing a missing *baseline*
+  (captured at spawn, before any reaping) from a missing *current*
+  reading (re-checked before signaling): only a real baseline combined
+  with no confirmed live mismatch permits the signal; a platform with no
+  identity backend at all now fails closed universally, not just on the
+  transient-miss case the round-5 fix actually handled. Added direct
+  mocked tests for all three branches (no baseline, confirmed mismatch,
+  established-and-uncontradicted).
+- **The round-5 "skip the render" fix for namespaced marketplace cells
+  was safe but too broad** (high severity): `scripts/runtime-gate.sh`
+  sets the same-cell receipt for *every* namespaced-cell install, not a
+  rare case, so skipping the render whenever the receipt-validated prefix
+  couldn't fit `--agent-worktrees-path`'s single-string shape silently
+  disabled the whole feature for that entire install class. Fixed by
+  resolving the same-cell `agent-worktrees` binstub directly
+  (`_resolve_same_cell_agent_worktrees_path()`, using `_peer_launch.
+  validate_owner`'s own receipt/certificate check) instead of reusing the
+  wrapper prefix's different, multi-token invocation shape -- a
+  deliberate, documented, bounded trade-off (resolution-time identity
+  verification, not the wrapper's additional execution-time
+  re-validation) in exchange for not disabling the feature entirely.
+  Falling back to the round-5 render-skip only when this direct
+  resolution also fails to find a binstub at the expected location.
+- **A real-subprocess test leaked a detached host/agent pair on every
+  successful run** (medium severity): the shared `_kill()` test helper
+  read `session.pid` *after* `client.shutdown()`, but host-mode shutdown
+  deliberately detaches (leaving both processes alive) and `Session.pid`
+  returns `None` once the client is no longer running -- so the helper's
+  own cleanup was a silent no-op on the success path, the opposite of a
+  flaky-only leak. Fixed by capturing both `host_pid` and `child_pid` from
+  `mgr._host_index` *before* calling `shutdown()`, matching the real
+  pattern `test_session_host.py`'s own Session-Host-mode tests already
+  use.
+- Full regression: `tools/run-plugin-tests.py agent-bridge` passing,
+  including the new identity-guard unit tests (skipped on Windows, where
+  this POSIX-only code path doesn't run) and the same-cell-resolution
+  tests.
 
 ### 2026-10-02 -- Kickoff
 - Carved from a direct operator follow-up to the just-archived

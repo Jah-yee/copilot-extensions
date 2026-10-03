@@ -200,6 +200,24 @@ hook's own remaining decision-deadline budget (capped at
 too little budget remains -- so it can never itself cause the resident hook
 server to miss its own response deadline.
 
+`agent-bridge`'s own `target.type == "local"` spawn path is the one
+remaining local-spawn boundary `create`/`resume`/`sessionStart` above don't
+already cover -- a dispatched agent launched through the bridge rather than
+an interactive worktree session. **Landed**:
+`agent_bridge.local_cache_refresh.refresh_local_cache()` is the
+`agent-bridge` counterpart, called from `session_host_connection.py`'s
+`_connect_via_session_host`, right after `resolve_local_launch` resolves
+the authoritative local `work_dir` and before `spawner.spawn()` actually
+launches the Copilot CLI process -- not at `session_start.py`'s own
+`target.type == "local"` entry, where a project-backed target's real
+directory isn't known yet. Translated to asyncio idioms rather than copied
+verbatim --
+`agent_worktrees.local_cache_refresh` is free to block its own one-shot CLI
+process, but this call sits inside `agent-bridge`'s own long-lived event
+loop, shared by every concurrent session the daemon serves, so every
+subprocess call here is natively async (never a synchronous call or a
+background thread a timeout could only abandon, not actually stop).
+
 ### 5. The checked-in copy remains the unconditional floor
 
 Nothing about this pattern adds a second write path to git. The scheduled
@@ -252,7 +270,10 @@ catch-all each independently drive an agent to the fresher
 `efforts/active/local-cache-delivery-primacy` Phase 1 later replaced the
 existence-only precedence this proof covered with the marker-provenance
 comparison §2/§3 above describe, closing the stale-sibling gap that
-existence-only check left open.
+existence-only check left open. That same effort's Phase 2 landed the
+`agent-bridge` local-spawn-path wiring step 4 describes above
+(`agent_bridge.local_cache_refresh`), closing the one remaining local-spawn
+boundary the Phase 7 wiring didn't already cover.
 
 ## See Also
 

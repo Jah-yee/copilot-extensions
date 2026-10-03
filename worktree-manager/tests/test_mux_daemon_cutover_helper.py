@@ -520,7 +520,16 @@ def _wait_until_recognized_as_mux_daemon(pid: int, *, timeout: float = 5.0) -> b
         if pid in mdc._iter_mux_daemon_pids():
             return True
         time.sleep(0.1)
-    return pid in mdc._iter_mux_daemon_pids()
+    found = pid in mdc._iter_mux_daemon_pids()
+    if not found:
+        import subprocess as _subprocess
+        raw = _subprocess.run(
+            ["ps", "-eo", "pid=,args="], capture_output=True, text=True, check=False
+        )
+        matching = [line for line in raw.stdout.splitlines() if str(pid) in line]
+        print(f"DIAGNOSTIC: pid {pid} not recognized; matching ps lines: {matching!r}")
+        print(f"DIAGNOSTIC: full ps dump head: {raw.stdout[:4000]!r}")
+    return found
 
 
 def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():

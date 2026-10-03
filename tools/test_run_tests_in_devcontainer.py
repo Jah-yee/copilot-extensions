@@ -221,6 +221,23 @@ def test_resolve_base_ref_honors_last_of_repeated_flag() -> None:
     ) == "origin/dev"
 
 
+def test_changed_mode_active_by_default_with_no_args() -> None:
+    # Mirrors run-plugin-tests.py's own `else: targets =
+    # changed_plugins(args.base)` fallback -- no --all, no plugin names.
+    assert wrapper._changed_mode_active([]) is True
+    assert wrapper._changed_mode_active(["--changed"]) is True
+    assert wrapper._changed_mode_active(["-k", "some_filter"]) is True
+
+
+def test_changed_mode_not_active_with_all_flag() -> None:
+    assert wrapper._changed_mode_active(["--all"]) is False
+
+
+def test_changed_mode_not_active_with_explicit_plugin_name() -> None:
+    assert wrapper._changed_mode_active(["agent-worktrees"]) is False
+    assert wrapper._changed_mode_active(["--base", "origin/dev", "agent-worktrees"]) is False
+
+
 def test_git_rev_parse_returns_sha_on_success() -> None:
     fake_result = mock.Mock(returncode=0, stdout="deadbeef\n", stderr="")
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
@@ -356,7 +373,10 @@ def test_materialized_git_dir_handles_staged_uncommitted_change_at_snapshot_time
 
     monkeypatch.setattr(wrapper, "REPO", repo)
     with contextlib.ExitStack() as stack:
-        merged = wrapper._materialized_git_dir(stack, [])
+        # An explicit plugin name keeps changed-selection mode inactive,
+        # so the unresolvable default "origin/main" base in this tiny repo
+        # doesn't trigger the fail-closed guard this test isn't about.
+        merged = wrapper._materialized_git_dir(stack, ["agent-worktrees"])
         status = _run_git(
             ["git", f"--git-dir={merged}", f"--work-tree={repo}", "status", "--short"],
             capture_output=True, text=True,
@@ -371,8 +391,9 @@ def test_materialized_git_dir_handles_staged_uncommitted_change_at_snapshot_time
         assert status.stdout == "?? staged-new.txt\n"
 
 
-def test_materialized_git_dir_skips_base_closure_when_base_unresolvable(tmp_path: Path, monkeypatch) -> None:
-
+def test_materialized_git_dir_skips_base_closure_when_base_unresolvable_and_not_changed_mode(
+    tmp_path: Path, monkeypatch,
+) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "tracked.txt").write_text("v1\n")
@@ -384,15 +405,41 @@ def test_materialized_git_dir_skips_base_closure_when_base_unresolvable(tmp_path
 
     monkeypatch.setattr(wrapper, "REPO", repo)
     with contextlib.ExitStack() as stack:
-        # "origin/main" (the default) does not exist in this tiny repo --
-        # must degrade gracefully (HEAD alone), not raise.
-        merged = wrapper._materialized_git_dir(stack, [])
+        # "origin/main" (the default) does not exist in this tiny repo, but
+        # an explicit plugin name means changed-selection mode is NOT
+        # active -- must degrade gracefully (HEAD alone), not raise.
+        merged = wrapper._materialized_git_dir(stack, ["agent-worktrees"])
         rp = _run_git(
             ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
             capture_output=True, text=True,
         )
         assert rp.returncode == 0
         assert rp.stdout.strip() == head_sha
+
+
+def test_materialized_git_dir_raises_when_changed_mode_active_and_base_unresolvable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    with contextlib.ExitStack() as stack:
+        # No --all, no plugin names -- changed-selection mode is active by
+        # `run-plugin-tests.py`'s own default -- and "origin/main" doesn't
+        # resolve in this tiny repo, so this must fail loudly rather than
+        # silently building a snapshot that would make the in-container
+        # run report "no plugin suites to run" for the wrong reason.
+        try:
+            wrapper._materialized_git_dir(stack, [])
+        except SystemExit as exc:
+            assert "origin/main" in str(exc)
+            assert "does not resolve" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
 
 
 def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_path: Path, monkeypatch) -> None:
@@ -406,6 +453,7 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
     monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack, passthrough: fake_git_dir)
     monkeypatch.setattr(wrapper, "_tracked_paths", lambda *, include_untracked: ["tracked.txt"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
+    monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
 
     dest = tmp_path / "out.tar"
     wrapper._write_tar_of_repo(dest, ["agent-worktrees"], include_untracked=False)
@@ -432,6 +480,7 @@ def test_write_tar_of_repo_skips_tracked_path_deleted_from_working_tree(tmp_path
     monkeypatch.setattr(wrapper, "_tracked_paths",
                          lambda *, include_untracked: ["present.txt", "deleted.txt"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
+    monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
 
     dest = tmp_path / "out.tar"
     wrapper._write_tar_of_repo(dest, [], include_untracked=False)
@@ -461,6 +510,7 @@ def test_write_tar_of_repo_does_not_recurse_into_submodule_directory(tmp_path: P
     monkeypatch.setattr(wrapper, "_tracked_paths",
                          lambda *, include_untracked: ["vendor/some-submodule"])
     monkeypatch.setattr(wrapper, "REPO", tmp_path)
+    monkeypatch.setattr(wrapper, "_warn_about_dirty_tracked_files", lambda: None)
 
     dest = tmp_path / "out.tar"
     wrapper._write_tar_of_repo(dest, [], include_untracked=False)
@@ -517,6 +567,20 @@ def test_warn_about_dirty_tracked_files_does_not_warn_about_untracked_files(
     monkeypatch.setattr(wrapper, "REPO", repo)
     wrapper._warn_about_dirty_tracked_files()
     assert capsys.readouterr().err == ""
+
+
+def test_warn_about_dirty_tracked_files_fails_closed_when_status_itself_fails() -> None:
+    # A failed `git status` must never be silently treated as "clean" --
+    # this check is the runtime mitigation for accidental secret exposure,
+    # so an unknown dirty state must abort the snapshot, not proceed.
+    fake_result = mock.Mock(returncode=128, stdout=b"", stderr=b"not a git repository")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result):
+        try:
+            wrapper._warn_about_dirty_tracked_files()
+        except SystemExit as exc:
+            assert "not a git repository" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
 
 
 def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:

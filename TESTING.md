@@ -222,9 +222,20 @@ oversight -- "tracked" means "this path isn't the kind of thing that
 normally carries secrets," never "every byte currently in it is safe." The
 wrapper prints an explicit stderr warning naming every dirty tracked file
 before building the snapshot, so this residual exposure is surfaced at the
-moment it's actually relevant, not only here. A fresh, per-invocation
-volume means no state (including prior test artifacts) carries over
-between runs.
+moment it's actually relevant, not only here (and fails closed -- aborts
+rather than proceeding -- if that check itself cannot run). A fresh,
+per-invocation volume means no state (including prior test artifacts)
+carries over between runs.
+
+An unresolvable `--base` is a HARD failure, not a silent degradation, when
+changed-selection is actually in play (an explicit `--changed`, or
+`tools/run-plugin-tests.py`'s own default when neither `--all` nor an
+explicit plugin name is given): that runner's own `changed_plugins()`
+quietly reports an empty target set for a bad diff base rather than
+erroring, so a typo'd or never-fetched `--base` could otherwise make a run
+silently report "No plugin suites to run." instead of the real problem. An
+explicit plugin name or `--all` run is unaffected, since neither ever
+consults `--base` at all.
 
 
 ## Local Windows SSH proxy regression

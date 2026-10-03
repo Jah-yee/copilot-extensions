@@ -275,13 +275,23 @@ def _warn_about_dirty_tracked_files() -> None:
     never committed is still copied in. A clean CI checkout never hits
     this; a contributor's dirty local checkout might -- this surfaces that
     residual exposure at the moment it's actually relevant, not only in a
-    docstring/doc page nobody reads before running the command."""
+    docstring/doc page nobody reads before running the command.
+
+    Fails CLOSED (raises) if ``git status`` itself cannot be run: this
+    check is the runtime mitigation for accidental secret exposure, so an
+    unknown dirty state must never be silently treated as "clean" and
+    allowed to proceed -- that would defeat the whole point of the
+    warning."""
     res = subprocess.run(
         ["git", "-C", str(REPO), "status", "--porcelain=v1", "--untracked-files=no"],
         capture_output=True, timeout=30, env=_scrubbed_git_env(),
     )
     if res.returncode != 0:
-        return
+        raise SystemExit(
+            "failed to check for uncommitted changes to tracked files "
+            f"(refusing to build a snapshot with an unknown dirty state): "
+            f"{res.stderr.decode(errors='replace').strip()}"
+        )
     dirty = [
         line[3:] for line in os.fsdecode(res.stdout).splitlines() if line.strip()
     ]
@@ -316,6 +326,45 @@ def _resolve_base_ref(passthrough: list[str]) -> str:
         elif arg.startswith("--base="):
             resolved = arg.split("=", 1)[1]
     return resolved
+
+
+# Every `tools/run-plugin-tests.py` flag that consumes a SEPARATE following
+# token as its value (as opposed to a bare `store_true` flag, or the
+# single-token `--flag=value` form, which `.startswith("-")` already
+# catches below) -- kept in sync by hand with that script's own
+# `argparse` definitions, mirrored here only to tell a flag's value token
+# apart from a positional plugin name, never to fully re-parse its CLI.
+_VALUE_CONSUMING_FLAGS = frozenset({
+    "--base", "-k", "--admission-wait", "--timeout", "--subsuite-timeout",
+    "--plugin-timeout", "--test-timeout", "--max-files-per-sub-suite",
+    "--max-processes", "--max-memory-mb", "--max-temp-mb", "--exclude",
+})
+
+
+def _changed_mode_active(passthrough: list[str]) -> bool:
+    """Whether a ``tools/run-plugin-tests.py`` invocation with these
+    passthrough args will resolve its targets via ``changed_plugins()`` --
+    true for an explicit ``--changed``, AND for that runner's own default
+    (no ``--all``, no explicit plugin names) per its own
+    ``else: targets = changed_plugins(args.base)`` fallback. Only in this
+    case does an unresolvable ``--base`` actually matter -- an explicit
+    plugin name or ``--all`` run never consults it at all."""
+    has_all = False
+    has_positional = False
+    skip_next = False
+    for arg in passthrough:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--all":
+            has_all = True
+        elif arg in _VALUE_CONSUMING_FLAGS:
+            skip_next = True
+        elif arg.startswith("-"):
+            continue
+        else:
+            has_positional = True
+    return not has_all and not has_positional
 
 
 def _git_rev_parse(ref: str) -> str | None:
@@ -383,9 +432,38 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
     stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
     bundle_file = tmp_dir / "snapshot.bundle"
     merged = tmp_dir / ".git"
+    # An explicitly empty template directory for `git clone` below --
+    # without it, `git clone` honors the HOST's global `init.templateDir`,
+    # which can plant arbitrary files (not just `hooks`/`config`, both of
+    # which are otherwise explicitly handled below) into the "clean"
+    # synthetic `.git` directory, which then ships into the
+    # network-enabled container.
+    empty_template_dir = tmp_dir / "empty-template"
+    empty_template_dir.mkdir()
 
     base_ref = _resolve_base_ref(passthrough)
     base_resolves = _git_rev_parse(base_ref) is not None
+    # Changed-selection mode (explicit `--changed`, OR that runner's own
+    # default when neither `--all` nor an explicit plugin name is given --
+    # see `_changed_mode_active`) is the one mode that actually DIFFS
+    # against `base_ref`. An unresolvable base there is a silent false
+    # negative, not a safe degradation: `run-plugin-tests.py`'s own
+    # `changed_plugins()` ignores a nonzero `git diff` and reports an EMPTY
+    # target set rather than erroring, so a typo'd or never-fetched
+    # `--base` would make the run silently exit "No plugin suites to run."
+    # instead of surfacing the real problem. Fail loudly here instead,
+    # before any snapshot work -- but only when changed-selection is
+    # actually in play; an explicit plugin name or `--all` run never uses
+    # `base_ref` at all, so an unresolvable default must not block those.
+    if _changed_mode_active(passthrough) and not base_resolves:
+        raise SystemExit(
+            f"changed-selection mode is active (explicit --changed, or the "
+            f"default with no --all/plugin names) but its diff base "
+            f"({base_ref!r}) does not resolve on the host -- refusing to "
+            "silently build a snapshot that would make the in-container run "
+            "report \"no plugin suites to run\" instead of the real "
+            "problem. Fetch or correct --base."
+        )
     bundle_refs = ["HEAD", base_ref] if base_resolves else ["HEAD"]
 
     bundle_res = subprocess.run(
@@ -396,7 +474,8 @@ def _materialized_git_dir(stack: contextlib.ExitStack, passthrough: list[str]) -
         raise SystemExit(f"git bundle create failed: {bundle_res.stderr.strip()}")
 
     clone_res = subprocess.run(
-        ["git", "clone", "--bare", "--quiet", str(bundle_file), str(merged)],
+        ["git", "clone", "--bare", "--quiet", f"--template={empty_template_dir}",
+         str(bundle_file), str(merged)],
         capture_output=True, text=True, timeout=120, env=_scrubbed_git_env(),
     )
     if clone_res.returncode != 0:

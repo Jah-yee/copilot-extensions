@@ -909,3 +909,39 @@ confirms nothing broke, and a live `docker inspect`/`docker exec env`
 confirms both the 12 GiB memory ceiling and `UV_CACHE_DIR=/tmp/uv-cache`
 actually took effect.
 
+### 2026-10-03 — Review round 14: 3 findings addressed (closed the last two fail-open gaps)
+Automated review confirmed round 13's three fixes (resolved) and raised
+three new HIGH-severity items, all genuine: (1) `_warn_about_dirty_tracked_files`
+silently treated a failed `git status` as "clean" and proceeded to copy
+live tracked bytes into an egress-enabled container anyway -- the warning
+IS the runtime mitigation for accidental secret exposure, so an unknown
+dirty state must never be silently treated as safe. Fixed to fail CLOSED
+(raise) instead. (2) an unresolvable `--base` was silently degraded to a
+`HEAD`-only bundle, but `run-plugin-tests.py`'s own `changed_plugins()`
+ignores a nonzero `git diff` and reports an EMPTY target set rather than
+erroring -- so a typo'd or never-fetched `--base` could make the DEFAULT
+invocation (not just explicit `--changed`; that runner's own `else:
+targets = changed_plugins(args.base)` fallback applies whenever neither
+`--all` nor an explicit plugin name is given) silently exit "No plugin
+suites to run." instead of surfacing the real problem. Fixed with a new
+`_changed_mode_active` helper that mirrors that runner's own
+all/plugin-names/changed-default resolution (without fully re-parsing its
+CLI) and a fail-loud `SystemExit` when changed-selection is active and the
+base doesn't resolve -- live-confirmed both that an explicit plugin name
+still runs fine despite an unused unresolvable default base, and that
+`--changed --base <bad-ref>` now exits 1 with a clear message instead of
+silently building a broken snapshot. (3) `git clone` honors the HOST's
+global `init.templateDir`, which can plant arbitrary files beyond
+`hooks`/`config` (both already explicitly handled) into the synthetic
+`.git` directory -- fixed with an explicitly empty `--template=` directory
+for the clone, exactly as suggested.
+
+Re-validated end-to-end: the full unit test suite (50 tests, including
+five new tests for the three fixes) passes, a fresh Docker-backed
+end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms the
+common case still works, and two dedicated live checks confirm the new
+fail-loud guard: an explicit plugin name proceeds normally despite the
+unused default base being unresolvable, while `--changed --base
+<nonexistent-ref>` now exits 1 with a clear message (confirmed via a
+real, unpiped exit-code check) instead of silently degrading.
+

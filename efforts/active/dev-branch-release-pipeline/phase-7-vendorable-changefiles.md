@@ -212,6 +212,31 @@ changefiles and auto-bumps."
       works once the preview build is also taught to write the computed
       version into every one of those copied, generated files, not just
       report it.
+- [ ] Give the preview/dev-slot route a concrete enforcement seam, not just
+      a stated intent — today's documented local-testing flow invokes
+      `plugins/*/scripts/install.*` directly (`CONTRIBUTING.md:1012-1017`),
+      and those installers infer their own local source from their own
+      script path (`docs/install-contract.md:1729-1741`), so simply
+      *having* `preview_release.py` changes nothing unless the documented
+      commands themselves are updated to go through it. Either make
+      `install.sh`/`install.ps1` detect a placeholder (`"0.0.0"`) source
+      version and redirect to/require a preview build first, or make the
+      preview-generated directory the one new documented local-testing
+      entry point and update `CONTRIBUTING.md`'s local-testing section
+      accordingly — inventory every existing entry point this needs to
+      change, not just the general intent to "route through preview."
+- [ ] Define the identity of a **repeated** preview build against the same
+      pending changefile set (e.g. regenerating after a further source
+      edit with no new changefile) — it computes the identical hypothetical
+      version each time, so a second install would target the same
+      numbered slot as the first with different content, conflicting with
+      the documented immutable numbered-slot invariant
+      (`docs/patterns/mutable-dev-slot.md:15-18`); today's installers
+      instead fall back to stopping and rebuilding that live slot in place
+      (`install.ps1:2763-2768`, `install.sh:2166-2169`). Decide explicitly
+      whether a preview install always targets the existing mutable
+      `versions/dev`-style slot (accepting in-place rebuild) or mints a
+      unique generated identity per build, and document the choice.
 - [ ] Extend the placeholder-conversion inventory and migration to cover
       every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       every real copy), not just per-plugin manifests and hook-owned
@@ -290,6 +315,15 @@ changefiles and auto-bumps."
       `preview_release.py`'s generated slot rather than `plugin.json`
       directly, so `agent-bridge`'s install script's downgrade rejection of
       `"0.0.0"` never fires.
+- [ ] Running the documented local-testing command as written (not a
+      preview-aware variant) on a `dev` checkout either transparently
+      routes through the preview build or is explicitly rejected/redirected
+      — it never silently installs the raw `"0.0.0"` placeholder.
+- [ ] Two sequential preview installs against the same unchanged pending
+      changefile set (no new edit between them) behave per the chosen
+      identity rule — confirm whichever was decided (shared mutable slot
+      rebuilt in place, or a unique identity each time) rather than an
+      undefined/arbitrary outcome.
 - [ ] Every vendorable's own `libs/<lib>/pyproject.toml` (canonical and
       real copies) reads `"0.0.0"` on `dev` alongside the per-plugin
       manifests, and vendorable seeding (above) still recovers its real

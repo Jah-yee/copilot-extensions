@@ -1,0 +1,9 @@
+{
+  "comment": "Close a spawn/exec race in mux-daemon identity tests that spuriously failed under CI load.",
+  "changes": [
+    {
+      "plugin": "worktree-manager",
+      "type": "patch"
+    }
+  ]
+}

@@ -115,27 +115,15 @@ def _scrubbed_git_env() -> dict[str, str]:
     """Ambient environment with every repository-selection variable
     removed -- every git subprocess below supplies its target repository
     explicitly via ``-C``; any of these inherited variables would silently
-    override that. Also forces ``GIT_OPTIONAL_LOCKS=0``: without it, even a
-    nominally read-only command (``git status`` in
-    ``_warn_about_dirty_tracked_files``, run against the REAL host
-    checkout, not a throwaway copy) can refresh and rewrite the index,
-    violating this wrapper's own read-only-host guarantee and contending
-    with any concurrent `git` process the caller is running -- the same
-    safeguard `tools/agent_bridge_contract_git.py` already applies for the
-    same reason.
-
-    Also unconditionally forces ``GIT_NO_LAZY_FETCH=1`` and
-    ``GIT_NO_REPLACE_OBJECTS=1`` (matching
-    `tools/agent_bridge_contract_git.py`'s own hardened environment): in a
-    partial clone, resolving ``HEAD``/the diff base for ``git bundle
-    create`` could otherwise lazily fetch missing objects INTO the host
-    repository -- a host mutation this wrapper exists to prevent -- and a
-    locally configured replacement ref could silently substitute different
-    history into the bundle than what ``HEAD``/``--base`` actually name.
-    Forcing both to ``1`` unconditionally (rather than merely removing an
-    inherited value) closes that gap regardless of what the caller's own
-    environment does or doesn't set.
-    """
+    override that. Also forces ``GIT_OPTIONAL_LOCKS=0`` (even a nominally
+    read-only ``git status`` against the REAL host checkout can otherwise
+    refresh/rewrite the index, violating this wrapper's read-only-host
+    guarantee), and unconditionally ``GIT_NO_LAZY_FETCH=1``/
+    ``GIT_NO_REPLACE_OBJECTS=1`` (a partial clone could otherwise lazily
+    fetch missing objects INTO the host repo while resolving ``HEAD``/
+    ``--base``, or a local replacement ref could substitute different
+    history into the bundle) -- all four mirror
+    `tools/agent_bridge_contract_git.py`'s own hardened environment."""
     env = os.environ.copy()
     for name in list(env):
         upper = name.upper()
@@ -504,22 +492,14 @@ def _rewrite_base_to_resolved_sha(passthrough: list[str]) -> list[str]:
     abbreviation -- see `_canonicalize_flag`) in ``passthrough`` with its
     resolved commit SHA, when it resolves on the host.
 
-    A REF-RELATIVE ``--base`` expression (e.g. ``origin/dev~1``,
-    ``origin/dev@{upstream}``) resolves fine on the HOST, but
-    ``git rev-parse --symbolic-full-name`` returns nothing useful for it
-    (it isn't itself a plain ref), so the materialized bundle clone never
-    gets the NAMED ref such an expression needs to re-resolve the same way
-    inside the container -- the unchanged in-container ``--base`` value
-    would then fail to resolve there even though the underlying commit
-    object IS present (`_materialized_git_dir` always includes it in the
-    bundle's object closure). A bare SHA has no such problem: it resolves
-    against any clone containing its object, named ref or not. Rewriting
-    to the resolved SHA up front avoids needing to special-case every
-    possible ref-relative expression shape, and makes materializing a
-    named ref for this purpose unnecessary entirely. Leaves ``passthrough``
-    unchanged when ``--base`` doesn't resolve locally at all (an
-    already-reported, separately-handled problem via
-    `_materialized_git_dir`'s own fail-loud guard) or isn't present."""
+    A REF-RELATIVE expression (e.g. ``origin/dev~1``) resolves fine on the
+    HOST, but ``--symbolic-full-name`` returns nothing useful for it, so a
+    bundle clone never gets the NAMED ref such an expression needs to
+    re-resolve the same way inside the container -- a bare SHA has no such
+    problem, since it resolves against any clone containing its object.
+    Leaves ``passthrough`` unchanged when ``--base`` doesn't resolve
+    locally (a separately-handled problem via `_materialized_git_dir`'s
+    own fail-loud guard) or isn't present."""
     resolved_sha = _git_rev_parse(_resolve_base_ref(passthrough))
     if resolved_sha is None:
         return passthrough
@@ -715,44 +695,28 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
 
     A freshly created Docker volume is root-owned, so the non-root
-    ``vscode`` remote user (who actually runs the test suite) can't write
-    into it yet -- a one-off root ``chmod`` opens up the empty volume root
-    first (permission bits only; root remains the directory's OWNER, which
-    is why the later chmod below is scoped to the directory's CONTENTS,
-    not the root entry itself -- `chmod` requires file ownership, not just
-    write access, and `vscode` never owns a directory entry it didn't
-    create). Extraction itself then runs AS ``vscode``, not root: every
-    extracted file is owned by the user that ran ``tar``, so this makes
-    the checkout (including ``.git``) natively ``vscode``-owned with no
-    chown step needed (and none would be possible anyway -- the runtime
-    posture drops every Linux capability via ``--cap-drop=ALL``, so even
-    root inside the container cannot ``chown``). Despite that, the
-    directory ENTRY at ``CONTAINER_WORKSPACE`` itself (the volume's
-    mountpoint, as opposed to anything extracted into it) stays
-    root-owned for the container's entire lifetime -- nothing can ever
-    chown it. Modern Git's "detected dubious ownership" check inspects
-    the ownership of the WORKING TREE ROOT, not just ``.git``, so that one
-    always-root-owned directory entry would still make every git
-    invocation `run-plugin-tests.py` makes (e.g. its own changed-file
-    diffing) fail -- and since that script treats a failed `git diff` as
-    an EMPTY target set rather than an error, it would misleadingly report
-    "no plugin suites to run" instead of the real problem. That residual
-    gap is closed separately, not here: ``.devcontainer/devcontainer.json``
-    exempts this exact path from the ownership check via
+    ``vscode`` remote user can't write into it yet -- a one-off root
+    ``chmod`` opens up the empty volume's PERMISSION bits first (root
+    remains the OWNER; `chmod` on the directory entry itself below would
+    still fail, since `chmod` needs ownership, not just write access, and
+    `--cap-drop=ALL` means even root can't `chown`). Extraction then runs
+    AS ``vscode``, not root, so the checkout (including ``.git``) ends up
+    natively ``vscode``-owned -- which matters beyond writability: modern
+    Git's "dubious ownership" check inspects the WORKING TREE ROOT's
+    owner, and `CONTAINER_WORKSPACE`'s own directory ENTRY (the volume's
+    mountpoint) stays root-owned regardless for the container's whole
+    lifetime, so `.devcontainer/devcontainer.json`'s own
     ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_0``/``GIT_CONFIG_VALUE_0``
-    ``containerEnv`` entries (the one sanctioned way around the check that
-    doesn't require a repo-local, and therefore untrusted-input-
-    controllable, config file).
+    ``containerEnv`` entries carry a `safe.directory` exemption for this
+    exact path -- the sanctioned way around that check without a
+    repo-local (untrusted-input-controllable) config file.
 
     The final permission-opening pass only targets regular files and
-    directories, never a symlink entry: ``chmod`` on a symlink PATH
-    dereferences it and affects whatever it points AT, not the link
-    itself (Linux symlinks have no meaningful permission bits of their
-    own). Passing symlink paths through ``find -exec chmod`` would
-    therefore either fail outright for an intentionally preserved
-    dangling symlink (nothing to dereference), or silently chmod a LIVE
-    symlink's target -- which, for an absolute or ``..``-escaping
-    symlink, could reach a path entirely outside the workspace volume.
+    directories, never a symlink: `chmod` on a symlink PATH dereferences
+    it, so it would either fail outright on an intentionally preserved
+    dangling symlink, or silently chmod whatever a LIVE symlink points at
+    -- possibly outside the workspace volume for an absolute/``..``-
+    escaping target.
     """
     chmod_root = subprocess.run(
         ["docker", "exec", "-u", "root", container_id,
@@ -883,54 +847,39 @@ def _cleanup_orphan(instance_label: str, volume_name: str) -> None:
 
 
 class _TerminationRequested(BaseException):
-    """Raised from the SIGTERM handler installed in ``main`` so the
-    wrapper's own try/finally cleanup runs instead of the process dying
-    silently. The default SIGTERM action terminates a Python process
-    IMMEDIATELY, bypassing every ``finally`` block (including container
-    and volume teardown) -- an outer timeout, CI cancellation, or service
-    stop would otherwise leave both leaked, with no way for a LATER
-    invocation to find and remove them (``_cleanup_orphan`` only ever
-    searches by the new random instance label each fresh run gets, never
-    a prior run's). Deliberately a ``BaseException`` subclass (matching
-    ``KeyboardInterrupt``'s own hierarchy placement), so the existing
-    ``except BaseException`` teardown/orphan-cleanup paths below already
-    handle it with no further changes needed there."""
+    """Raised so the wrapper's own try/finally cleanup runs instead of the
+    process dying silently on ``SIGTERM`` (whose default action terminates
+    immediately, bypassing every ``finally`` block including container/
+    volume teardown -- `_cleanup_orphan` can't find a leaked resource from
+    a DIFFERENT run's random instance label). A ``BaseException`` subclass
+    (matching ``KeyboardInterrupt``'s own placement) so the existing
+    ``except BaseException`` cleanup paths already handle it."""
 
 
 def _raise_on_sigterm(signum: int, frame: object) -> None:
     raise _TerminationRequested(f"received signal {signum}")
 
 
-# Both the signals `main` must survive mid-cleanup: `SIGINT` (Ctrl-C,
-# Python already converts it to `KeyboardInterrupt` by default -- no
-# custom handler needed for the FIRST one to enter cleanup) and `SIGTERM`
-# (needs `_raise_on_sigterm` above, since its default action terminates
-# the process immediately with no exception at all). A REPEAT of either
-# one arriving WHILE `_tear_down`/`_cleanup_orphan` is already running
-# must not interrupt it partway -- see `_sigterm_deferred`.
+# `SIGINT` (Ctrl-C) already becomes `KeyboardInterrupt` via Python's own
+# default handling -- only `SIGTERM` needs `_raise_on_sigterm` above. Both
+# still need deferring during cleanup itself (`_sigterm_deferred`), so a
+# REPEAT signal mid-cleanup can't interrupt it partway.
 _CLEANUP_DEFERRED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 @contextlib.contextmanager
 def _sigterm_deferred():
-    """Defer both `_CLEANUP_DEFERRED_SIGNALS` for the duration of a
-    cleanup step (``_tear_down``/``_cleanup_orphan``): RECORD receipt of
-    either signal instead of acting on it immediately, restore whatever
-    handlers were previously installed once cleanup finishes, and THEN
-    raise `_TerminationRequested` if one was recorded. ``signal.SIG_IGN``
-    alone would be insufficient here -- it doesn't defer a signal, it
-    DISCARDS it outright, with nothing delivered or queued later. That
-    matters most for the ordinary (non-exceptional) teardown path: if the
-    FIRST SIGTERM/Ctrl-C of a run arrives while a successful run's
-    post-test cleanup is in its deferred window, `SIG_IGN` would silently
-    swallow it, cleanup would complete normally, and `main` would return
-    0 -- a cancelled invocation reporting success. Recording and
-    replaying it afterward instead means cleanup still runs to completion
-    uninterrupted (closing the original leak `_raise_on_sigterm` exists to
-    prevent), while the cancellation itself is never silently dropped.
-    Kept under its original ``SIGTERM``-only name for historical
-    continuity across this PR's own review rounds -- the function itself
-    now covers both signals."""
+    """Defer both `_CLEANUP_DEFERRED_SIGNALS` for a cleanup step
+    (``_tear_down``/``_cleanup_orphan``): RECORD receipt instead of acting
+    immediately, restore the previous handlers once cleanup finishes, then
+    raise `_TerminationRequested` if one was recorded. Plain
+    ``signal.SIG_IGN`` would DISCARD a signal outright rather than defer
+    it -- for the ordinary (non-exceptional) teardown path specifically, a
+    cancellation arriving in that window would be silently swallowed and
+    `main` would return 0, misreporting a cancelled run as successful.
+    Record-and-replay keeps cleanup uninterrupted while never dropping the
+    cancellation itself. Kept under its original ``SIGTERM``-only name for
+    continuity across this PR's own review history."""
     received: list[int] = []
     previous = {
         sig: signal.signal(sig, lambda signum, frame: received.append(signum))

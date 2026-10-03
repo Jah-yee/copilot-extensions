@@ -35,6 +35,26 @@ function deferredPoster() {
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+test("shutdown drains a pending registration and returns every id to deregister", async () => {
+  const state = { sessionId: "placeholder", registered: false };
+  const { calls, post } = deferredPoster();
+  const register = serializedRegister(state, post);
+  register();
+  await tick();
+  adoptSessionId(state, "resumed");  // a resume while the placeholder's POST is pending
+  const closing = register.close();
+  register();  // a heartbeat after shutdown began: not admitted
+  let done = false;
+  closing.then(() => { done = true; });
+  await tick();
+  assert.equal(done, false);  // waits for the in-flight registration
+  calls[0].resolve(true);
+  const ids = await closing;
+  await tick();
+  assert.deepEqual(calls.map((c) => c.id), ["placeholder"]);  // the resumed id is never posted after it
+  assert.deepEqual(ids, ["placeholder"]);
+});
+
 test("a rename while the old id's registration is in flight registers the new id before ready", async () => {
   const state = { sessionId: "placeholder", registered: false };
   const { calls, post } = deferredPoster();
@@ -74,6 +94,8 @@ test("a heartbeat queued before a rename never registers the old id after the ne
   assert.equal(ids[0], "placeholder");
   assert.ok(ids.slice(1).every((id) => id === "resumed"), ids.join(","));
   assert.equal(state.registered, true);
+  // Shutdown deregisters both rows this process registered, newest first.
+  assert.deepEqual(await register.close(), ["resumed", "placeholder"]);
 });
 
 test("buildDeliveredSendOptions always tags an explicit non-user source", () => {

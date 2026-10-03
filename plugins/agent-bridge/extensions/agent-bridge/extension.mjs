@@ -179,11 +179,12 @@ const register = serializedRegister(
 );
 
 async function deregister() {
-  if (!state.sessionId) return;
-  await bridgeFetch(
-    "DELETE",
-    `/api/v1/live-sessions/${encodeURIComponent(state.sessionId)}`,
-  );
+  // Every id this process registered, once no registration is left in flight
+  // (a rename can leave the placeholder's row and the resumed one). An id
+  // folded into its successor is already gone; its DELETE is a no-op.
+  for (const id of await register.close()) {
+    await bridgeFetch("DELETE", `/api/v1/live-sessions/${encodeURIComponent(id)}`);
+  }
 }
 
 // Drain the represented-event queue to the bridge's ingest endpoint. Runs off

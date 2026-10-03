@@ -180,14 +180,20 @@ export function adoptSessionId(state, eventSessionId) {
 // off all share it). Each request reads the id when its turn comes, and is
 // ready only if that is still the current id: a rename while it was in flight
 // registers the new id first. Serialized, a late request for the old id can't
-// land after the new one and fold the alias back.
+// land after the new one and fold the alias back. ``register.close()`` stops
+// admitting registrations, drains the one in flight, and resolves to every id
+// this process registered (newest first) -- what shutdown must deregister: a
+// DELETE sent before a pending registration lands would leave it behind.
 export function serializedRegister(state, post, onRegistered = () => {}) {
   let chain = Promise.resolve();
+  let closed = false;
+  const posted = [];
   const once = async () => {
     for (;;) {
       const id = state.sessionId;
-      if (!id) return false;
+      if (!id || closed) return false;
       const ok = await post(id);
+      if (ok && !posted.includes(id)) posted.push(id);
       if (state.sessionId !== id) continue; // renamed meanwhile
       if (ok && !state.registered) {
         state.registered = true;
@@ -196,5 +202,11 @@ export function serializedRegister(state, post, onRegistered = () => {}) {
       return ok;
     }
   };
-  return () => (chain = chain.then(once, once));
+  const register = () => (chain = chain.then(once, once));
+  register.close = async () => {
+    closed = true;
+    await chain.catch(() => {});
+    return [...posted].reverse();
+  };
+  return register;
 }

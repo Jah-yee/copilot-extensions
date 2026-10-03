@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
+import subprocess as real_subprocess
 import sys
 import tarfile
 import uuid
@@ -231,30 +232,37 @@ def test_git_rev_parse_returns_none_when_unresolvable() -> None:
         assert wrapper._git_rev_parse("no-such-ref") is None
 
 
+def _run_git(args: list[str], **kwargs):
+    """Run a real ``git`` subprocess for test setup/assertions, always
+    through the scrubbed environment the production code itself uses
+    (``wrapper._scrubbed_git_env()``) -- without it, an ambient
+    ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE`` could redirect even
+    these real-git calls to target or mutate the CALLER's repository
+    instead of the throwaway one under ``tmp_path``."""
+    return real_subprocess.run(args, env=wrapper._scrubbed_git_env(), **kwargs)
+
+
 def _init_repo(path: Path) -> None:
-    import subprocess as real_subprocess
-    real_subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
-    real_subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
-    real_subprocess.run(["git", "-C", str(path), "config", "user.email", "t@example.com"], check=True)
+    _run_git(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    _run_git(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+    _run_git(["git", "-C", str(path), "config", "user.email", "t@example.com"], check=True)
 
 
 def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path, monkeypatch) -> None:
-    import subprocess as real_subprocess
-
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "tracked.txt").write_text("v1\n")
-    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
-    base_sha = real_subprocess.run(
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True)
+    base_sha = _run_git(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
     ).stdout.strip()
-    real_subprocess.run(["git", "-C", str(repo), "branch", "base-branch"], check=True)
+    _run_git(["git", "-C", str(repo), "branch", "base-branch"], check=True)
 
     (repo / "tracked.txt").write_text("v2\n")
-    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "head"], check=True)
-    head_sha = real_subprocess.run(
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "head"], check=True)
+    head_sha = _run_git(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
     ).stdout.strip()
 
@@ -262,20 +270,20 @@ def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path,
     # is NEVER an ancestor of HEAD or the base ref -- this must NOT survive
     # into the materialized copy, proving the bundle closure is genuinely
     # minimal (not the whole repository's history).
-    real_subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "secret-branch", base_sha],
+    _run_git(["git", "-C", str(repo), "checkout", "-q", "-b", "secret-branch", base_sha],
                          check=True)
     (repo / "secret.txt").write_text("not-a-real-secret-placeholder\n")
-    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "secret"], check=True)
-    secret_sha = real_subprocess.run(
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "secret"], check=True)
+    secret_sha = _run_git(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
     ).stdout.strip()
-    real_subprocess.run(["git", "-C", str(repo), "checkout", "-q", head_sha], check=True)
+    _run_git(["git", "-C", str(repo), "checkout", "-q", head_sha], check=True)
 
     # A placeholder-credential-shaped remote URL in the real config --
     # must not survive into the materialized copy.
     placeholder_remote = "https://" + "not-a-real-credential" + "@example.com/repo.git"
-    real_subprocess.run(
+    _run_git(
         ["git", "-C", str(repo), "config", "remote.origin.url", placeholder_remote],
         check=True,
     )
@@ -284,14 +292,14 @@ def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path,
     with contextlib.ExitStack() as stack:
         merged = wrapper._materialized_git_dir(stack, ["--base", "base-branch"])
 
-        rp = real_subprocess.run(
+        rp = _run_git(
             ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
             capture_output=True, text=True,
         )
         assert rp.returncode == 0
         assert rp.stdout.strip() == head_sha
 
-        diff = real_subprocess.run(
+        diff = _run_git(
             ["git", f"--git-dir={merged}", "diff", "--name-only", "base-branch", "HEAD"],
             capture_output=True, text=True,
         )
@@ -300,7 +308,7 @@ def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path,
 
         # The secret branch's commit must be UNRESOLVABLE in the
         # materialized copy -- its object is simply not present.
-        secret_lookup = real_subprocess.run(
+        secret_lookup = _run_git(
             ["git", f"--git-dir={merged}", "cat-file", "-e", secret_sha],
             capture_output=True, text=True,
         )
@@ -313,7 +321,7 @@ def test_materialized_git_dir_bundles_only_head_and_base_closure(tmp_path: Path,
 
         # The rebuilt index (`git read-tree HEAD`) must exactly match
         # HEAD's tree -- no spurious staged differences.
-        status = real_subprocess.run(
+        status = _run_git(
             ["git", f"--git-dir={merged}", f"--work-tree={repo}", "status", "--short"],
             capture_output=True, text=True,
         )
@@ -330,22 +338,21 @@ def test_materialized_git_dir_handles_staged_uncommitted_change_at_snapshot_time
     # would reference that now-missing blob and break `git diff`/`status`
     # outright. Rebuilding the index from HEAD instead must not crash, even
     # though the staged state itself is not preserved as "staged".
-    import subprocess as real_subprocess
 
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "tracked.txt").write_text("v1\n")
-    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
 
     # Stage a brand-new file whose blob is genuinely unreachable from HEAD.
     (repo / "staged-new.txt").write_text("staged content\n")
-    real_subprocess.run(["git", "-C", str(repo), "add", "staged-new.txt"], check=True)
+    _run_git(["git", "-C", str(repo), "add", "staged-new.txt"], check=True)
 
     monkeypatch.setattr(wrapper, "REPO", repo)
     with contextlib.ExitStack() as stack:
         merged = wrapper._materialized_git_dir(stack, [])
-        status = real_subprocess.run(
+        status = _run_git(
             ["git", f"--git-dir={merged}", f"--work-tree={repo}", "status", "--short"],
             capture_output=True, text=True,
         )
@@ -360,14 +367,13 @@ def test_materialized_git_dir_handles_staged_uncommitted_change_at_snapshot_time
 
 
 def test_materialized_git_dir_skips_base_closure_when_base_unresolvable(tmp_path: Path, monkeypatch) -> None:
-    import subprocess as real_subprocess
 
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "tracked.txt").write_text("v1\n")
-    real_subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    real_subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
-    head_sha = real_subprocess.run(
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "only commit"], check=True)
+    head_sha = _run_git(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True,
     ).stdout.strip()
 
@@ -376,7 +382,7 @@ def test_materialized_git_dir_skips_base_closure_when_base_unresolvable(tmp_path
         # "origin/main" (the default) does not exist in this tiny repo --
         # must degrade gracefully (HEAD alone), not raise.
         merged = wrapper._materialized_git_dir(stack, [])
-        rp = real_subprocess.run(
+        rp = _run_git(
             ["git", f"--git-dir={merged}", "rev-parse", "HEAD"],
             capture_output=True, text=True,
         )
@@ -457,6 +463,55 @@ def test_write_tar_of_repo_does_not_recurse_into_submodule_directory(tmp_path: P
         names = set(tar.getnames())
     assert "vendor/some-submodule" in names
     assert "vendor/some-submodule/secret-inside-submodule.txt" not in names
+
+
+def test_warn_about_dirty_tracked_files_reports_modified_tracked_paths(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+
+    # An uncommitted modification to an already-tracked file.
+    (repo / "tracked.txt").write_text("v2 -- locally modified\n")
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    wrapper._warn_about_dirty_tracked_files()
+    err = capsys.readouterr().err
+    assert "tracked.txt" in err
+    assert "warning" in err.lower()
+
+
+def test_warn_about_dirty_tracked_files_silent_when_clean(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    wrapper._warn_about_dirty_tracked_files()
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_about_dirty_tracked_files_does_not_warn_about_untracked_files(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    # A brand-new untracked file is a DIFFERENT (already-covered) concern
+    # -- `--untracked-files=no` means this function must stay silent about
+    # it, not conflate the two.
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+    (repo / "new-untracked.txt").write_text("brand new\n")
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    wrapper._warn_about_dirty_tracked_files()
+    assert capsys.readouterr().err == ""
 
 
 def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:

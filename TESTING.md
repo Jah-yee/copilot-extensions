@@ -219,9 +219,12 @@ the last-committed blob. A clean CI checkout has no such dirty state; a
 contributor's local checkout might. This is a deliberate tradeoff (the
 wrapper's whole point is testing in-progress, uncommitted changes), not an
 oversight -- "tracked" means "this path isn't the kind of thing that
-normally carries secrets," never "every byte currently in it is safe." A
-fresh, per-invocation volume means no state (including prior test
-artifacts) carries over between runs.
+normally carries secrets," never "every byte currently in it is safe." The
+wrapper prints an explicit stderr warning naming every dirty tracked file
+before building the snapshot, so this residual exposure is surfaced at the
+moment it's actually relevant, not only here. A fresh, per-invocation
+volume means no state (including prior test artifacts) carries over
+between runs.
 
 
 ## Local Windows SSH proxy regression

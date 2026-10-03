@@ -258,6 +258,39 @@ def _tracked_paths(*, include_untracked: bool) -> list[str]:
     ]
 
 
+def _warn_about_dirty_tracked_files() -> None:
+    """Print a clear, explicit stderr warning naming every tracked file
+    with an uncommitted modification -- the tracked-files-only boundary
+    (see ``_tracked_paths``) is about which PATHS are copied, not which
+    BYTES; the actual content copied for a tracked path is its current
+    on-disk state, so a secret pasted into an otherwise-tracked file and
+    never committed is still copied in. A clean CI checkout never hits
+    this; a contributor's dirty local checkout might -- this surfaces that
+    residual exposure at the moment it's actually relevant, not only in a
+    docstring/doc page nobody reads before running the command."""
+    res = subprocess.run(
+        ["git", "-C", str(REPO), "status", "--porcelain=v1", "--untracked-files=no"],
+        capture_output=True, timeout=30, env=_scrubbed_git_env(),
+    )
+    if res.returncode != 0:
+        return
+    dirty = [
+        line[3:] for line in os.fsdecode(res.stdout).splitlines() if line.strip()
+    ]
+    if not dirty:
+        return
+    print(
+        "warning: the following tracked file(s) have uncommitted changes and "
+        "their CURRENT on-disk content (not the last-committed version) will "
+        "be copied into the test-isolation container, which has outbound "
+        "network access -- do not run this against a checkout with an "
+        "uncommitted secret pasted into an otherwise-tracked file:",
+        file=sys.stderr,
+    )
+    for path in dirty:
+        print(f"  {path}", file=sys.stderr)
+
+
 def _resolve_base_ref(passthrough: list[str]) -> str:
     """Best-effort extraction of the ``--base`` value a passthrough
     invocation will use, so ``_materialized_git_dir`` can include exactly
@@ -421,7 +454,14 @@ def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked:
     empty directory entry), but never its contents -- this repository has
     no submodules today, but the guard costs nothing and must not regress
     silently if one is ever added.
+
+    Also warns (``_warn_about_dirty_tracked_files``) about any tracked file
+    with an uncommitted modification before copying anything -- a known,
+    accepted residual exposure of the tracked-files boundary (which governs
+    which PATHS are copied, not which bytes) is surfaced explicitly at the
+    moment it's actually relevant.
     """
+    _warn_about_dirty_tracked_files()
     with tarfile.open(dest, mode="w") as tar, contextlib.ExitStack() as stack:
         tar.add(_materialized_git_dir(stack, passthrough), arcname=".git")
         for rel_path in _tracked_paths(include_untracked=include_untracked):

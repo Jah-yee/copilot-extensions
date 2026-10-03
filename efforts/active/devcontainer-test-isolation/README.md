@@ -821,3 +821,37 @@ test suite (41 tests) and a fresh Docker-backed end-to-end run
 (`ai-attribution`, 98 passed / 6 skipped) regardless, to confirm the
 doc-only change didn't introduce a syntax or import regression.
 
+### 2026-10-03 — Review round 11: 3 findings addressed (escalated the dirty-tracked-files item from doc to code)
+Automated review raised three items: (1) the same "dirty tracked files"
+concern from round 10 was raised again, this time as HIGH -- documenting
+it (round 10) wasn't enough; the review's own framing offered two options
+("either make dirty tracked content an explicit opt-in or clearly warn"),
+and this round implements the second: a new `_warn_about_dirty_tracked_files`
+prints a clear stderr warning naming every tracked file with an
+uncommitted modification before the snapshot is built, so the residual
+exposure is surfaced at the moment it's actually relevant rather than only
+in a docstring/doc page. Live-confirmed against the PR's own dirty
+checkout: the warning correctly listed exactly the three files this very
+round touched. (2) the container's `/tmp` tmpfs (512 MiB) was smaller than
+`tools/run-plugin-tests.py`'s own advertised `--max-temp-mb` default (2048
+MiB) -- a legitimate, within-the-inner-runner's-own-budget suite could hit
+`ENOSPC` on the OUTER boundary before the inner runner's own guard ever got
+a chance to enforce its limit. Fixed by raising `/tmp` to 3072 MiB (headroom
+above 2048, not equal to it) -- a tmpfs `size=` is a ceiling on bytes
+actually written, not a reservation, so this doesn't inflate real memory
+usage in the common case; the overall `--memory` cgroup limit remains the
+real backstop. (3) the test module's real-`git` setup/assertion calls (in
+the `_materialized_git_dir` tests) inherited the ambient environment
+instead of going through the same `_scrubbed_git_env()` the production code
+itself uses -- an ambient `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` could
+have redirected even these test-only calls to the caller's own repository.
+Fixed with a new `_run_git` test helper that always threads
+`wrapper._scrubbed_git_env()` through, replacing every real-`git`
+`subprocess.run` call in the module.
+
+Re-validated end-to-end: the full unit test suite (44 tests, including
+three new tests for the dirty-file warning) passes, and a fresh
+Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms the warning fires correctly against this PR's own real dirty
+checkout and the larger `/tmp` ceiling doesn't break anything.
+

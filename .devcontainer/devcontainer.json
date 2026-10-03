@@ -74,7 +74,17 @@
   // (128 processes / 4096 MiB default) ever get a chance to act. Sized
   // with headroom above those inner defaults, not equal to them, since the
   // container itself (shell, git, uv, the Python interpreter, `pytest`
-  // bookkeeping) needs some of that budget too.
+  // bookkeeping) needs some of that budget too. `/tmp`'s own `size=3072m`
+  // specifically must stay above that same runner's own advertised
+  // `--max-temp-mb` default (2048 MiB, `tools/run-plugin-tests.py`) -- a
+  // smaller outer `/tmp` ceiling would let a legitimate, within-budget
+  // inner suite hit `ENOSPC` on the OUTER boundary before the inner
+  // runner's own guard ever gets a chance to enforce its own limit. (A
+  // tmpfs `size=` is only a ceiling on actual bytes written, not a
+  // reservation, so this headroom doesn't inflate the container's real
+  // memory footprint in the common case -- the overall `--memory` cgroup
+  // limit above remains the real backstop regardless of any single
+  // mount's nominal cap.)
   "runArgs": [
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
@@ -84,7 +94,7 @@
     "--cpus=4",
     "--pids-limit=512",
     "--tmpfs", "/home/vscode:rw,nosuid,nodev,exec,mode=1777,size=256m",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=512m",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=3072m",
     "--tmpfs", "/run:rw,nosuid,nodev,mode=1777,size=64m"
   ],
 

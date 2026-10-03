@@ -178,15 +178,44 @@ order.
       -- a stale/mis-targeted artifact can never be silently checked in.
 
 ### Phase 2 — Nearest-ancestor resolution + attribution remap/invalidate
-- [ ] Given an arbitrary fork-point commit, resolve the newest baseline
+- [x] Given an arbitrary fork-point commit, resolve the newest baseline
       whose measured commit is an ancestor, per the vision's Feature.
-- [ ] Implement remap-or-invalidate: for files touched by commits between
+      **Done 2026-10-03:** `ancestor_resolution.resolve_nearest_baseline`
+      walks `main`'s own history of a plugin's checked-in baseline file
+      (newest generation first) and returns the first whose
+      `measured_commit` is a real ancestor of the fork point (via `git
+      merge-base --is-ancestor`), skipping any generation that doesn't
+      qualify rather than assuming the newest one always does.
+- [x] Implement remap-or-invalidate: for files touched by commits between
       the resolved baseline and the fork point, either translate line-level
       attribution through those commits' own diffs, or mark the file's
       attribution invalid (forcing it through the smoke fallback for that
-      file specifically).
-- [ ] Unit-test this against a constructed history with real intervening
+      file specifically). **Done:** `ancestor_resolution.compute_file_remap`
+      classifies each touched file's `--unified=0` diff as containing at
+      least one hunk that both removes and adds lines (content actually
+      changed -- invalidate the whole file) or as pure insertions/deletions
+      only (per-line remap, via `remap_line`); `remap_or_invalidate_baseline`
+      applies that per file across a whole baseline, dropping invalidated
+      files from the ``coverage`` map entirely -- which
+      `selection.select_tests` already treats as `no_baseline_entry`, so no
+      changes were needed there to make Phase 2's output usable by Phase
+      0's existing selector. `remap_line` itself is deliberately
+      **asymmetric**: a line preceded only by deletions is safely
+      remapped, but a line preceded by *any* insertion is dropped, never
+      remapped -- a clean line-coordinate shift proves nothing about
+      execution, and inserted code can introduce new control flow that
+      makes a previously-reached line unreachable even though its line
+      number translates perfectly (see the Journal for how this was
+      found).
+- [x] Unit-test this against a constructed history with real intervening
       line insertions/deletions, not just a same-content forward-move case.
+      **Done:** `tools/test_coverage_guided_selection.py`'s
+      `TestIsAncestor`/`TestResolveNearestBaseline`/
+      `TestComputeFileRemap`/`TestRemapOrInvalidateBaseline` build real git
+      histories via subprocess (temp repos, real commits) covering pure
+      insertion, pure deletion, content replacement, a mixed
+      insertion-then-replacement hunk set, and a full three-file
+      integration case.
 
 ### Phase 3 — Diff-scoped selection + coverage-debt / smoke fallback
 - [ ] Build the diff-scoped selector: PR diff + resolved baseline (with
@@ -297,6 +326,107 @@ copilot-extensions-specific Phase 1.
 _Pending review of this plan._
 
 ## Journal
+
+### 2026-10-03 — Phase 2: nearest-ancestor resolution + attribution remap/invalidate
+Operator asked to continue into the next phases now that Phase 1 is fully
+complete (9/9).
+
+Added `tools/coverage_guided_selection/ancestor_resolution.py`, the first
+piece of Phase 2:
+
+- **`resolve_nearest_baseline(repo_root, plugin, fork_commit, main_ref=...)`**
+  -- walks `main`'s own commit history of a plugin's checked-in baseline
+  file (`correlation.baseline_path_on_main`), newest generation first, and
+  returns the first whose embedded `measured_commit` is a real ancestor of
+  `fork_commit` (`git merge-base --is-ancestor`). Deliberately does not
+  assume the newest generation on `main` always qualifies -- a long-lived
+  PR branch's own fork point can sit behind the latest promotion, in which
+  case an older generation is the correct (and still valid) answer. Returns
+  `None` (not an error) when nothing qualifies, reserving a raised
+  `AncestorResolutionError` for a genuine git-plumbing failure (an
+  unreachable/invalid commit, a missing repo) -- the same "never silently
+  wrong, but 'nothing found' isn't an error" contract `selection.py`
+  already established in Phase 0.
+- **`compute_file_remap` / `remap_line` / `remap_or_invalidate_baseline`**
+  -- realize the Plan's remap-or-invalidate requirement. For each file the
+  resolved baseline covers, diffs it (`git diff --unified=0 --no-ext-diff
+  --no-textconv`) between the baseline's own `measured_commit` and the
+  fork point: a diff with even one hunk that genuinely replaces content
+  invalidates that file's attribution entirely, dropping it from the
+  resulting baseline's `coverage` map -- which `selection.select_tests`
+  already treats as `no_baseline_entry`, forcing that file's own smoke/
+  coverage-debt fallback for free. Otherwise (pure insertions/deletions
+  only), each covered line is remapped **asymmetrically**, not just
+  shifted by cumulative offset: a line preceded only by deletions
+  translates safely (a test that already reached it in the old code can't
+  be retroactively un-reached by removing unrelated code elsewhere), but a
+  line preceded by *any* insertion is dropped rather than remapped --
+  caught during review (see below): inserted code can introduce new
+  control flow (an early `return`, a new guard clause) that causes a
+  previously-reaching test to no longer reach it, and a clean
+  line-coordinate shift alone can't prove an insertion was
+  execution-neutral. No changes were needed to `selection.py` itself to
+  make Phase 2's output immediately usable by Phase 0's existing selector
+  -- confirmed by construction, not by assumption (see the integration
+  test below).
+- Uses `--unified=0` specifically because it makes "a hunk with both
+  nonzero old_len and nonzero new_len genuinely replaced content" a
+  reliable signal -- with default context lines, an insertion sitting next
+  to an unrelated unchanged line could otherwise look like it "replaced"
+  that context line. `--no-ext-diff --no-textconv` (added during review)
+  prevent `GIT_EXTERNAL_DIFF`/a configured textconv driver from
+  transforming this machine-readable output in a way `_parse_hunks`
+  wouldn't recognize, which could otherwise silently report "unchanged"
+  for a file that actually changed.
+
+**Verified directly, per the Plan's own explicit ask** ("unit-test against
+a constructed history with real intervening line insertions/deletions, not
+just a same-content forward-move case"): `tools/test_coverage_guided_selection.py`
+gained `TestIsAncestor`, `TestResolveNearestBaseline`,
+`TestComputeFileRemap`, and `TestRemapOrInvalidateBaseline` -- each builds
+a real, throwaway git repo via subprocess (actual commits, not mocked
+diffs) covering: a real ancestor/non-ancestor/self pair and an unreachable
+commit; the newest-qualifying-generation resolution case and the
+none-qualify case; pure insertion (and that lines after it are
+conservatively dropped, not shifted), pure deletion, content replacement,
+a mixed insertion-then-replacement hunk set (confirming the whole file
+invalidates, not just the replaced hunk's own range); a full three-file
+integration pass (one untouched, one deletion-shifted, one
+content-replaced) plus a "the only covered line was itself deleted" edge
+case and a no-mutation check on the input baseline; a real multi-commit
+cumulative-remap case built entirely from deletions (baseline measured ->
+two separate real intervening deletion commits -> a fork-point commit
+that also deletes a line, with a hand-computed expected mapping); a
+direct regression test for the control-flow scenario above (inserting an
+early-exit guard clause before a covered line correctly drops that line's
+attribution rather than carrying it forward); and a binary-file-change
+case (a nonempty diff with no parsed `@@` hunks at all must invalidate,
+not pass through as "unchanged"). Every git subprocess scrubs ambient
+repository-selection env vars. Full
+`tools/test_coverage_guided_selection.py` suite: 49 passed,
+5 skipped (the pre-existing opt-in real-subprocess integration tests,
+unaffected). `ruff check --select F,E9` (this repo's actual required
+lint selection) clean.
+
+**Caught during review (before merge):** the first version of this phase
+remapped a line through *any* pure insertion/deletion uniformly, treating
+a clean line-coordinate shift as proof an edit was execution-neutral.
+It isn't -- inserting a new early `return`/guard clause before a
+previously-covered line shifts that line's position predictably while
+also making it unreachable for a test that used to execute it, and hunk
+lengths alone can't distinguish that case from a harmless insertion.
+Also caught: a nonempty diff with no parsed hunks at all (e.g. a binary
+file change) fell through to "remapped" with an empty hunk set, silently
+carrying every old attribution forward unchanged across a real, unparsed
+edit -- now invalidates instead.
+Fixed by making insertions asymmetric with deletions (see above) before
+this phase's own PR merged, not after.
+
+**Not yet done:** wiring `ancestor_resolution` into a real caller (Phase 3's
+diff-scoped selector is the first consumer -- it needs a resolved,
+remapped baseline as an input, which this phase now provides but nothing
+yet calls for a real PR). Phase 3 (diff-scoped selection + coverage-debt /
+smoke fallback) is the next slice.
 
 ### 2026-10-02 (latest) — Fixed `agent-dispatch`'s async-cancellation race; enrolled; Phase 1 complete (9/9)
 Operator asked to pursue `agent-dispatch` -- the last plugin blocked from

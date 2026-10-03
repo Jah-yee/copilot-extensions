@@ -349,6 +349,32 @@ def test_write_tar_of_repo_includes_materialized_git_dir_and_tracked_paths(tmp_p
     assert "tracked.txt" in names
 
 
+def test_write_tar_of_repo_skips_tracked_path_deleted_from_working_tree(tmp_path: Path, monkeypatch) -> None:
+    # `git ls-files --cached` still lists a path for an unstaged deletion --
+    # the index entry exists even though the working-tree file is gone.
+    # `_write_tar_of_repo` must skip it (`os.path.lexists`) rather than
+    # letting `tarfile.add` raise `FileNotFoundError`.
+    fake_git_dir = tmp_path / "fake-git"
+    fake_git_dir.mkdir()
+    (fake_git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    present_file = tmp_path / "present.txt"
+    present_file.write_text("still here\n")
+    # "deleted.txt" is deliberately NOT created on disk.
+
+    monkeypatch.setattr(wrapper, "_materialized_git_dir", lambda stack, passthrough: fake_git_dir)
+    monkeypatch.setattr(wrapper, "_tracked_paths",
+                         lambda *, include_untracked: ["present.txt", "deleted.txt"])
+    monkeypatch.setattr(wrapper, "REPO", tmp_path)
+
+    dest = tmp_path / "out.tar"
+    wrapper._write_tar_of_repo(dest, [], include_untracked=False)
+    with tarfile.open(dest) as tar:
+        names = set(tar.getnames())
+    assert "present.txt" in names
+    assert "deleted.txt" not in names
+
+
 def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) -> None:
     written_paths: list[Path] = []
     written_passthrough: list[list[str]] = []

@@ -5,8 +5,10 @@ Phase 1 of the ``devcontainer-test-isolation`` effort
 (``efforts/active/devcontainer-test-isolation/README.md``): invokes the
 ``.devcontainer/devcontainer.json`` spec and runs
 ``tools/run-plugin-tests.py`` *inside* it, for a real OS-level filesystem/
-network boundary on top of (not instead of) that runner's existing
-process-level containment.
+privilege boundary on top of (not instead of) that runner's existing
+process-level containment. Networking is NOT (yet) part of that boundary --
+the container keeps Docker's default bridge with full outbound reach (a
+known, named, open design gap; see the effort README's Phase 1 journal).
 
 This is a deliberately separate, opt-in wrapper -- it never replaces
 ``run-plugin-tests.py`` for contributors who aren't using the devcontainer
@@ -375,11 +377,24 @@ def _write_tar_of_repo(dest: Path, passthrough: list[str], *, include_untracked:
     separate, temporary, minimal-history copy rather than touching the real
     one; everything else comes from ``_tracked_paths``, so gitignored (and,
     unless ``include_untracked`` is explicitly set, untracked) files are
-    never included."""
+    never included.
+
+    ``git ls-files --cached`` still lists a path for an unstaged (not yet
+    `git add`-ed) deletion -- the index entry exists even though the file
+    itself is gone from the working tree -- so each path is checked with
+    ``os.path.lexists`` (not a symlink-following ``Path.exists()``, which
+    would wrongly skip an intact symlink whose target happens to be
+    missing) before being archived; a path absent from the working tree is
+    silently skipped rather than raising. The copied index (see
+    ``_materialized_git_dir``) already represents that deletion correctly
+    for `git status`/`git diff` -- only the physical tar entry is skipped.
+    """
     with tarfile.open(dest, mode="w") as tar, contextlib.ExitStack() as stack:
         tar.add(_materialized_git_dir(stack, passthrough), arcname=".git")
         for rel_path in _tracked_paths(include_untracked=include_untracked):
-            tar.add(REPO / rel_path, arcname=rel_path)
+            abs_path = REPO / rel_path
+            if os.path.lexists(abs_path):
+                tar.add(abs_path, arcname=rel_path)
 
 
 def _populate_workspace(container_id: str, passthrough: list[str], *, include_untracked: bool) -> None:

@@ -356,16 +356,16 @@ verbatim ask.
       daemon and network access to pull a base image.
 
 ### Phase 2 — Wire into CI / contributor flow
-- [ ] _Pending Phase 1 review. Candidate shape: an opt-in CI lane (not a
-      required gate, since the existing turn-key runner already gates
-      every push/PR) that runs a representative subset of plugin suites
-      through `tools/run_tests_in_devcontainer.py` on `ubuntu-latest`, to
-      catch any future regression in the container boundary itself without
-      slowing down the default fast path._
-- [ ] _Pending: close the networking residual gap flagged in Phase 1's
-      second item (split dependency-resolution and test-execution into
-      separate network-enabled/network-disconnected passes), if judged
-      worth the added complexity at review._
+- [ ] Decide whether to add an opt-in CI lane (not a required gate, since
+      the existing turn-key runner already gates every push/PR) that runs a
+      representative subset of plugin suites through
+      `tools/run_tests_in_devcontainer.py` on `ubuntu-latest`, to catch any
+      future regression in the container boundary itself without slowing
+      down the default fast path.
+- [ ] Close the networking residual gap flagged in Phase 1's second item
+      (split dependency-resolution and test-execution into separate
+      network-enabled/network-disconnected passes), or explicitly decide
+      the added complexity isn't worth it yet and record that decision.
 
 ## Validation Plan
 
@@ -680,4 +680,38 @@ a Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
 confirms the new tracked-only default still runs real suites correctly,
 and a second run with `--include-untracked` against a deliberately added
 untracked marker file confirms the opt-in path still works end-to-end too.
+
+### 2026-10-03 — Review round 6: 4 findings addressed
+Automated review raised four new items on the round-5 push (plus several
+stale, already-fixed findings restated by the review tool against
+unresolved threads): (1) `onCreateCommand`'s `curl ... | sh` pipeline could
+mask a complete `curl` failure -- `/bin/sh` reports only the pipeline's
+final command's exit status, and `sh` itself exits 0 on empty input, so
+`devcontainer up` could report success with no `uv` actually installed.
+Fixed by downloading to `/tmp` first and chaining with `&&` so a failed
+download now fails setup immediately rather than silently. (2) `git
+ls-files --cached` still lists a path for an unstaged (not yet `git
+add`-ed) deletion -- the index entry exists even though the working-tree
+file is gone -- so `_write_tar_of_repo` would raise `FileNotFoundError`
+trying to archive it. Fixed by checking `os.path.lexists` (not a
+symlink-following `Path.exists()`, which would wrongly skip an intact
+symlink whose target is missing) before adding each path, skipping it
+silently if absent; a new test builds a tracked-but-deleted path directly,
+and a live end-to-end run against a real deleted tracked file
+(`docs/architecture.md`, restored afterward) confirms the fix. (3) the
+wrapper's own top-of-module docstring still called this "a real OS-level
+filesystem/**network** boundary" -- the one spot round 5's phrasing fix
+missed -- corrected to "filesystem/**privilege** boundary" with the same
+explicit networking callout used elsewhere. (4) a Phase 2 Plan item
+encoded transient review state ("Pending Phase 1 review") rather than
+describing the pending decision directly -- reworded to be timeless; review
+history belongs in these dated Journal entries, not in the canonical Plan
+text itself.
+
+Re-validated end-to-end: the full unit test suite (36 tests) passes
+(including the new deleted-tracked-path regression test), a Docker-backed
+end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms the fixed
+`onCreateCommand` still installs `uv` correctly, and a second run against a
+real deleted-then-restored tracked file (`docs/architecture.md`) confirms
+the deletion-handling fix works live, not merely in the mocked unit test.
 

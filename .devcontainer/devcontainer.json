@@ -89,5 +89,10 @@
   // `onCreateCommand` runs before `run_tests_in_devcontainer.py` has
   // populated the workspace volume with repository content, so nothing
   // here may assume the checkout (e.g. `pyproject.toml`) is present yet.
-  "onCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh"
+  // Downloads to `/tmp` first and runs it as a separate, `&&`-chained
+  // step -- piping `curl` straight into `sh` would hide a failed download
+  // entirely: `/bin/sh` reports only the last command's exit status, and
+  // `sh` itself exits 0 on empty input, so `devcontainer up` could report
+  // success with no `uv` actually installed.
+  "onCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh -o /tmp/uv-install.sh && sh /tmp/uv-install.sh"
 }

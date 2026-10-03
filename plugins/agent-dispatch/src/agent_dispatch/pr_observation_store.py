@@ -68,11 +68,18 @@ class PRObservationStore:
                 "  holds TEXT NOT NULL,"
                 "  diff_hash TEXT NOT NULL,"
                 "  base_sha TEXT NOT NULL,"
+                "  last_commit_at REAL,"
                 "  last_observed_at REAL NOT NULL,"
                 "  updated_at REAL NOT NULL,"
                 "  PRIMARY KEY (repo, number)"
                 ")"
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(pr_observations)").fetchall()
+            }
+            if "last_commit_at" not in columns:
+                conn.execute("ALTER TABLE pr_observations ADD COLUMN last_commit_at REAL")
 
     @staticmethod
     def _to_row(observation: PRObservation) -> dict[str, str]:
@@ -82,6 +89,7 @@ class PRObservationStore:
             "holds": json.dumps(sorted(h.value for h in observation.holds)),
             "diff_hash": observation.revision.diff_hash,
             "base_sha": observation.revision.base_sha,
+            "last_commit_at": observation.last_commit_at,
         }
 
     @staticmethod
@@ -92,6 +100,7 @@ class PRObservationStore:
             mergeability=Mergeability(row["mergeability"]),
             holds=frozenset(HoldReason(h) for h in json.loads(row["holds"])),
             revision=Revision(diff_hash=row["diff_hash"], base_sha=row["base_sha"]),
+            last_commit_at=row["last_commit_at"],
         )
 
     def get(self, repo: str, number: int) -> PRObservation | None:
@@ -139,15 +148,16 @@ class PRObservationStore:
             conn.execute(
                 "INSERT INTO pr_observations "
                 "(repo, number, approval_status, mergeability, holds, "
-                " diff_hash, base_sha, last_observed_at, updated_at) "
+                " diff_hash, base_sha, last_commit_at, last_observed_at, updated_at) "
                 "VALUES (:repo, :number, :approval_status, :mergeability, "
-                " :holds, :diff_hash, :base_sha, :observed_at, :observed_at) "
+                " :holds, :diff_hash, :base_sha, :last_commit_at, :observed_at, :observed_at) "
                 "ON CONFLICT(repo, number) DO UPDATE SET "
                 " approval_status = excluded.approval_status,"
                 " mergeability = excluded.mergeability,"
                 " holds = excluded.holds,"
                 " diff_hash = excluded.diff_hash,"
                 " base_sha = excluded.base_sha,"
+                " last_commit_at = excluded.last_commit_at,"
                 " last_observed_at = excluded.last_observed_at,"
                 " updated_at = excluded.updated_at",
                 {

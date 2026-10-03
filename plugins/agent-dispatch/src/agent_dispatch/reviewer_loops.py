@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,6 +35,7 @@ _KNOWN_KEYS = frozenset(
         "stale_after_days",
     }
 )
+_GITHUB_PR_PAYLOAD_REF = re.compile(r"^github-pr:(?P<repo>[^#]+)#(?P<number>\d+)$")
 
 
 def _mapping(data: Mapping, key: str) -> dict:
@@ -62,7 +65,7 @@ def _optional_positive_number(data: Mapping, key: str) -> float | None:
             f"reviewer-loop {key}: expected a number > 0, got {value!r}"
         )
     result = float(value)
-    if result <= 0:
+    if not math.isfinite(result) or result <= 0:
         raise RegistrarError(f"reviewer-loop {key}: expected a number > 0")
     return result
 
@@ -159,6 +162,12 @@ class ReviewerLoopEvaluator:
             return [stale]
         return decisions
 
+    def next_verification_not_before(self, event: Mapping[str, Any]) -> float | None:
+        return reviewer_loop_deadline(
+            event,
+            stale_after_days=self._config.stale_after_days,
+        )
+
 
 def _reviewer_loop_payload(task: Mapping[str, Any]) -> Mapping[str, Any] | None:
     raw = task.get("payload_inline")
@@ -176,6 +185,16 @@ def _reviewer_loop_payload(task: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return decoded
 
 
+def _reviewer_loop_payload_ref(task: Mapping[str, Any]) -> tuple[str, int] | None:
+    payload_ref = task.get("payload_ref")
+    if not isinstance(payload_ref, str) or not payload_ref:
+        return None
+    match = _GITHUB_PR_PAYLOAD_REF.fullmatch(payload_ref)
+    if match is None:
+        return None
+    return match.group("repo"), int(match.group("number"))
+
+
 def _timestamp(value: object) -> float | None:
     if isinstance(value, bool):
         return None
@@ -189,6 +208,46 @@ def _timestamp(value: object) -> float | None:
         return None
 
 
+def _provider_last_commit_at(task: Mapping[str, Any]) -> float | None:
+    from .config import default_db_path
+    from .pr_observation_store import PRObservationStore
+
+    target = _reviewer_loop_payload_ref(task)
+    if target is None:
+        return None
+    repo, number = target
+    db_path = default_db_path().parent / "pr-observations.db"
+    if not db_path.exists():
+        return None
+    observation = PRObservationStore(db_path).get(repo, number)
+    return None if observation is None else observation.last_commit_at
+
+
+def reviewer_loop_last_commit_at(task: Mapping[str, Any]) -> float | None:
+    payload = _reviewer_loop_payload(task)
+    if payload is not None:
+        last_commit_at = _timestamp(payload.get("last_commit_at"))
+        if last_commit_at is not None:
+            return last_commit_at
+    return _provider_last_commit_at(task)
+
+
+def reviewer_loop_deadline(
+    event: Mapping[str, Any],
+    *,
+    stale_after_days: float | None,
+) -> float | None:
+    if stale_after_days is None:
+        return None
+    task = event.get("task")
+    if not isinstance(task, Mapping):
+        return None
+    last_commit_at = reviewer_loop_last_commit_at(task)
+    if last_commit_at is None:
+        return None
+    return last_commit_at + (stale_after_days * 86400.0)
+
+
 def reviewer_loop_stale_decision(
     event: Mapping[str, Any],
     *,
@@ -196,20 +255,11 @@ def reviewer_loop_stale_decision(
     now: float | None = None,
 ) -> Abandon | None:
     """Return the reviewer loop's stale-exit decision, if any."""
-    if stale_after_days is None:
-        return None
-    task = event.get("task")
-    if not isinstance(task, Mapping):
-        return None
-    payload = _reviewer_loop_payload(task)
-    if payload is None:
-        return None
-    last_commit_at = _timestamp(payload.get("last_commit_at"))
-    if last_commit_at is None:
+    deadline = reviewer_loop_deadline(event, stale_after_days=stale_after_days)
+    if deadline is None:
         return None
     current_time = time.time() if now is None else now
-    stale_after_seconds = stale_after_days * 86400.0
-    if current_time - last_commit_at < stale_after_seconds:
+    if current_time < deadline:
         return None
     return Abandon(
         reason=(
@@ -233,6 +283,7 @@ def reviewer_loop_lifecycle_config(
     if stale_after_days is not None and (
         isinstance(stale_after_days, bool)
         or not isinstance(stale_after_days, (int, float))
+        or not math.isfinite(float(stale_after_days))
         or float(stale_after_days) <= 0
     ):
         raise EvaluatorError(

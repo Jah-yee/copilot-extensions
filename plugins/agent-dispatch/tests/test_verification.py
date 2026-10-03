@@ -10,9 +10,12 @@ import pytest
 
 from agent_dispatch import handoff_claim_release
 from agent_dispatch import remote_dispatch
+from agent_dispatch.github_provider_adapter import PRObservation
+from agent_dispatch.pr_observation_store import PRObservationStore
 from agent_dispatch.queue import Status, TaskError
 from agent_dispatch.verification import evaluate_submitted_task
 from agent_dispatch.verification_drain import drain_verification_requests
+from agent_dispatch.provider_state_machine import ApprovalStatus, Mergeability, Revision
 from tests._helpers import TEST_REPO
 from tests._helpers import RepoDefaultingQueue as TaskQueue
 
@@ -37,6 +40,7 @@ def _submitted_task(
     evaluator_ref: str | None,
     repo: str = TEST_REPO,
     payload_inline: str | None = None,
+    payload_ref: str | None = None,
 ) -> str:
     task = queue.create(
         title,
@@ -44,6 +48,7 @@ def _submitted_task(
         require_verification=require_verification,
         evaluator_ref=evaluator_ref,
         payload_inline=payload_inline,
+        payload_ref=payload_ref,
     )
     queue.claim_one("worker-1", task_id=task.id)
     queue.start(task.id, "worker-1")
@@ -288,6 +293,156 @@ def test_reviewer_loop_without_stale_after_days_never_stales(tmp_path, monkeypat
 
     assert report["applied"][0]["decision"] == "noop"
     assert queue.get(task_id).status == Status.SUBMITTED
+
+
+def test_reviewer_loop_stale_deadline_requeues_and_fires_without_manual_evaluate(
+    tmp_path, monkeypatch
+):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    current_time = {"value": 1_000_000.0}
+    monkeypatch.setattr(
+        queue, "_now", lambda now=None: current_time["value"] if now is None else float(now)
+    )
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time", lambda: current_time["value"]
+    )
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/repo-delayed",
+        evaluator_ref="review-loop-delayed",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    task_id = _submitted_task(
+        queue,
+        "review repo-delayed",
+        repo="example/repo-delayed",
+        require_verification=True,
+        evaluator_ref="review-loop-delayed",
+        payload_inline=json.dumps(
+            {"reviewer_loop": {"last_commit_at": current_time["value"]}}
+        ),
+    )
+    signal: asyncio.Queue[None] = asyncio.Queue()
+
+    class _DrainBus:
+        def publish(self, event: dict) -> None:
+            return None
+
+    async def scenario():
+        loop = asyncio.create_task(
+            drain_verification_requests(
+                queue,
+                _DrainBus(),
+                interval=0.01,
+                idle_interval=0.1,
+                retry_base=0.01,
+                max_attempts=3,
+                signal=signal,
+            )
+        )
+        try:
+            for _ in range(200):
+                requests = queue.list_verification_requests(task_id)
+                delayed = next(
+                    (
+                        request
+                        for request in requests
+                        if request.trigger == "reviewer-loop-stale-deadline"
+                        and request.status == "pending"
+                    ),
+                    None,
+                )
+                if delayed is not None:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("future verification request was not scheduled")
+
+            delayed = next(
+                request
+                for request in queue.list_verification_requests(task_id)
+                if request.trigger == "reviewer-loop-stale-deadline"
+            )
+            assert delayed.trigger == "reviewer-loop-stale-deadline"
+            assert delayed.not_before == current_time["value"] + (7 * 86400.0)
+            assert queue.get(task_id).status == Status.SUBMITTED
+
+            current_time["value"] += 8 * 86400.0
+            signal.put_nowait(None)
+            for _ in range(200):
+                if queue.get(task_id).status == Status.ABANDONED:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("stale deadline did not auto-abandon the task")
+        finally:
+            loop.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await loop
+
+    asyncio.run(scenario())
+    assert queue.get(task_id).status == Status.ABANDONED
+
+
+def test_reviewer_loop_can_derive_last_commit_at_from_provider_observation_store(
+    tmp_path, monkeypatch
+):
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    monkeypatch.setenv("AGENT_DISPATCH_INSTALL_DIR", str(install_root))
+    last_commit_at = 1_000_000.0
+    store = PRObservationStore(install_root / "pr-observations.db")
+    store.put(
+        "example/provider-repo",
+        7,
+        PRObservation(
+            number=7,
+            approval_status=ApprovalStatus.APPROVED,
+            mergeability=Mergeability.CLEAN,
+            holds=frozenset(),
+            revision=Revision(diff_hash="head-1", base_sha="base-1"),
+            last_commit_at=last_commit_at,
+        ),
+        observed_at=last_commit_at,
+    )
+    queue = TaskQueue(tmp_path / "tasks.db")
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/provider-repo",
+        evaluator_ref="review-loop-provider",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (8 * 86400.0),
+    )
+    task_id = _submitted_task(
+        queue,
+        "review via provider store",
+        repo="example/provider-repo",
+        require_verification=True,
+        evaluator_ref="review-loop-provider",
+        payload_ref="github-pr:example/provider-repo#7",
+    )
+
+    report = evaluate_submitted_task(queue, task_id, trigger="submitted")
+
+    assert report["applied"][0]["decision"] == "abandon"
+    assert queue.get(task_id).status == Status.ABANDONED
 
 
 @pytest.mark.parametrize(

@@ -289,6 +289,21 @@ def evaluate_submitted_task(
             applied=applied,
         )
 
+    next_verification = getattr(evaluator, "next_verification_not_before", None)
+    if callable(next_verification) and all(
+        isinstance(decision, NoOp) for decision in decisions
+    ):
+        not_before = next_verification(event)
+        if isinstance(not_before, (int, float)):
+            try:
+                queue.schedule_submitted_verification(
+                    task_id,
+                    trigger="reviewer-loop-stale-deadline",
+                    not_before=float(not_before),
+                )
+            except TaskError:
+                pass
+
     return _verification_report(
         task_id=task_id,
         trigger=trigger,

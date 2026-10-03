@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import sys
 import threading
@@ -861,7 +862,18 @@ def test_event_note_wakes_and_supersedes_active_run_waiter(api, monkeypatch):
     assert wakes[0].status == "pending"
 
 
-def test_event_note_wakes_a_suspended_reviewer_task_instead_of_leaving_it_parked(api):
+def test_reviewer_deadline_recovery_wakes_a_suspended_task_without_a_verdict(api):
+    api.app.state.queue.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {"rules": []},
+            "reviewer_loop": {"stale_after_days": 7},
+        },
+        machine=_registration_machine(),
+    )
+    last_commit_at = 1_000_000.0
     tid = api.post(
         "/tasks",
         json={
@@ -870,6 +882,9 @@ def test_event_note_wakes_a_suspended_reviewer_task_instead_of_leaving_it_parked
             "origin_ref": "review-emitter",
             "require_verification": True,
             "evaluator_ref": "review-loop",
+            "payload_inline": json.dumps(
+                {"reviewer_loop": {"last_commit_at": last_commit_at}}
+            ),
         },
     ).json()["id"]
     api.post("/claim", json={"worker_id": "w1", "repo": TEST_REPO})
@@ -902,15 +917,12 @@ def test_event_note_wakes_a_suspended_reviewer_task_instead_of_leaving_it_parked
         },
     )
     assert armed.status_code == 200
-    sender = _register_event_emitter(api)
 
-    response = api.post(
-        f"/tasks/{tid}/event-note",
-        json={"sender": sender, "note": "new review round; no verdict posted yet"},
-        headers=_control_headers(sender),
+    resumed = api.app.state.queue.reconcile_reviewer_deadlines(
+        now=last_commit_at + (8 * 86400.0)
     )
 
-    assert response.status_code == 200
+    assert resumed == 1
     wakes = api.app.state.queue.list_run_waiter_wakes(tid)
     assert len(wakes) == 1
     assert wakes[0].status == "pending"

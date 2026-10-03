@@ -27,6 +27,8 @@ task's own current owner once the monitor is due.
 
 from __future__ import annotations
 
+import math
+
 from .monitors import DEFAULT_SUSPEND_COOLDOWN_SECONDS, MonitorKind, suspend_monitor_columns
 from .queue_common import (
     PROGRESS_SUMMARY_MAX,
@@ -36,6 +38,8 @@ from .queue_common import (
     _task_transition_spec,
 )
 from .queue_records import Status, TaskError
+from .registrations import RegistrationKind
+from .reviewer_loops import reviewer_loop_deadline, reviewer_loop_lifecycle_config
 
 
 class QueueSuspendMixin:
@@ -197,6 +201,75 @@ class QueueSuspendMixin:
                     ),
                     now=ts,
                 )
+            except TaskError:
+                continue
+            resumed += 1
+        return resumed
+
+    def reconcile_reviewer_deadlines(self, *, now: float | None = None) -> int:
+        """Wake suspended reviewer tasks once their stale deadline elapses."""
+        ts = self._now(now)
+        evaluator_configs: dict[tuple[str | None, str], float] = {}
+        for record in self.list_registrations(
+            kind=RegistrationKind.EVALUATOR,
+            include_paused=False,
+        ):
+            spec = record.spec or {}
+            evaluator_ref = spec.get("evaluator_ref")
+            if not isinstance(evaluator_ref, str) or not evaluator_ref:
+                continue
+            config = reviewer_loop_lifecycle_config(spec)
+            if config is None or config.stale_after_days is None:
+                continue
+            evaluator_configs[(spec.get("repo"), evaluator_ref)] = config.stale_after_days
+        if not evaluator_configs:
+            return 0
+        resumed = 0
+        for task in self.list(status=Status.SUSPENDED, limit=5000):
+            if (
+                not task.owner
+                or not task.evaluator_ref
+                or task.resume_requested
+                or task.wake_status in {"pending", "delivering"}
+            ):
+                continue
+            stale_after_days = evaluator_configs.get((task.repo, task.evaluator_ref))
+            if stale_after_days is None:
+                continue
+            deadline = reviewer_loop_deadline(
+                {"task": {"payload_inline": task.payload_inline, "payload_ref": task.payload_ref}},
+                stale_after_days=stale_after_days,
+            )
+            if deadline is None or not math.isfinite(deadline) or deadline > ts:
+                continue
+            wakes = [
+                wake
+                for wake in self.list_run_waiter_wakes(task.id)
+                if wake.status in {"pending", "delivering"}
+            ]
+            if wakes:
+                continue
+            message = (
+                f"Task {task.id}'s reviewer stale deadline elapsed while it was "
+                "suspended. Re-check the change and resolve it instead of leaving "
+                "the review parked."
+            )
+            try:
+                result = self.supersede_run_waiter_with_wake(
+                    task.id,
+                    reason="reviewer stale deadline elapsed",
+                    message=message,
+                    sender="agent-dispatch-reviewer-loop",
+                    now=ts,
+                )
+                if result is None:
+                    self.resume(
+                        task.id,
+                        task.owner,
+                        wake_requested=True,
+                        wake_message=message,
+                        now=ts,
+                    )
             except TaskError:
                 continue
             resumed += 1

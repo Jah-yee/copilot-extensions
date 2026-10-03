@@ -503,9 +503,9 @@ def _spawn_fake_mux_daemon_process(root: Path) -> subprocess.Popen:
     )
 
 
-def _wait_until_recognized_as_mux_daemon(pid: int, *, timeout: float = 5.0) -> bool:
-    """Poll ``_iter_mux_daemon_pids()`` until ``pid`` appears or ``timeout``
-    elapses.
+def _wait_until_recognized_as_mux_daemon(proc: subprocess.Popen, *, timeout: float = 5.0) -> bool:
+    """Poll ``_iter_mux_daemon_pids()`` until ``proc.pid`` appears or
+    ``timeout`` elapses.
 
     ``subprocess.Popen`` returns as soon as ``fork``/``CreateProcess``
     succeeds, which races the child's ``exec`` actually taking effect and
@@ -515,6 +515,7 @@ def _wait_until_recognized_as_mux_daemon(pid: int, *, timeout: float = 5.0) -> b
     invalid" under CI load, even though the process is a genuine match a
     moment later.
     """
+    pid = proc.pid
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if pid in mdc._iter_mux_daemon_pids():
@@ -522,13 +523,13 @@ def _wait_until_recognized_as_mux_daemon(pid: int, *, timeout: float = 5.0) -> b
         time.sleep(0.1)
     found = pid in mdc._iter_mux_daemon_pids()
     if not found:
-        import subprocess as _subprocess
-        raw = _subprocess.run(
-            ["ps", "-eo", "pid=,args="], capture_output=True, text=True, check=False
-        )
-        matching = [line for line in raw.stdout.splitlines() if str(pid) in line]
-        print(f"DIAGNOSTIC: pid {pid} not recognized; matching ps lines: {matching!r}")
-        print(f"DIAGNOSTIC: full ps dump head: {raw.stdout[:4000]!r}")
+        import pathlib as _pathlib
+        print(f"DIAGNOSTIC: pid {pid} not recognized; proc.poll()={proc.poll()!r}")
+        try:
+            raw_cmdline = _pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+            print(f"DIAGNOSTIC: /proc/{pid}/cmdline raw: {raw_cmdline!r}")
+        except OSError as exc:
+            print(f"DIAGNOSTIC: /proc/{pid}/cmdline read failed: {exc!r}")
     return found
 
 
@@ -541,7 +542,7 @@ def test_terminate_mux_daemon_pid_accepts_a_matched_real_process():
     root = Path.home() / ".worktree-manager-test-identity-match"
     proc = _spawn_fake_mux_daemon_process(root)
     try:
-        assert _wait_until_recognized_as_mux_daemon(proc.pid), (
+        assert _wait_until_recognized_as_mux_daemon(proc), (
             "the real spawned process was not recognized as a mux-daemon -- "
             "test setup invalid"
         )
@@ -562,7 +563,7 @@ def test_terminate_mux_daemon_pid_refuses_a_root_mismatched_real_process():
     other_root = Path.home() / ".worktree-manager-test-identity-other"
     proc = _spawn_fake_mux_daemon_process(its_root)
     try:
-        assert _wait_until_recognized_as_mux_daemon(proc.pid), (
+        assert _wait_until_recognized_as_mux_daemon(proc), (
             "the real spawned process was not recognized as a mux-daemon -- "
             "test setup invalid"
         )

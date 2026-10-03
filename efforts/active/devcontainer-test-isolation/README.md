@@ -1148,10 +1148,27 @@ confirms the common case still works; Docker cleanup and host
 `git status --short` reconfirmed clean of anything beyond this round's
 own diff.
 
-With this fix landed, five full review passes within round 15 have each
-confirmed their predecessor's fixes resolved and raised only genuinely
-new findings (no regressions reopened) -- the PR author judges this a
-reasonable point to merge rather than continue iterating indefinitely
-against a non-blocking `COMMENTED` verdict (see
-`docs/pr-review-protocol.md` and the repo's own commented-verdict review
-fallback policy), absent a severe new finding on the next pass.
+### 2026-10-03 — Review round 15 (yet another pass): 2 findings addressed (SIGINT-during-cleanup parity, journal timelessness)
+A sixth review pass of the same round confirmed the SIGTERM-during-
+cleanup fix resolved, and raised two more. MEDIUM (against code
+unchanged this round): a second Ctrl-C (`SIGINT`) arriving while
+`_tear_down`/`_cleanup_orphan` is already running has the exact same
+partial-cleanup exposure the SIGTERM fix closed -- the FIRST `SIGINT`
+already becomes `KeyboardInterrupt` via Python's own default handling
+(entering cleanup fine), but `_sigterm_deferred` only ignored `SIGTERM`,
+so a repeat `SIGINT` during cleanup could still interrupt it partway.
+Fixed by generalizing `_sigterm_deferred` to defer BOTH `SIGINT` and
+`SIGTERM` (via a new `_CLEANUP_DEFERRED_SIGNALS` tuple), kept under its
+original name for continuity across this PR's own review history. LOW:
+the previous journal entry's closing paragraph recorded review-pass
+counts and argued for merge-readiness -- a transient review-process
+judgment that doesn't belong in a durable technical effort journal
+(merge-readiness belongs in the PR discussion, not an artifact that
+should stay meaningful independent of any one review's state). Removed.
+
+Re-validated end-to-end: the full unit test suite (68 tests, with the
+`_sigterm_deferred` and teardown-signal-deferral tests updated to check
+BOTH signals) passes; a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
+works; Docker cleanup and host `git status --short` reconfirmed clean of
+anything beyond this round's own diff.

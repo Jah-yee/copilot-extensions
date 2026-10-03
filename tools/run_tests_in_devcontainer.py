@@ -866,31 +866,49 @@ def _raise_on_sigterm(signum: int, frame: object) -> None:
     raise _TerminationRequested(f"received signal {signum}")
 
 
+# Both the signals `main` must survive mid-cleanup: `SIGINT` (Ctrl-C,
+# Python already converts it to `KeyboardInterrupt` by default -- no
+# custom handler needed for the FIRST one to enter cleanup) and `SIGTERM`
+# (needs `_raise_on_sigterm` above, since its default action terminates
+# the process immediately with no exception at all). A REPEAT of either
+# one arriving WHILE `_tear_down`/`_cleanup_orphan` is already running
+# must not interrupt it partway -- see `_sigterm_deferred`.
+_CLEANUP_DEFERRED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
 @contextlib.contextmanager
 def _sigterm_deferred():
-    """Temporarily ignore ``SIGTERM`` for the duration of a cleanup step
-    (``_tear_down``/``_cleanup_orphan``), restoring whatever handler was
-    previously installed afterward. Without this, a SECOND ``SIGTERM``
+    """Temporarily ignore both `_CLEANUP_DEFERRED_SIGNALS` for the
+    duration of a cleanup step (``_tear_down``/``_cleanup_orphan``),
+    restoring whatever handlers were previously installed afterward.
+    Without this, a SECOND ``SIGTERM`` (or a second Ctrl-C/``SIGINT``)
     arriving WHILE cleanup is already running (e.g. between removing the
     container and removing its volume in `_tear_down`, two separate
-    sequential subprocess calls) would raise `_TerminationRequested` again
-    right there -- `_tear_down`/`_cleanup_orphan` only catch
+    sequential subprocess calls) would raise an exception again right
+    there -- `_tear_down`/`_cleanup_orphan` only catch
     `subprocess.SubprocessError`/`OSError`, so that second exception
     escapes immediately and can skip whichever removal step hadn't run
-    yet, reopening the exact leak `_raise_on_sigterm` exists to prevent."""
-    previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    yet, reopening the exact leak `_raise_on_sigterm` exists to prevent.
+    Kept under its original ``SIGTERM``-only name for historical
+    continuity across this PR's own review rounds -- the function itself
+    now covers both signals."""
+    previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in _CLEANUP_DEFERRED_SIGNALS}
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def main(argv: list[str] | None = None) -> int:
     # Converts a SIGTERM into a normal raised exception so this
     # function's own try/finally cleanup runs -- see
     # `_TerminationRequested`'s docstring. SIGINT needs no equivalent
-    # handler: Python already raises `KeyboardInterrupt` for it by
-    # default, which the same `except BaseException` paths already catch.
+    # handler for the FIRST signal: Python already raises
+    # `KeyboardInterrupt` for it by default, which the same
+    # `except BaseException` paths already catch -- `_sigterm_deferred`
+    # (used around the cleanup calls below) is what protects against a
+    # REPEAT of either signal during cleanup itself.
     signal.signal(signal.SIGTERM, _raise_on_sigterm)
     ap = argparse.ArgumentParser(
         description=(

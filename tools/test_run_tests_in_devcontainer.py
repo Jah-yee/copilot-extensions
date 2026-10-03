@@ -952,16 +952,19 @@ def test_sigterm_deferred_ignores_then_restores_the_previous_handler() -> None:
     with mock.patch.object(wrapper.signal, "signal",
                             return_value=sentinel_handler) as signal_mock:
         with wrapper._sigterm_deferred():
-            # Inside the context, SIGTERM must be set to SIG_IGN -- a
-            # second SIGTERM arriving mid-cleanup (e.g. between removing
-            # a container and removing its volume) must not interrupt
-            # the cleanup step partway.
-            ignore_call = signal_mock.call_args_list[-1]
-            assert ignore_call.args == (wrapper.signal.SIGTERM, wrapper.signal.SIG_IGN)
-    # On exit, the PREVIOUS handler (whatever `signal.signal` returned
+            # Inside the context, BOTH SIGINT and SIGTERM must be set to
+            # SIG_IGN -- a second SIGTERM, or a second Ctrl-C, arriving
+            # mid-cleanup (e.g. between removing a container and removing
+            # its volume) must not interrupt the cleanup step partway.
+            ignore_calls = {call.args[0]: call.args[1] for call in signal_mock.call_args_list}
+            assert ignore_calls[wrapper.signal.SIGTERM] == wrapper.signal.SIG_IGN
+            assert ignore_calls[wrapper.signal.SIGINT] == wrapper.signal.SIG_IGN
+    # On exit, the PREVIOUS handlers (whatever `signal.signal` returned
     # when first called here) must be restored, not left as SIG_IGN.
-    restore_call = signal_mock.call_args_list[-1]
-    assert restore_call.args == (wrapper.signal.SIGTERM, sentinel_handler)
+    restore_calls = signal_mock.call_args_list[-2:]
+    restored = {call.args[0]: call.args[1] for call in restore_calls}
+    assert restored[wrapper.signal.SIGTERM] == sentinel_handler
+    assert restored[wrapper.signal.SIGINT] == sentinel_handler
 
 
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:
@@ -1024,18 +1027,20 @@ def test_main_tears_down_container_and_volume_unless_keep_is_passed(monkeypatch,
 
 
 def test_main_defers_sigterm_during_the_teardown_call(monkeypatch, tmp_path: Path) -> None:
-    # A real second SIGTERM arriving mid-`_tear_down` must not interrupt
-    # it between removing the container and removing its volume -- the
-    # OS-level handler must genuinely be SIG_IGN for the call's duration,
-    # not merely wrapped in a try/except that happens to catch the
-    # resulting exception.
+    # A real second SIGTERM (or Ctrl-C) arriving mid-`_tear_down` must not
+    # interrupt it between removing the container and removing its
+    # volume -- the OS-level handler must genuinely be SIG_IGN for the
+    # call's duration, not merely wrapped in a try/except that happens to
+    # catch the resulting exception.
     config_path = tmp_path / "cfgdir-sigterm" / "devcontainer.json"
     config_path.parent.mkdir()
     config_path.write_text("{}")
-    observed_handler_during_teardown = []
+    observed_handlers_during_teardown = []
 
     def fake_tear_down(container_id: str, volume_name: str) -> None:
-        observed_handler_during_teardown.append(signal.getsignal(signal.SIGTERM))
+        observed_handlers_during_teardown.append(
+            (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+        )
 
     monkeypatch.setattr(wrapper, "_per_instance_config", lambda label: (config_path, "fake-volume"))
     monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
@@ -1044,12 +1049,14 @@ def test_main_defers_sigterm_during_the_teardown_call(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(wrapper, "_run_tests", lambda container_id, cfg, passthrough: 0)
     monkeypatch.setattr(wrapper, "_tear_down", fake_tear_down)
 
-    previous_handler = signal.getsignal(signal.SIGTERM)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
     try:
         wrapper.main(["agent-worktrees"])
     finally:
-        signal.signal(signal.SIGTERM, previous_handler)
-    assert observed_handler_during_teardown == [signal.SIG_IGN]
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    assert observed_handlers_during_teardown == [(signal.SIG_IGN, signal.SIG_IGN)]
 
 
 def test_main_raises_teardown_failure_when_primary_path_succeeded(monkeypatch, tmp_path: Path) -> None:

@@ -54,13 +54,21 @@ def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> N
     env = wrapper._scrubbed_git_env()
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
-    assert "GIT_CONFIG_KEY_0" not in env
-    # These select/disable config independent of `-C`, so an injected
-    # config could otherwise still alter the hardened Git probes below
-    # (notably the fail-closed `_warn_about_dirty_tracked_files` check).
-    assert "GIT_CONFIG_GLOBAL" not in env
+    # The caller's own injected `GIT_CONFIG_KEY_0` is stripped -- but the
+    # wrapper forces its OWN `GIT_CONFIG_KEY_0=core.fsmonitor` afterward
+    # (see below), so the key is present again with the wrapper's value,
+    # never the caller's.
+    assert env["GIT_CONFIG_KEY_0"] != "core.foo"
+    # `GIT_CONFIG_SYSTEM` is stripped (no forced replacement needed --
+    # `GIT_CONFIG_NOSYSTEM=1` below already disables system config
+    # entirely). `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` are instead
+    # FORCED to safe values (not merely stripped), since the caller's own
+    # global/system config -- including a configured `core.fsmonitor`
+    # hook -- would otherwise still load and execute as part of an
+    # ostensibly read-only probe against the REAL host checkout.
     assert "GIT_CONFIG_SYSTEM" not in env
-    assert "GIT_CONFIG_NOSYSTEM" not in env
+    assert env["GIT_CONFIG_GLOBAL"] == wrapper.os.devnull
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert env.get("UNRELATED_VAR") == "kept"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     # Without this, even a nominally read-only `git status` against the
@@ -68,6 +76,13 @@ def test_scrubbed_git_env_removes_repository_context_variables(monkeypatch) -> N
     # and rewrite the index, violating the wrapper's read-only-host
     # guarantee.
     assert env["GIT_OPTIONAL_LOCKS"] == "0"
+    # Forces `core.fsmonitor=false` via the env-override mechanism --
+    # without it, a configured fsmonitor hook (global, system, or the
+    # repo's own local config) would still execute arbitrary host code
+    # as part of this same read-only probe.
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "core.fsmonitor"
+    assert env["GIT_CONFIG_VALUE_0"] == "false"
 
 
 def test_tracked_paths_defaults_to_cached_only_and_filters_excluded_prefixes() -> None:
@@ -812,6 +827,33 @@ def test_warn_about_dirty_tracked_files_reports_modified_tracked_paths(
     err = capsys.readouterr().err
     assert "tracked.txt" in err
     assert "warning" in err.lower()
+
+
+def test_scrubbed_git_env_prevents_a_configured_fsmonitor_hook_from_running(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The exact regression this closes: a configured `core.fsmonitor` hook
+    # runs arbitrary host code as part of an ostensibly READ-ONLY `git
+    # status` probe against the REAL host checkout, unless local, global,
+    # AND system config are all neutralized for it.
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("v1\n")
+    _run_git(["git", "-C", str(repo), "add", "."], check=True)
+    _run_git(["git", "-C", str(repo), "commit", "-q", "-m", "initial"], check=True)
+
+    marker = tmp_path / "fsmonitor-ran.marker"
+    hook = tmp_path / "fake-fsmonitor-hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf '1\\n'\n")
+    hook.chmod(0o755)
+    _run_git(["git", "-C", str(repo), "config", "core.fsmonitor", str(hook)], check=True)
+
+    monkeypatch.setattr(wrapper, "REPO", repo)
+    real_subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=no"],
+        env=wrapper._scrubbed_git_env(), capture_output=True, timeout=30,
+    )
+    assert not marker.exists(), "a configured core.fsmonitor hook executed despite the scrubbed environment"
 
 
 def test_warn_about_dirty_tracked_files_silent_when_clean(tmp_path: Path, monkeypatch, capsys) -> None:

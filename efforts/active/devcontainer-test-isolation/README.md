@@ -1497,3 +1497,38 @@ live check confirms `--allow-host-state` is rejected with a clear error
 before any container is even brought up (no Docker resources touched).
 Docker cleanup and host `git status --short` reconfirmed clean of
 anything beyond this round's own diff.
+
+### 2026-10-03 — Review round 15 (fifteenth pass): 1 finding addressed (disable fsmonitor hooks on host git probes)
+A fifteenth review pass of the same round confirmed the `--allow-host-state`
+rejection and admission-lease documentation resolved, and raised one more
+genuinely new finding. HIGH: `_scrubbed_git_env()` scrubbed repository-
+*selection* variables (`GIT_DIR`, `GIT_WORK_TREE`, etc.) but still let the
+caller's normal global/system/local git CONFIG load for every host-side
+probe -- a configured `core.fsmonitor` hook is therefore executed by an
+ostensibly READ-ONLY `git status`/`ls-files` call against the REAL host
+checkout, even with `GIT_OPTIONAL_LOCKS=0` already in place (confirmed
+via direct experimentation: a fake fsmonitor hook script DOES run and
+leave a marker file without this fix, running arbitrary host code from
+inside a function whose entire point is read-only inspection). Fixed by
+unconditionally forcing `GIT_CONFIG_GLOBAL=os.devnull` and
+`GIT_CONFIG_NOSYSTEM=1` (disabling global/system config entirely,
+matching `tools/agent_bridge_contract_git.py`'s own precedent), plus
+forcing `core.fsmonitor=false` via the same `GIT_CONFIG_COUNT`/
+`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` env-override mechanism already
+used elsewhere in this wrapper -- the latter specifically neutralizes a
+LOCAL (repo-level) `core.fsmonitor` setting too, which neither the
+global/system disabling nor any `-C`/`GIT_DIR` scrubbing would reach.
+
+Re-validated end-to-end: the full unit test suite (87 tests, including a
+new real-git regression test that configures an actual fake fsmonitor
+hook script and confirms it does NOT execute through the scrubbed
+environment, plus an updated assertion reflecting that `GIT_CONFIG_KEY_0`
+is now present with the WRAPPER's own forced value rather than simply
+absent) passes; `check-module-size.py --changed-since origin/dev` passes
+(right at the 1000-line cap after another condensing pass across several
+docstrings -- this module is now a strong candidate for an actual split
+into smaller components if review continues to add substantive fixes);
+a fresh Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6
+skipped) confirms the common case still works. Docker cleanup and host
+`git status --short` reconfirmed clean of anything beyond this round's
+own diff.

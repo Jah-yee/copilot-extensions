@@ -11,11 +11,11 @@ the container keeps Docker's default bridge with full outbound reach (a
 known, named, open design gap; see the effort README's Phase 1 journal).
 
 This is a deliberately separate, opt-in wrapper -- it never replaces
-``run-plugin-tests.py`` for contributors who aren't using the devcontainer
-(the vast majority of local and CI runs), and it never mounts the host
-checkout into the container. Everything the container's test run sees is a
-point-in-time COPY (see ``_write_tar_of_repo`` below): the host checkout is
-only ever read from, never written to, by anything this script spawns.
+``run-plugin-tests.py`` for contributors who aren't using the devcontainer,
+and it never mounts the host checkout into the container. Everything the
+container's test run sees is a point-in-time COPY (see
+``_write_tar_of_repo`` below): the host checkout is only ever read from,
+never written to, by anything this script spawns.
 
 Usage::
 
@@ -24,10 +24,9 @@ Usage::
     python tools/run_tests_in_devcontainer.py --all -- -k some_filter
 
 Everything after the recognized flags below (or a literal ``--`` anywhere in
-the remaining arguments) is passed through to ``tools/run-plugin-tests.py``
-inside the container, so this wrapper's own CLI surface stays intentionally
-small -- with one normalization: ``--base`` is rewritten to its resolved
-commit SHA (see `_rewrite_base_to_resolved_sha`).
+the remaining arguments) passes through to ``tools/run-plugin-tests.py``
+inside the container, with one normalization: ``--base`` is rewritten to
+its resolved commit SHA (see `_rewrite_base_to_resolved_sha`).
 """
 
 from __future__ import annotations
@@ -118,15 +117,22 @@ _REPOSITORY_CONTEXT_ENV = frozenset({
 def _scrubbed_git_env() -> dict[str, str]:
     """Ambient environment with every repository-selection variable
     removed (including the config-selector trio `GIT_CONFIG_GLOBAL`/
-    `GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`, which select/disable
-    config independent of `-C`) -- every git subprocess below supplies
-    its target repository explicitly via `-C`; any inherited variable
-    would silently override that. Also forces `GIT_OPTIONAL_LOCKS=0`
-    (even a read-only `git status` against the REAL host checkout can
-    otherwise refresh/rewrite the index) and unconditionally
-    `GIT_NO_LAZY_FETCH=1`/`GIT_NO_REPLACE_OBJECTS=1` (a partial clone
-    could lazily fetch objects INTO the host repo, or a local replacement
-    ref could substitute different history into the bundle) -- all mirror
+    `GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`) -- every git subprocess
+    below supplies its target repository explicitly via `-C`; any
+    inherited variable would silently override that. Also forces
+    `GIT_OPTIONAL_LOCKS=0` (a read-only `git status` can otherwise
+    refresh/rewrite the index), unconditionally `GIT_NO_LAZY_FETCH=1`/
+    `GIT_NO_REPLACE_OBJECTS=1` (a partial clone could lazily fetch
+    objects INTO the host repo, or a local replacement ref could
+    substitute history into the bundle), and unconditionally disables
+    global/system config (`GIT_CONFIG_GLOBAL=os.devnull`,
+    `GIT_CONFIG_NOSYSTEM=1`) plus forces `core.fsmonitor=false` via the
+    `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+    env-override -- without the latter, a configured `core.fsmonitor`
+    hook (global, system, or the repo's own local config, none of which
+    `-C`/`GIT_DIR` scrubbing touches) would still execute as part of an
+    ostensibly read-only probe against the REAL host checkout, running
+    arbitrary host code. All mirror
     `tools/agent_bridge_contract_git.py`'s own hardened environment."""
     env = os.environ.copy()
     for name in list(env):
@@ -141,6 +147,11 @@ def _scrubbed_git_env() -> dict[str, str]:
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_NO_LAZY_FETCH"] = "1"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
+    env["GIT_CONFIG_VALUE_0"] = "false"
     return env
 
 
@@ -275,12 +286,9 @@ def _warn_about_dirty_tracked_files() -> None:
     with an uncommitted modification -- the tracked-files-only boundary
     (see ``_tracked_paths``) is about which PATHS are copied, not which
     BYTES; a secret pasted into an otherwise-tracked file and never
-    committed is still copied in (the actual content copied is the file's
-    current on-disk state). A clean CI checkout never hits this; a dirty
-    local checkout might -- this surfaces it at the moment it's relevant.
-
-    Fails CLOSED (raises) if ``git status`` itself cannot be run: an
-    unknown dirty state must never be silently treated as "clean"."""
+    committed is still copied in. Fails CLOSED (raises) if ``git status``
+    itself cannot be run: an unknown dirty state must never be silently
+    treated as "clean"."""
     res = subprocess.run(
         ["git", "-C", str(REPO), "status", "--porcelain=v1", "--untracked-files=no"],
         capture_output=True, timeout=30, env=_scrubbed_git_env(),
@@ -311,21 +319,15 @@ def _warn_about_dirty_tracked_files() -> None:
 def _warn_about_hidden_tracked_file_flags() -> None:
     """Print a clear, explicit stderr warning naming every tracked file
     whose index entry carries ``assume-unchanged`` or ``skip-worktree``.
-
     ``git status`` (and therefore ``_warn_about_dirty_tracked_files``) is
     NOT a fail-closed dirty-content check for these paths: both flags
     instruct git to SUPPRESS reporting an on-disk difference for that
     path, while ``_tracked_paths``/``_write_tar_of_repo`` still archive its
-    actual current bytes regardless -- so a locally customized tracked
-    file (a config override, for instance) carrying either flag could
-    enter the network-enabled container with no warning at all. ``git
-    ls-files -v`` marks a flagged entry with a lowercase letter
-    (assume-unchanged) or an uppercase ``S`` (skip-worktree); an ordinary,
-    unflagged entry is uppercase (``H`` for a normal cached entry).
+    actual current bytes regardless. ``git ls-files -v`` marks a flagged
+    entry with a lowercase letter (assume-unchanged) or an uppercase ``S``
+    (skip-worktree); an ordinary entry is uppercase (``H``).
 
-    Fails CLOSED (raises) if ``git ls-files -v`` itself cannot be run, for
-    the same reason ``_warn_about_dirty_tracked_files`` does: an unknown
-    state must never be silently treated as safe."""
+    Fails CLOSED (raises) if ``git ls-files -v`` itself cannot be run."""
     res = subprocess.run(
         ["git", "-C", str(REPO), "ls-files", "-v", "--cached"],
         capture_output=True, timeout=60, env=_scrubbed_git_env(),

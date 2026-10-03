@@ -408,6 +408,19 @@ def test_route_driven_by_surfaces(client: TestClient) -> None:
     assert client.get("/api/v1/live-sessions/cli-o").json()["driven_by"] is None
 
 
+def test_another_process_on_an_expired_row_gets_the_refusal_the_extension_reads(
+    client: TestClient, tmp_db: Database,
+) -> None:
+    """A crashed process's expired row: a resumed process (other pid) is
+    refused with ``detail.reason == "incarnation_mismatch"``, which the
+    extension reads to keep serving under the id it already registered."""
+    assert client.post("/api/v1/live-sessions", json={"session_id": "resumed", "pid": 11}).status_code == 200
+    tmp_db.execute_write("UPDATE live_sessions SET status='expired' WHERE session_id='resumed'")
+    r = client.post("/api/v1/live-sessions", json={"session_id": "resumed", "pid": 22})
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "incarnation_mismatch"
+
+
 def test_route_register_is_heartbeat_upsert(client: TestClient) -> None:
     first = client.post(
         "/api/v1/live-sessions", json={"session_id": "s", "machine": "a"}

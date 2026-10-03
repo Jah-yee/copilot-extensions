@@ -174,7 +174,23 @@ async function bridgeGetJson(path) {
 
 const register = serializedRegister(
   state,
-  (id) => bridgeFetch("POST", "/api/v1/live-sessions", { session_id: id, ...(state.meta || {}) }),
+  async (id) => {
+    if (!state.base || !state.token) return false;
+    try {
+      const res = await fetchBridge("POST", "/api/v1/live-sessions", { session_id: id, ...(state.meta || {}) });
+      if (res.ok) return true;
+      if (res.status === 409) {
+        const body = await res.json().catch(() => null);
+        if (body?.detail?.reason === "incarnation_mismatch") {
+          extLog(`bridge refused ${id} for this process (another incarnation's row); keeping the registered id`);
+          return "rejected";
+        }
+      }
+      return false;
+    } catch {
+      return false; // bridge down/unreachable -> the next heartbeat retries
+    }
+  },
   (id) => extLog(`registered live session ${id} with local bridge`),
 );
 

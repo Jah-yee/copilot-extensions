@@ -15,6 +15,7 @@ import {
   modeApplied,
   adoptSessionId,
   serializedRegister,
+  REJECTED_RETRY_MS,
 } from "../extensions/agent-bridge/delivery.mjs";
 
 test("a same-process resume switches registration to the resumed id", () => {
@@ -34,6 +35,27 @@ function deferredPoster() {
   return { calls, post };
 }
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test("a resumed id refused for a crashed predecessor's row keeps the placeholder serving", async () => {
+  // The resumed conversation's id still has the crashed process's expired row:
+  // the bridge refuses this process for it (incarnation mismatch).
+  let clock = 1_000;
+  const state = { sessionId: "placeholder", registered: false };
+  const posts = [];
+  const post = async (id) => { posts.push(id); return id === "resumed" ? "rejected" : true; };
+  const register = serializedRegister(state, post, () => {}, { now: () => clock });
+  await register();
+  assert.equal(adoptSessionId(state, "resumed", clock), true);
+  await register();
+  assert.deepEqual(posts, ["placeholder", "resumed", "placeholder"]);
+  assert.deepEqual([state.sessionId, state.registered], ["placeholder", true]);  // inbox/flush go on
+  assert.equal(adoptSessionId(state, "resumed", clock + 1), false);  // not re-tried on every event
+  await register();  // a heartbeat refreshes the placeholder
+  assert.equal(posts.at(-1), "placeholder");
+  clock += REJECTED_RETRY_MS;
+  assert.equal(adoptSessionId(state, "resumed", clock), true);  // retried later (the row may be purged)
+  assert.deepEqual(await register.close(), ["placeholder"]);
+});
 
 test("shutdown drains a pending registration and returns every id to deregister", async () => {
   const state = { sessionId: "placeholder", registered: false };

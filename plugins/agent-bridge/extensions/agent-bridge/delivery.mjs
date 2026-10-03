@@ -169,8 +169,14 @@ export function modeApplied(result) {
 // still live is what lets the bridge fold the placeholder into it (its claim,
 // handle and queued messages), so a change is adopted, never ignored. Returns
 // true when the caller must register the (new) id.
-export function adoptSessionId(state, eventSessionId) {
+export const REJECTED_RETRY_MS = 5 * 60 * 1000;
+
+export function adoptSessionId(state, eventSessionId, now = Date.now()) {
   if (!eventSessionId || eventSessionId === state.sessionId) return false;
+  // An id the bridge refused for this process (see serializedRegister) is
+  // tried again only after a while, not on every event.
+  const retryAt = state.rejectedIds && state.rejectedIds.get(eventSessionId);
+  if (retryAt !== undefined && now < retryAt) return false;
   state.sessionId = eventSessionId;
   state.registered = false;
   return true;
@@ -184,17 +190,37 @@ export function adoptSessionId(state, eventSessionId) {
 // admitting registrations, drains the one in flight, and resolves to every id
 // this process registered (newest first) -- what shutdown must deregister: a
 // DELETE sent before a pending registration lands would leave it behind.
-export function serializedRegister(state, post, onRegistered = () => {}) {
+//
+// ``post(id)`` resolves to true (registered), "rejected" (the bridge refused
+// this process for that id: its row belongs to another incarnation, e.g. a
+// crashed predecessor's expired row awaiting purge) or false (unreachable,
+// retried by the next heartbeat). On a rejection after a rename, the process
+// keeps serving under the id it did register -- inbox, controls and events
+// go on -- and the refused id is retried after REJECTED_RETRY_MS.
+export function serializedRegister(state, post, onRegistered = () => {}, { now = Date.now } = {}) {
   let chain = Promise.resolve();
   let closed = false;
+  let lastOk = null;
   const posted = [];
   const once = async () => {
     for (;;) {
       const id = state.sessionId;
       if (!id || closed) return false;
-      const ok = await post(id);
-      if (ok && !posted.includes(id)) posted.push(id);
+      const result = await post(id);
+      const ok = result === true;
+      if (ok) {
+        lastOk = id;
+        if (!posted.includes(id)) posted.push(id);
+      }
       if (state.sessionId !== id) continue; // renamed meanwhile
+      if (result === "rejected") {
+        (state.rejectedIds ||= new Map()).set(id, now() + REJECTED_RETRY_MS);
+        if (lastOk && lastOk !== id) {
+          state.sessionId = lastOk; // keep a usable handle; refresh it, then ready
+          continue;
+        }
+        return false;
+      }
       if (ok && !state.registered) {
         state.registered = true;
         onRegistered(id);

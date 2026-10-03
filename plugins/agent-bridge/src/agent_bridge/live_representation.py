@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 import time
 from collections import deque
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 
 from .events import EventLog, SseEvent
@@ -451,12 +451,36 @@ class LiveEventStore:
         # can skip an SDK event both registrations already logged.
         self._sdk_events: dict[str, dict[str, list[int]]] = {}
         self._merged_history: dict[str, tuple[str, dict[int, int]]] = {}
+        # Merges still copying events into a surviving log (keyed by its id()):
+        # until each is done, that log's merge map is incomplete (``snapshot``).
+        self._merging: dict[int, list[Event]] = {}
         self._lock = Lock()
 
     def get(self, session_id: str) -> EventLog | None:
         """Return the represented log for ``session_id``, or None if none yet."""
         with self._lock:
             return self._logs.get(session_id)
+
+    def snapshot(
+        self, session_id: str, *, timeout: float = 5.0
+    ) -> tuple[EventLog | None, dict[str, tuple[str, dict[int, int]]]]:
+        """``session_id``'s log together with the merge history that matches it.
+
+        ``alias`` serves a merged-away id from the surviving log before it has
+        copied that id's events and recorded its id map; a reader that took the
+        log then would find no map for a valid reference. So this waits (up to
+        ``timeout``; a blocking call, for the sync routes) for merges into that
+        log to finish, then reads both under one lock."""
+        with self._lock:
+            log = self._logs.get(session_id)
+            pending = list(self._merging.get(id(log), ())) if log is not None else []
+            if not pending:
+                return log, dict(self._merged_history)
+        deadline = time.monotonic() + timeout
+        for done in pending:
+            done.wait(max(0.0, deadline - time.monotonic()))
+        with self._lock:
+            return self._logs.get(session_id), dict(self._merged_history)
 
     def get_or_create(
         self, session_id: str, *, worktree_id: str | None = None
@@ -517,31 +541,52 @@ class LiveEventStore:
                 self._seen_ids[key] = seen
                 self._seen_order[key] = order
                 self._sdk_events[key] = old_sdk
-        if merged is not None:
-            prior = merged.continuity_id
-            # Cursor 0 on the successor means "after everything it had", which is
-            # the predecessor's tail at merge time -- not the predecessor's start.
-            ids = {0: old.latest_id}
-            for evt in merged.get_events(0):
-                sdk, i = successor_sdk.get(evt.id, (None, 0))
+            done = Event()
+            if merged is not None:
+                self._merging.setdefault(id(old), []).append(done)
+        if merged is None:
+            return
+        try:
+            self._copy_merged(old, merged, old_sdk, successor_sdk)
+        finally:
+            with self._lock:
+                waiting = self._merging.get(id(old), [])
+                if done in waiting:
+                    waiting.remove(done)
+                if not waiting:
+                    self._merging.pop(id(old), None)
+            done.set()
+
+    def _copy_merged(
+        self, old: EventLog, merged: EventLog, old_sdk: dict[str, list[int]],
+        successor_sdk: dict[int, tuple[str, int]],
+    ) -> None:
+        """Append ``merged``'s events to ``old`` and record the id map; ``alias``
+        has already pointed every key at ``old``."""
+        prior = merged.continuity_id
+        # Cursor 0 on the successor means "after everything it had", which is
+        # the predecessor's tail at merge time -- not the predecessor's start.
+        ids = {0: old.latest_id}
+        for evt in merged.get_events(0):
+            sdk, i = successor_sdk.get(evt.id, (None, 0))
+            with self._lock:
+                retained = list(old_sdk.get(sdk) or ()) if sdk else []
+            if retained:
+                # Both registrations logged this SDK event before the rename:
+                # keep the predecessor's copy. ``ids`` stays exact (a detail
+                # reference names the very event); cursors read it through
+                # ``merged_cursor``, which never moves back.
+                ids[evt.id] = retained[min(i, len(retained) - 1)]
+                continue
+            appended = ids[evt.id] = old.append(evt.event, evt.data, timestamp=evt.timestamp).id
+            if sdk:
                 with self._lock:
-                    retained = list(old_sdk.get(sdk) or ()) if sdk else []
-                if retained:
-                    # Both registrations logged this SDK event before the rename:
-                    # keep the predecessor's copy. ``ids`` stays exact (a detail
-                    # reference names the very event); cursors read it through
-                    # ``merged_cursor``, which never moves back.
-                    ids[evt.id] = retained[min(i, len(retained) - 1)]
-                    continue
-                appended = ids[evt.id] = old.append(evt.event, evt.data, timestamp=evt.timestamp).id
-                if sdk:
-                    with self._lock:
-                        old_sdk.setdefault(sdk, []).append(appended)
-            merged.merged_into = (old, ids)
-            if prior and old.continuity_id:
-                with self._lock:
-                    self._merged_history[prior] = (old.continuity_id, ids)
-            merged.wake_waiters()
+                    old_sdk.setdefault(sdk, []).append(appended)
+        merged.merged_into = (old, ids)
+        if prior and old.continuity_id:
+            with self._lock:
+                self._merged_history[prior] = (old.continuity_id, ids)
+        merged.wake_waiters()
 
     def merged_history(self) -> dict[str, tuple[str, dict[int, int]]]:
         """Continuity of each log merged away -> (merged continuity, id map), so

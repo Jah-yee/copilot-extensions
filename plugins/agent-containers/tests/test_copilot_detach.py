@@ -367,7 +367,7 @@ def test_unsubmitted_seed_on_registered_session_is_delivered_over_bridge(seams, 
 
     unseeded = json.dumps({"ok": True, "created": True, "seed_submitted": False})
     sent = []
-    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note: sent.append((sid, note)) or True)
+    monkeypatch.setattr(venue_refs, "deliver_note", lambda sid, note, **kw: sent.append((sid, note)) or True)
 
     def fake_run(argv, **kwargs):
         cmd = argv[-1]

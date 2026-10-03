@@ -678,6 +678,48 @@ def test_merge_mappings_outlive_an_alias_but_not_the_last_key() -> None:
     assert store.merged_history() == {}
 
 
+def test_a_snapshot_waits_for_a_merge_still_copying_events() -> None:
+    """``alias`` serves the merged-away id from the surviving log before its
+    events and id map are ready; a result read must not take the log then and
+    find no map (a 409 for a valid reference), so ``snapshot`` waits for it."""
+    import threading
+    import time
+
+    from agent_bridge.live_representation import LiveEventStore
+
+    store = LiveEventStore()
+    survivor = store.get_or_create("placeholder")
+    survivor.append("agent_message", {"text": "a"})
+    resumed = store.get_or_create("resumed")
+    resumed.append("agent_message", {"text": "b"})
+    prior = resumed.continuity_id
+    copying, release = threading.Event(), threading.Event()
+    read_events = resumed.get_events
+
+    def slow_copy(after):
+        copying.set()
+        release.wait(5)
+        return read_events(after)
+
+    resumed.get_events = slow_copy
+    merge = threading.Thread(target=store.alias, args=("placeholder", "resumed"))
+    merge.start()
+    assert copying.wait(5)
+    assert store.get("resumed") is survivor  # already served from the survivor...
+    assert prior not in store.merged_history()  # ...without its id map yet
+    got: list = []
+    reader = threading.Thread(target=lambda: got.append(store.snapshot("resumed")))
+    reader.start()
+    time.sleep(0.2)
+    assert not got  # waiting for the merge
+    release.set()
+    merge.join(5)
+    reader.join(5)
+    log, history = got[0]
+    assert log is survivor and prior in history
+    assert store.snapshot("resumed", timeout=0)[1] == history  # nothing pending now
+
+
 def test_dropping_the_last_key_clears_every_transitive_merge_mapping() -> None:
     """C -> B -> A: once nothing serves A, both C's and B's mappings go, while
     an unrelated merge's history stays."""

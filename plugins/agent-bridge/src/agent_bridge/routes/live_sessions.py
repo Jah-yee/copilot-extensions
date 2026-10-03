@@ -426,8 +426,8 @@ def get_live_result_snapshot(
     row = _resolve_registration(db, session_ref)
     if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
-    position = retarget(position, _store(request).merged_history())
-    log = _store(request).get(row["session_id"])
+    log, history = _store(request).snapshot(row["session_id"])
+    position = retarget(position, history)
     if log is None:
         log = EventLog(
             session_id=row["session_id"],
@@ -459,13 +459,15 @@ def get_live_result_detail(
     row = _resolve_registration(db, session_ref)
     if row is None:
         raise HTTPException(status_code=404, detail="live session not found")
-    log = _store(request).get(row["session_id"])
+    # The log and its merge map from one snapshot: a merge still copying
+    # events would otherwise leave a valid reference with no map (409).
+    log, history = _store(request).snapshot(row["session_id"])
     if log is None:
         raise HTTPException(
             status_code=404,
             detail="represented event history is no longer available",
         )
-    ref = retarget(ref, _store(request).merged_history()) or ref
+    ref = retarget(ref, history) or ref
     try:
         return expand_represented_result_ref(
             event_log=log,

@@ -181,6 +181,9 @@ export class SessionViewer {
         const r = await this.request(
           `/api/v1/live-sessions/${encodeURIComponent(w.id)}/events?after=${this.model.lastId}${cont}`,
           { headers: { Accept: "text/event-stream" }, signal: w.ctrl.signal });
+        // open() may have switched sessions while this request was in flight:
+        // its cursor and continuity belong to the old session's model.
+        if (this.watch !== w) return;
         if (!r.ok) throw new Error("events " + r.status);
         // lastId is numbered on this log; a reconnect names it so the bridge can
         // translate the cursor if a session-id change merges the log meanwhile.
@@ -198,7 +201,7 @@ export class SessionViewer {
         let buf = "";
         for (;;) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done || this.watch !== w) break;
           buf += dec.decode(value, { stream: true }).replace(/\r\n/g, "\n");
           let i;
           while ((i = buf.indexOf("\n\n")) >= 0) {

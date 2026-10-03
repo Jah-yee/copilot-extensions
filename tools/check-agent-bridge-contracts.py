@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import json
 import os
 import re
@@ -22,6 +21,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _blob_provenance as blob_provenance  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 CONTRACT_DIR = REPO / "plugins" / "agent-bridge" / "contract"
@@ -109,13 +111,7 @@ def _load_json(path: Path, errors: list[str], label: str) -> Any | None:
 
 
 def _sha256_bytes(data: bytes) -> str:
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        canonical = data
-    else:
-        canonical = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return blob_provenance._sha256_bytes(data)
 
 
 def _sha256(path: Path) -> str:
@@ -187,26 +183,51 @@ def _ensure_commit_available(commit: str) -> bool:
     return False
 
 
-def _git_blob(commit: str, path: str) -> str | None:
-    if not _ensure_commit_available(commit):
-        return None
-    result = _git("rev-parse", "--verify", f"{commit}:{path}")
-    value = result.stdout.strip()
-    return value if result.returncode == 0 and _GIT_OBJECT_RE.fullmatch(value) else None
+_PATH_HISTORY: blob_provenance.PathHistory | None = None
 
 
-def _git_file_sha256(commit: str, path: str) -> str | None:
-    if not _ensure_commit_available(commit):
-        return None
-    result = subprocess.run(
-        ["git", "-C", str(REPO), "show", f"{commit}:{path}"],
-        capture_output=True,
-        check=False,
-        env=_clean_git_environment(),
+def _path_history() -> blob_provenance.PathHistory:
+    global _PATH_HISTORY
+    if _PATH_HISTORY is None:
+        _PATH_HISTORY = blob_provenance.PathHistory(REPO, _clean_git_environment())
+    return _PATH_HISTORY
+
+def _blob_exists(blob: str) -> bool:
+    return blob_provenance.blob_exists(REPO, _clean_git_environment(), blob)
+
+def _blob_sha256(blob: str) -> str | None:
+    return blob_provenance.blob_sha256(REPO, _clean_git_environment(), blob)
+
+def _verify_source_blob(
+    commit: str, path: str, blob: str, label: str, *, commit_available: bool
+) -> str | None:
+    return blob_provenance.verify_source_blob(
+        REPO, _clean_git_environment(), _path_history(),
+        commit=commit, commit_available=commit_available,
+        path=path, blob=blob, label=label,
     )
-    if result.returncode != 0:
-        return None
-    return _sha256_bytes(result.stdout)
+
+def _validate_fixture_blob(
+    label: str, captured: dict[str, Any], blob: str, source_path: Any, sha256: Any
+) -> list[str]:
+    """Blob existence, exact-commit/history provenance, and sha256 match for
+    a fixture's captured_from -- hydrates the commit first (shares the
+    provenance path's shallow-checkout recovery) before declaring missing."""
+    commit = captured.get("commit")
+    commit = commit if isinstance(commit, str) else ""
+    commit_available = bool(commit) and _ensure_commit_available(commit)
+    if not _blob_exists(blob):
+        return [f"{label}: captured_from.source_git_blob {blob} does not exist as a git blob object"]
+    error = (
+        _verify_source_blob(commit, source_path, blob, label, commit_available=commit_available)
+        if isinstance(source_path, str) else None
+    )
+    if error is not None:
+        return [error]
+    historical_sha256 = _blob_sha256(blob)
+    if historical_sha256 != sha256:
+        return [f"{label}: source_sha256 is {sha256}, historical source is {historical_sha256!r}"]
+    return []
 
 
 def _plugin_version_at(commit: str) -> str | None:
@@ -223,27 +244,9 @@ def _plugin_version_at(commit: str) -> str | None:
     return version if isinstance(version, str) else None
 
 
-def _integer_constant_at(commit: str, path: str, name: str) -> int | None:
-    if not _ensure_commit_available(commit):
-        return None
-    result = _git("show", f"{commit}:{path}")
-    if result.returncode != 0:
-        return None
-    try:
-        tree = ast.parse(result.stdout, filename=f"{commit}:{path}")
-    except SyntaxError:
-        return None
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == name
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, int)
-        ):
-            return node.value.value
-    return None
+def _integer_constant_in_blob(blob: str, name: str) -> int | None:
+    return blob_provenance.integer_constant_in_blob(REPO, _clean_git_environment(), blob, name)
+
 
 
 def _integer_constants(path: Path, errors: list[str], label: str) -> dict[str, int]:
@@ -603,55 +606,52 @@ def _validate_contract(
                     f"{prov_label}.source_path: not registered in source_paths: "
                     f"{source_path}"
                 )
+            commit_available = _ensure_commit_available(commit)
             if not isinstance(blob, str) or not _GIT_OBJECT_RE.fullmatch(blob):
                 errors.append(f"{prov_label}.source_git_blob: must be a full lowercase Git blob")
-            else:
-                actual_blob = _git_blob(commit, source_path)
-                if actual_blob is None:
-                    errors.append(
-                        f"{prov_label}: cannot resolve {commit}:{source_path}"
-                    )
-                elif actual_blob != blob:
-                    errors.append(
-                        f"{prov_label}: source_git_blob is {blob}, actual {actual_blob}"
-                    )
-            actual_version = _plugin_version_at(commit)
-            if actual_version is None:
-                errors.append(f"{prov_label}: cannot resolve agent-bridge version at {commit}")
-            elif actual_version != version:
+            elif not _blob_exists(blob):
                 errors.append(
-                    f"{prov_label}: plugin_version is {version}, actual {actual_version}"
+                    f"{prov_label}: source_git_blob {blob} does not exist as a "
+                    "git blob object (bogus hash, or pruned from the object store)"
                 )
+            elif isinstance(source_path, str):
+                error = _verify_source_blob(
+                    commit, source_path, blob, prov_label, commit_available=commit_available
+                )
+                if error is not None:
+                    errors.append(error)
+            # plugin_version is narrative; unverified only when unavailable.
+            if commit_available:
+                actual_version = _plugin_version_at(commit)
+                if actual_version is None:
+                    errors.append(
+                        f"{prov_label}: commit {commit} is available but its "
+                        "plugin.json is missing or unparseable"
+                    )
+                elif actual_version != version:
+                    errors.append(
+                        f"{prov_label}: plugin_version is {version}, actual {actual_version}"
+                    )
             method = provenance["capture_method"]
             if not isinstance(method, str) or not method.strip():
                 errors.append(f"{prov_label}.capture_method: must be non-empty")
             if isinstance(version, str):
-                provenance_keys.add(
-                    (commit, version, generation, source_path, blob)
-                )
+                provenance_keys.add((commit, version, generation, source_path, blob))
                 runtime_generation_keys.add((version, generation))
-            if contract_id == "agent-bridge.http-wire" and source_path.endswith(
-                "/agent_bridge/protocol.py"
-            ):
-                historical_generation = _integer_constant_at(
-                    commit, source_path, "HTTP_PROTOCOL_VERSION"
-                )
+            blob_ok = isinstance(blob, str) and _GIT_OBJECT_RE.fullmatch(blob) and _blob_exists(blob)
+            constant_name = None
+            if blob_ok and contract_id == "agent-bridge.http-wire":
+                if source_path.endswith("/agent_bridge/protocol.py"):
+                    constant_name = "HTTP_PROTOCOL_VERSION"
+            elif blob_ok and contract_id == "agent-bridge.session-host-wire":
+                if source_path.endswith("/session_host/protocol.py"):
+                    constant_name = "PROTOCOL_VERSION"
+            if constant_name is not None:
+                historical_generation = _integer_constant_in_blob(blob, constant_name)
                 if historical_generation != generation:
                     errors.append(
                         f"{prov_label}: generation {generation} does not match "
-                        f"historical HTTP_PROTOCOL_VERSION={historical_generation!r}"
-                    )
-            if (
-                contract_id == "agent-bridge.session-host-wire"
-                and source_path.endswith("/session_host/protocol.py")
-            ):
-                historical_generation = _integer_constant_at(
-                    commit, source_path, "PROTOCOL_VERSION"
-                )
-                if historical_generation != generation:
-                    errors.append(
-                        f"{prov_label}: generation {generation} does not match "
-                        f"historical PROTOCOL_VERSION={historical_generation!r}"
+                        f"historical {constant_name}={historical_generation!r}"
                     )
 
     fixture_count = 0
@@ -711,18 +711,17 @@ def _validate_contract(
                             f"{fixture_label}: captured_from.source_sha256 must "
                             "be 64 lowercase hexadecimal characters"
                         )
-                    elif isinstance(captured.get("commit"), str) and isinstance(
-                        captured_source, str
+                    elif not isinstance(captured_blob, str) or not _GIT_OBJECT_RE.fullmatch(
+                        captured_blob
                     ):
-                        historical_sha256 = _git_file_sha256(
-                            captured["commit"], captured_source
+                        errors.append(
+                            f"{fixture_label}: captured_from.source_git_blob must "
+                            "be a full lowercase Git blob"
                         )
-                        if historical_sha256 != captured_sha256:
-                            errors.append(
-                                f"{fixture_label}: source_sha256 is "
-                                f"{captured_sha256}, historical source is "
-                                f"{historical_sha256!r}"
-                            )
+                    else:
+                        errors.extend(_validate_fixture_blob(
+                            fixture_label, captured, captured_blob, captured_source, captured_sha256
+                        ))
                     if not isinstance(captured_source, str) or captured_source not in source_records:
                         errors.append(
                             f"{fixture_label}: captured source is not registered "

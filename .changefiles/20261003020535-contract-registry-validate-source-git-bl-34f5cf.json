@@ -1,0 +1,9 @@
+{
+  "comment": "contract registry: validate source_git_blob content-addressed (not commit:path), fixing the recurring squash-merge-orphans-provenance-SHA bug (#2230 class, #5050/#5054); re-points 4 provenance entries whose blob never landed on dev",
+  "changes": [
+    {
+      "plugin": "agent-bridge",
+      "type": "patch"
+    }
+  ]
+}

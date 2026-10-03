@@ -13,6 +13,7 @@ from typing import Any, Callable
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent / "check-agent-bridge-contracts.py"
+BLOB_PROVENANCE_MODULE = Path(__file__).resolve().parent / "_blob_provenance.py"
 SCHEMA = (
     Path(__file__).resolve().parents[1]
     / "plugins"
@@ -199,6 +200,9 @@ def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "tools").mkdir(parents=True)
     (root / "tools" / SCRIPT.name).write_bytes(SCRIPT.read_bytes())
+    (root / "tools" / BLOB_PROVENANCE_MODULE.name).write_bytes(
+        BLOB_PROVENANCE_MODULE.read_bytes()
+    )
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "test@example.com")
     _git(root, "config", "user.name", "Test")
@@ -291,6 +295,31 @@ def _mutate_registry(
     data = json.loads(path.read_text(encoding="utf-8"))
     mutation(data)
     _write(repo, "plugins/agent-bridge/contract/registry.json", data)
+
+
+def _mutate_fixture(
+    repo: Path,
+    relative: str,
+    mutation: Callable[[dict[str, Any]], None],
+) -> None:
+    path = repo / relative
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mutation(data)
+    _write(repo, relative, data)
+    # The fixture file's own bytes just changed -- keep registry.json's
+    # fixtures[].sha256 entry (a whole-file hash, separate from the
+    # captured_from.source_sha256 this helper's callers are usually after)
+    # in sync, or every call would also need to fix a stale-fixture-hash
+    # error unrelated to what it's actually testing.
+    new_hash = _sha256(repo, relative)
+
+    def resync(registry: dict[str, Any]) -> None:
+        for contract in registry["contracts"]:
+            for entry in contract.get("fixtures", []):
+                if entry.get("path") == relative:
+                    entry["sha256"] = new_hash
+
+    _mutate_registry(repo, resync)
 
 
 def test_valid_registry_passes(repo: Path) -> None:
@@ -510,3 +539,193 @@ def test_semantic_source_hash_cannot_advance_without_fixture(repo: Path) -> None
     assert result.returncode == 1
     assert "semantic current sources lack matching current fixtures" in result.stderr
     assert SOURCE in result.stderr
+
+
+def test_provenance_passes_with_an_orphan_commit_but_reachable_blob(
+    repo: Path,
+) -> None:
+    """A provenance entry's ``commit`` need not be resolvable at all, as
+    long as its ``source_git_blob`` still exists -- exactly the shape a
+    squash-merge-orphaned commit leaves behind once its content has
+    (identically) landed via some other, real commit. Also proves the
+    plugin_version cross-check correctly degrades to unverified (not a hard
+    error) when the commit itself can't be read at all."""
+    orphan_commit = "f" * 40
+
+    def mutation(data: dict[str, Any]) -> None:
+        http_contract = next(
+            c for c in data["contracts"] if c["id"] == "agent-bridge.http-wire"
+        )
+        # A commit SHA that was never created in this repo at all.
+        http_contract["provenance"][0]["commit"] = orphan_commit
+
+    _mutate_registry(repo, mutation)
+
+    def fixture_mutation(data: dict[str, Any]) -> None:
+        data["captured_from"]["commit"] = orphan_commit
+
+    _mutate_fixture(repo, FIXTURE, fixture_mutation)
+    result = _run(repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_provenance_rejects_a_non_blob_source_git_blob(repo: Path) -> None:
+    """A valid-looking SHA that resolves to a tree (or any non-blob object)
+    must fail closed, not be silently accepted as content-address proof."""
+    commit = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", f"{commit}^{{tree}}")
+
+    def mutation(data: dict[str, Any]) -> None:
+        http_contract = next(
+            c for c in data["contracts"] if c["id"] == "agent-bridge.http-wire"
+        )
+        http_contract["provenance"][0]["source_git_blob"] = tree
+
+    _mutate_registry(repo, mutation)
+    result = _run(repo)
+    assert result.returncode != 0
+    assert "does not exist as a git blob object" in result.stderr
+
+
+def test_provenance_rejects_a_reachable_commit_with_unreadable_plugin_manifest(
+    repo: Path,
+) -> None:
+    """A *reachable* commit whose ``plugin.json`` can't be read/parsed must
+    still be a hard error -- the commit is available, so there's no excuse
+    not to verify plugin_version; only a genuinely unreachable commit
+    degrades this check to unverified."""
+    (repo / "plugins/agent-bridge/plugin.json").write_text("not json", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "corrupt plugin manifest")
+    broken_commit = _git(repo, "rev-parse", "HEAD")
+
+    def mutation(data: dict[str, Any]) -> None:
+        http_contract = next(
+            c for c in data["contracts"] if c["id"] == "agent-bridge.http-wire"
+        )
+        # Same source content, now cited at a commit whose plugin.json is
+        # unreadable -- the blob itself is untouched by this second commit.
+        http_contract["provenance"][0]["commit"] = broken_commit
+
+    _mutate_registry(repo, mutation)
+
+    def fixture_mutation(data: dict[str, Any]) -> None:
+        data["captured_from"]["commit"] = broken_commit
+
+    _mutate_fixture(repo, FIXTURE, fixture_mutation)
+    result = _run(repo)
+    assert result.returncode != 0
+    assert "is available but its plugin.json is missing or unparseable" in result.stderr
+
+
+
+
+def test_provenance_rejects_an_available_commit_pointing_at_a_different_blob(
+    repo: Path,
+) -> None:
+    """When the commit IS available, the exact commit:source_path check
+    takes priority over the history-reachability fallback: a blob that is
+    reachable somewhere in history but doesn't actually match this specific
+    commit's tree must still be rejected, not waved through just because it
+    once existed somewhere."""
+    source = repo / SOURCE
+    source.write_text(
+        source.read_text(encoding="utf-8") + "# unrelated later edit\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "unrelated later source edit")
+    later_commit = _git(repo, "rev-parse", "HEAD")
+    original_blob = _git(repo, "rev-parse", f"HEAD~1:{SOURCE}")
+
+    def mutation(data: dict[str, Any]) -> None:
+        http_contract = next(
+            c for c in data["contracts"] if c["id"] == "agent-bridge.http-wire"
+        )
+        # Commit is available and genuinely touched this path -- but its
+        # tree now has different content than the still-reachable blob
+        # recorded here.
+        http_contract["provenance"][0]["commit"] = later_commit
+
+    _mutate_registry(repo, mutation)
+
+    def fixture_mutation(data: dict[str, Any]) -> None:
+        data["captured_from"]["commit"] = later_commit
+
+    _mutate_fixture(repo, FIXTURE, fixture_mutation)
+    result = _run(repo)
+    assert result.returncode != 0
+    assert f"source_git_blob is {original_blob}, actual" in result.stderr
+
+
+def test_blob_exists_benefits_from_commit_availability_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_ensure_commit_available``'s own fetch/unshallow recovery must run
+    -- and have a chance to pull in the needed objects -- before a blob is
+    ever declared missing. In a shallow checkout, an older blob can
+    genuinely be absent until that recovery runs; checking blob existence
+    first (before ensuring the commit is available) would record a
+    permanent error even though the commit path's own recovery would have
+    found it."""
+    checker = _load_checker()
+    commit = "b" * 40
+    blob = "c" * 40
+    state = {"recovered": False}
+
+    def fake_git(*args: str):
+        if args[:2] == ("cat-file", "-e") and args[2] == f"{commit}^{{commit}}":
+            return subprocess.CompletedProcess(args, 0 if state["recovered"] else 1, "", "")
+        if args == ("fetch", "--quiet", "origin", checker._MAIN_REFSPEC):
+            state["recovered"] = True
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args in {("fetch", "--quiet", "--unshallow", "origin")}:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    def fake_blob_exists(repo, env, b):
+        # The blob only becomes resolvable once the commit-availability
+        # recovery has actually run -- exactly the shallow-checkout shape
+        # this guards against.
+        return state["recovered"]
+
+    monkeypatch.setattr(checker, "_git", fake_git)
+    monkeypatch.setattr(checker.blob_provenance, "blob_exists", fake_blob_exists)
+    checker._FETCH_RECOVERY_ATTEMPTED = False
+
+    assert checker._ensure_commit_available(commit) is True
+    assert checker._blob_exists(blob) is True
+
+
+def test_fixture_source_sha256_normalizes_crlf_in_blob_content(repo: Path) -> None:
+    """The registry's documented fingerprint definition normalizes CRLF/CR
+    to LF before hashing (contract text is line-ending agnostic) -- a blob
+    containing CRLF must still agree with its normalized source_sha256,
+    not fail because the raw bytes differ from the canonicalized hash."""
+    source = repo / SOURCE
+    crlf_content = source.read_text(encoding="utf-8").replace("\n", "\r\n")
+    source.write_bytes(crlf_content.encode("utf-8"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "CRLF line endings")
+    crlf_commit = _git(repo, "rev-parse", "HEAD")
+    crlf_blob = _git(repo, "rev-parse", f"HEAD:{SOURCE}")
+    normalized_sha256 = _sha256(repo, SOURCE)
+
+    def mutation(data: dict[str, Any]) -> None:
+        http_contract = next(
+            c for c in data["contracts"] if c["id"] == "agent-bridge.http-wire"
+        )
+        http_contract["provenance"][0]["commit"] = crlf_commit
+        http_contract["provenance"][0]["source_git_blob"] = crlf_blob
+        http_contract["source_paths"][0]["sha256"] = normalized_sha256
+
+    _mutate_registry(repo, mutation)
+
+    def fixture_mutation(data: dict[str, Any]) -> None:
+        data["captured_from"]["commit"] = crlf_commit
+        data["captured_from"]["source_git_blob"] = crlf_blob
+        data["captured_from"]["source_sha256"] = normalized_sha256
+
+    _mutate_fixture(repo, FIXTURE, fixture_mutation)
+    result = _run(repo)
+    assert result.returncode == 0, result.stderr

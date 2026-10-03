@@ -482,20 +482,20 @@
           "capture_method": "Validate and serialize representative session-create request and response models; re-attested for the generation-16 bump (#6744) alongside the StartSessionRequest.reclaim removal already captured in this file's prior generation-15 entry."
         },
         {
-          "commit": "a65f6c5af501615ecf3b588f788cc84d8558f934",
+          "commit": "04d55a16c418f4e19f98eb860c77a4ebd95146e0",
           "plugin_version": "0.4.0-dev537",
           "generation": 16,
           "source_path": "plugins/agent-bridge/src/agent_bridge/routes/sessions.py",
-          "source_git_blob": "ec555b7e3f762ff7b0c83b346d46785b140cbd9a",
-          "capture_method": "Re-attested after adding a bare (non-worktree-scoped) session transcript route (a downstream consumer's session-worktree-archive-linkout Phase 2d follow-up) and trimming pre-existing docstrings/comments for the module-size ceiling; the 503-initializing error response this fixture attests is unchanged."
+          "source_git_blob": "8faf41807a6348cc08d425d6fa75d007103e7c9f",
+          "capture_method": "Invoke the pre-resolution initialization refusal and preserve its FastAPI error response; the exact pre-squash intermediate snapshot this entry originally captured became permanently unreachable after a squash-merge (recurrence of #2230) -- re-pointed to the real, reachable landing commit for this generation's work, whose sessions.py content is confirmed identical to the already-attested generation 17/18 entries (this behavior was never actually changed across these generations, only re-attested)."
         },
         {
-          "commit": "b25684c9ad7dfaa9b2a013db481acd7f76f615ab",
+          "commit": "04d55a16c418f4e19f98eb860c77a4ebd95146e0",
           "plugin_version": "0.4.0-dev537",
           "generation": 17,
           "source_path": "plugins/agent-bridge/src/agent_bridge/protocol.py",
-          "source_git_blob": "37099b9eb82b021464b50c036025339ffb8d3ab9",
-          "capture_method": "Read production constants from this exact source revision -- HTTP_PROTOCOL_VERSION bumped to 17 for the new bare session transcript route (a downstream consumer's session-worktree-archive-linkout Phase 2d follow-up); BARE_SESSION_TRANSCRIPT_PROTOCOL_VERSION added."
+          "source_git_blob": "207a4942572bd3c01dba1f3b3b2c6316165f41da",
+          "capture_method": "Read production constants from this exact source revision -- HTTP_PROTOCOL_VERSION bumped to 17 for the new bare session transcript route (a downstream consumer's session-worktree-archive-linkout Phase 2d follow-up); BARE_SESSION_TRANSCRIPT_PROTOCOL_VERSION added. The exact pre-squash intermediate snapshot this entry originally captured became permanently unreachable after a squash-merge (recurrence of #2230) -- re-pointed to the real, reachable landing commit for this exact bump."
         },
         {
           "commit": "b25684c9ad7dfaa9b2a013db481acd7f76f615ab",
@@ -514,12 +514,12 @@
           "capture_method": "Re-attested for the generation-17 bump alongside the bare session transcript route addition, which does not touch this code path."
         },
         {
-          "commit": "b25684c9ad7dfaa9b2a013db481acd7f76f615ab",
+          "commit": "04d55a16c418f4e19f98eb860c77a4ebd95146e0",
           "plugin_version": "0.4.0-dev537",
           "generation": 17,
           "source_path": "plugins/agent-bridge/src/agent_bridge/routes/sessions.py",
-          "source_git_blob": "dd7d3363088d067c26cb77e0e942431f6a9b3068",
-          "capture_method": "Re-attested for the generation-17 bump: adds GET /api/v1/sessions/{id}/transcript (the new bare session transcript route, review-requested read_only/at_rest preservation included); the pre-resolution initialization refusal this fixture attests is unchanged."
+          "source_git_blob": "8faf41807a6348cc08d425d6fa75d007103e7c9f",
+          "capture_method": "Re-attested for the generation-17 bump: adds GET /api/v1/sessions/{id}/transcript (the new bare session transcript route, review-requested read_only/at_rest preservation included); the pre-resolution initialization refusal this fixture attests is unchanged. The exact pre-squash intermediate snapshot this entry originally captured became permanently unreachable after a squash-merge (recurrence of #2230) -- re-pointed to the real, reachable landing commit, confirmed content-identical to the already-attested generation 18 entry."
         },
         {
           "commit": "316a6495d3a22623fa31def355bd28c5e94aa062",
@@ -530,12 +530,12 @@
           "capture_method": "Re-attested for the generation-17 bump; installation-scoped runtime defaults do not alter the representative session-create wire shape."
         },
         {
-          "commit": "899f6f34cb43009fd9a5f57ee6243d2185cc20c0",
+          "commit": "04d55a16c418f4e19f98eb860c77a4ebd95146e0",
           "plugin_version": "0.4.0-dev537",
           "generation": 17,
           "source_path": "plugins/agent-bridge/src/agent_bridge/routes/sessions.py",
-          "source_git_blob": "30f131dc96ec5fe4c89c9bef2efbdd1428befd7d",
-          "capture_method": "Re-attested after fixing the bare transcript route to resolve a live session (via get_session()/db.get_events_range()) before ever falling through to the cold-store provider, and trimming pre-existing docstrings for the module-size ceiling; the pre-resolution initialization refusal this fixture attests is unchanged."
+          "source_git_blob": "8faf41807a6348cc08d425d6fa75d007103e7c9f",
+          "capture_method": "Re-attested after fixing the bare transcript route to resolve a live session (via get_session()/db.get_events_range()) before ever falling through to the cold-store provider, and trimming pre-existing docstrings for the module-size ceiling; the pre-resolution initialization refusal this fixture attests is unchanged. [Re-pointed: the originally-recorded pre-squash commit became permanently unreachable after merge (recurrence of #2230); this entry now cites the real, reachable landing commit, confirmed content-identical.]"
         },
         {
           "commit": "3e5a7bce51083a6ccc9ce4c518490d4575fcf849",

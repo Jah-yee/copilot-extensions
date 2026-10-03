@@ -876,3 +876,36 @@ the HOST's own real `.git/index` file (mtime + size) before and after a
 real run confirms it is byte-identical -- proof, not just assertion, that
 the host checkout's index is never touched.
 
+### 2026-10-03 — Review round 13: 3 findings addressed
+Automated review confirmed round 12's `GIT_OPTIONAL_LOCKS=0` fix (resolved)
+and raised three more: (1) the 6 GiB `--memory` ceiling from round 8 was
+sized against only ONE of `run-plugin-tests.py`'s own inner budgets at a
+time, not their sum -- that runner's `--max-memory-mb` (4096 MiB resident)
+and `--max-temp-mb` (2048 MiB, tmpfs-backed and therefore ALSO charged to
+the same outer memory cgroup) defaults already total 6144 MiB before any
+container/`$HOME`/workspace-volume overhead, so a perfectly valid,
+within-budget suite could have been OOM-killed by the outer boundary.
+Fixed by raising `--memory`/`--memory-swap` to 12 GiB -- real headroom over
+the combined inner budgets plus overhead, not just one of them. (2) `uv`'s
+default cache (`$HOME/.cache/uv`) lives on the 256 MiB `$HOME` mount, sized
+for `uv`'s own small footprint, not for retaining every downloaded/
+unpacked wheel a heavier dependency set (large scientific/ML/vector-search
+packages some plugins' dev extras pull in) needs for the container's
+lifetime -- fixed by pointing `UV_CACHE_DIR` at `/tmp/uv-cache` via
+`containerEnv`, reusing `/tmp`'s own already-enlarged headroom instead of
+budgeting a second large surface. Live-confirmed via `docker exec ... env`
+that `UV_CACHE_DIR=/tmp/uv-cache` actually takes effect. (3) `_cleanup_orphan`
+silently treated a failed `docker ps` as "no orphan exists," leaving a
+partially created container un-removable with no indication to the user
+that manual cleanup was needed -- fixed by reporting (to stderr, never
+raising, matching this function's existing "never raise" contract) every
+failure at every step (`docker ps`, each container `rm`, the volume `rm`),
+whether a nonzero exit or a raised exception.
+
+Re-validated end-to-end: the full unit test suite (45 tests, including two
+new tests for the `_cleanup_orphan` warning behavior) passes, a fresh
+Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms nothing broke, and a live `docker inspect`/`docker exec env`
+confirms both the 12 GiB memory ceiling and `UV_CACHE_DIR=/tmp/uv-cache`
+actually took effect.
+

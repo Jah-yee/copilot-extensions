@@ -659,16 +659,29 @@ def test_cleanup_orphan_removes_containers_found_by_label_then_volume() -> None:
     assert run.call_args_list[3].args[0] == ["docker", "volume", "rm", "fake-volume"]
 
 
-def test_cleanup_orphan_never_raises_even_if_every_removal_fails() -> None:
+def test_cleanup_orphan_warns_but_does_not_raise_on_nonzero_results(capsys) -> None:
+    find_result = mock.Mock(returncode=1, stdout="", stderr="docker ps failed")
+    vol_result = mock.Mock(returncode=1, stderr="volume busy")
+    with mock.patch.object(wrapper.subprocess, "run", side_effect=[find_result, vol_result]):
+        # Must not raise -- a failed `docker ps` is reported, never
+        # silently treated as "no orphan exists".
+        wrapper._cleanup_orphan("instance-label", "fake-volume")
+    err = capsys.readouterr().err
+    assert "docker ps failed" in err
+    assert "volume busy" in err
+
+
+def test_cleanup_orphan_warns_but_does_not_raise_if_container_removal_fails(capsys) -> None:
     find_result = mock.Mock(returncode=0, stdout="cid-a\n", stderr="")
-    rm_result = mock.Mock(returncode=1)
-    vol_result = mock.Mock(returncode=1)
+    rm_result = mock.Mock(returncode=1, stderr="container busy")
+    vol_result = mock.Mock(returncode=0, stderr="")
     with mock.patch.object(wrapper.subprocess, "run",
                             side_effect=[find_result, rm_result, vol_result]):
         wrapper._cleanup_orphan("instance-label", "fake-volume")
+    assert "container busy" in capsys.readouterr().err
 
 
-def test_cleanup_orphan_never_raises_when_every_subprocess_call_itself_raises() -> None:
+def test_cleanup_orphan_never_raises_when_every_subprocess_call_itself_raises(capsys) -> None:
     import subprocess as real_subprocess
 
     def always_times_out(*args, **kwargs):
@@ -680,6 +693,8 @@ def test_cleanup_orphan_never_raises_when_every_subprocess_call_itself_raises() 
         # a secondary cleanup failure (not even a raised TimeoutExpired
         # from one of the cleanup's own subprocess calls).
         wrapper._cleanup_orphan("instance-label", "fake-volume")
+    # Still reported, just not raised.
+    assert "warning" in capsys.readouterr().err.lower()
 
 
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:

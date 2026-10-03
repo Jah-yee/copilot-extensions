@@ -573,7 +573,11 @@ def _cleanup_orphan(instance_label: str, volume_name: str) -> None:
     one failing step never skips the rest, and this function itself never
     raises -- it runs while an already-failing startup error is
     propagating, and that original error is what must surface, not a
-    secondary cleanup failure."""
+    secondary cleanup failure. Every failure (a nonzero exit OR a raised
+    exception, at any step) is still reported to stderr -- silently
+    treating a failed ``docker ps`` as "no orphan exists" would leave a
+    partially created container un-removable with no indication to the
+    user that manual cleanup is needed."""
     container_ids: list[str] = []
     try:
         find = subprocess.run(
@@ -581,18 +585,28 @@ def _cleanup_orphan(instance_label: str, volume_name: str) -> None:
              f"label=devcontainer-test-isolation.instance={instance_label}"],
             capture_output=True, text=True, timeout=30,
         )
-        container_ids = find.stdout.split()
-    except (subprocess.SubprocessError, OSError):
-        pass
+        if find.returncode != 0:
+            print(f"warning: orphan-cleanup 'docker ps' failed: {find.stderr.strip()}", file=sys.stderr)
+        else:
+            container_ids = find.stdout.split()
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"warning: orphan-cleanup 'docker ps' failed: {exc}", file=sys.stderr)
     for container_id in container_ids:
         try:
-            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=60)
-        except (subprocess.SubprocessError, OSError):
-            pass
+            rm = subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, text=True, timeout=60)
+            if rm.returncode != 0:
+                print(f"warning: orphan-cleanup failed to remove container {container_id}: "
+                      f"{rm.stderr.strip()}", file=sys.stderr)
+        except (subprocess.SubprocessError, OSError) as exc:
+            print(f"warning: orphan-cleanup failed to remove container {container_id}: {exc}",
+                  file=sys.stderr)
     try:
-        subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, timeout=60)
-    except (subprocess.SubprocessError, OSError):
-        pass
+        vol = subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, text=True, timeout=60)
+        if vol.returncode != 0:
+            print(f"warning: orphan-cleanup failed to remove volume {volume_name}: "
+                  f"{vol.stderr.strip()}", file=sys.stderr)
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"warning: orphan-cleanup failed to remove volume {volume_name}: {exc}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

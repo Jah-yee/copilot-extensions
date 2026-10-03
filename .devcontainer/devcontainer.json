@@ -71,32 +71,50 @@
   // fixed, checked invariants, not optional tuning) -- without them, a
   // test could exhaust host RAM/CPU or fork-bomb outside of (or even
   // before) `tools/run-plugin-tests.py`'s OWN inner per-sub-suite bounds
-  // (128 processes / 4096 MiB default) ever get a chance to act. Sized
-  // with headroom above those inner defaults, not equal to them, since the
-  // container itself (shell, git, uv, the Python interpreter, `pytest`
-  // bookkeeping) needs some of that budget too. `/tmp`'s own `size=3072m`
-  // specifically must stay above that same runner's own advertised
-  // `--max-temp-mb` default (2048 MiB, `tools/run-plugin-tests.py`) -- a
-  // smaller outer `/tmp` ceiling would let a legitimate, within-budget
-  // inner suite hit `ENOSPC` on the OUTER boundary before the inner
-  // runner's own guard ever gets a chance to enforce its own limit. (A
-  // tmpfs `size=` is only a ceiling on actual bytes written, not a
-  // reservation, so this headroom doesn't inflate the container's real
-  // memory footprint in the common case -- the overall `--memory` cgroup
-  // limit above remains the real backstop regardless of any single
-  // mount's nominal cap.)
+  // ever get a chance to act. `--memory=12g` is sized for the COMBINED
+  // inner budgets, not just one of them: that runner's own
+  // `--max-memory-mb` (4096 MiB resident) and `--max-temp-mb` (2048 MiB,
+  // tmpfs-backed and therefore ALSO charged to this same memory cgroup)
+  // defaults already sum to 6144 MiB before accounting for the container
+  // itself (git, uv, the Python interpreter, `pytest` bookkeeping), the
+  // tmpfs-backed `$HOME`/`/tmp`/`/run` mounts below, or the tmpfs-backed
+  // workspace volume (`_create_bounded_volume`, also charged to this same
+  // cgroup) -- a smaller ceiling could OOM-kill a perfectly valid,
+  // within-budget suite. `/tmp`'s own `size=3072m` specifically must stay
+  // above that same runner's own advertised `--max-temp-mb` default (2048
+  // MiB) for the same reason -- a smaller outer `/tmp` ceiling would let a
+  // legitimate, within-budget inner suite hit `ENOSPC` on the OUTER
+  // boundary before the inner runner's own guard ever gets a chance to
+  // enforce its own limit. (A tmpfs `size=` is only a ceiling on actual
+  // bytes written, not a reservation, so none of this headroom inflates
+  // the container's real memory footprint in the common case -- the
+  // overall `--memory` cgroup limit above remains the real backstop
+  // regardless of any single mount's nominal cap.)
   "runArgs": [
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
     "--read-only",
-    "--memory=6g",
-    "--memory-swap=6g",
+    "--memory=12g",
+    "--memory-swap=12g",
     "--cpus=4",
     "--pids-limit=512",
     "--tmpfs", "/home/vscode:rw,nosuid,nodev,exec,mode=1777,size=256m",
     "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=3072m",
     "--tmpfs", "/run:rw,nosuid,nodev,mode=1777,size=64m"
   ],
+
+  // `uv`'s default cache dir is `$HOME/.cache/uv` -- the 256 MiB
+  // `$HOME` mount above is sized for `uv`'s own small install footprint,
+  // not for retaining every downloaded/unpacked wheel across a plugin's
+  // (or `--all`'s) dependency install for the container's lifetime; a
+  // heavier dependency set (large scientific/ML/vector-search packages
+  // some plugins' dev extras pull in) can hit `ENOSPC` there well before
+  // the 4 GiB workspace volume is anywhere near full. Point it at `/tmp`
+  // instead, which already has real headroom (see `runArgs` above) and is
+  // torn down with the rest of the container regardless.
+  "containerEnv": {
+    "UV_CACHE_DIR": "/tmp/uv-cache"
+  },
 
   // Networking (Phase 1, item 2, open/residual): left at Docker's default
   // bridge network with full outbound reach for now, because dependency

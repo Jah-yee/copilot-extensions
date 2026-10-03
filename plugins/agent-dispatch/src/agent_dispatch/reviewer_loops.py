@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -19,6 +21,9 @@ from .registrar import (
     load_declaration,
 )
 from .producers.evaluator import Abandon, Confirm, Decision, EvaluatorError, NoOp
+from .registrations import RegistrationKind
+
+log = logging.getLogger("agent-dispatch.reviewer-loops")
 
 _KNOWN_KEYS = frozenset(
     {
@@ -267,6 +272,85 @@ def reviewer_loop_stale_decision(
             "review target stale: last commit is older than "
             f"{stale_after_days:g} day(s)"
         )
+    )
+
+
+def reviewer_loop_lifecycle_for_task(
+    registrations: list[tuple[dict[str, Any], ReviewerLoopLifecycleConfig]],
+    *,
+    repo: str | None,
+    evaluator_ref: str,
+) -> ReviewerLoopLifecycleConfig | None:
+    exact: list[ReviewerLoopLifecycleConfig] = []
+    global_matches: list[ReviewerLoopLifecycleConfig] = []
+    for spec, config in registrations:
+        if spec.get("evaluator_ref") != evaluator_ref:
+            continue
+        if spec.get("all_repos"):
+            global_matches.append(config)
+            continue
+        if spec.get("repo") == repo:
+            exact.append(config)
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        log.warning(
+            "skipping reviewer stale reconciliation for evaluator_ref %s in repo %s: multiple repo-scoped registrations",
+            evaluator_ref,
+            repo,
+        )
+        return None
+    if len(global_matches) == 1:
+        return global_matches[0]
+    if len(global_matches) > 1:
+        log.warning(
+            "skipping reviewer stale reconciliation for evaluator_ref %s: multiple all-repos registrations",
+            evaluator_ref,
+        )
+    return None
+
+
+def active_reviewer_loop_lifecycle_configs(
+    queue,
+    *,
+    current_machine: str | None,
+    current_env: str,
+) -> list[tuple[dict[str, Any], ReviewerLoopLifecycleConfig]]:
+    registry: list[tuple[dict[str, Any], ReviewerLoopLifecycleConfig]] = []
+    for record in queue.list_registrations(
+        kind=RegistrationKind.EVALUATOR,
+        include_paused=False,
+    ):
+        if record.machine not in (None, current_machine):
+            continue
+        if str(record.env or "default") != current_env:
+            continue
+        spec = record.spec or {}
+        evaluator_ref = spec.get("evaluator_ref")
+        if not isinstance(evaluator_ref, str) or not evaluator_ref:
+            continue
+        try:
+            config = reviewer_loop_lifecycle_config(spec)
+        except EvaluatorError as exc:
+            log.warning(
+                "skipping reviewer stale reconciliation for registration %s (%s): %s",
+                record.id,
+                evaluator_ref,
+                exc,
+            )
+            continue
+        if config is None or config.stale_after_days is None:
+            continue
+        registry.append((spec, config))
+    return registry
+
+
+def reviewer_loop_runtime_scope() -> tuple[str | None, str]:
+    from . import remote_dispatch
+
+    return (
+        remote_dispatch.local_machine(),
+        os.environ.get("AGENT_DISPATCH_ENV") or "default",
     )
 
 

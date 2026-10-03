@@ -198,3 +198,92 @@ def test_iter_suspended_reviewer_candidates_paginates_past_the_first_batch(tmp_p
 
     assert len(tasks) == 3
     assert {task.title for task in tasks} == {"review 0", "review 1", "review 2"}
+
+
+def test_reconcile_reviewer_deadlines_uses_current_machine_scope_and_all_repos(
+    tmp_path, monkeypatch
+):
+    q = TaskQueue(str(tmp_path / "q.sqlite3"))
+    monkeypatch.setenv("AGENT_DISPATCH_ENV", "default")
+    monkeypatch.setattr(
+        "agent_dispatch.remote_dispatch.local_machine", lambda: "host-a"
+    )
+    q.register_registration(
+        "evaluator",
+        {
+            "all_repos": True,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {},
+            "reviewer_loop": {"stale_after_days": 7},
+        },
+        machine="host-a",
+        env="default",
+    )
+    q.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {},
+            "reviewer_loop": {"stale_after_days": 30},
+        },
+        machine="host-b",
+        env="default",
+    )
+    now = 1_000_000.0
+    task = q.create(
+        "review scoped",
+        repo=TEST_REPO,
+        require_verification=True,
+        evaluator_ref="review-loop",
+        payload_inline=json.dumps({"reviewer_loop": {"last_commit_at": now - (8 * 86400.0)}}),
+    )
+    q.claim_one("worker-1", task_id=task.id, repo=TEST_REPO)
+    q.start(task.id, "worker-1", owner_session_id="session-1")
+    q.suspend(task.id, "worker-1", reason="waiting", cooldown_seconds=None, now=now)
+
+    resumed = q.reconcile_reviewer_deadlines(now=now)
+
+    assert resumed == 1
+
+
+def test_reconcile_reviewer_deadlines_reads_blob_spilled_payload(tmp_path, monkeypatch):
+    q = TaskQueue(str(tmp_path / "q.sqlite3"), blob_threshold=16)
+    monkeypatch.setenv("AGENT_DISPATCH_ENV", "default")
+    monkeypatch.setattr(
+        "agent_dispatch.remote_dispatch.local_machine", lambda: "host-a"
+    )
+    q.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {},
+            "reviewer_loop": {"stale_after_days": 7},
+        },
+        machine="host-a",
+        env="default",
+    )
+    now = 1_000_000.0
+    payload = json.dumps(
+        {
+            "reviewer_loop": {"last_commit_at": now - (8 * 86400.0)},
+            "padding": "x" * 200,
+        }
+    )
+    task = q.create(
+        "review blob",
+        repo=TEST_REPO,
+        require_verification=True,
+        evaluator_ref="review-loop",
+        payload_inline=payload,
+    )
+    assert task.payload_inline is None
+    assert task.payload_ref is not None
+    q.claim_one("worker-1", task_id=task.id, repo=TEST_REPO)
+    q.start(task.id, "worker-1", owner_session_id="session-1")
+    q.suspend(task.id, "worker-1", reason="waiting", cooldown_seconds=None, now=now)
+
+    resumed = q.reconcile_reviewer_deadlines(now=now)
+
+    assert resumed == 1

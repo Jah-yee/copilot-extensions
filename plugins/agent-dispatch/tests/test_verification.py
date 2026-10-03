@@ -448,6 +448,50 @@ def test_reviewer_loop_can_derive_last_commit_at_from_provider_observation_store
     assert queue.get(task_id).status == Status.ABANDONED
 
 
+def test_reviewer_loop_stale_after_days_works_with_blob_spilled_payload(
+    tmp_path, monkeypatch
+):
+    queue = TaskQueue(tmp_path / "tasks.db", blob_threshold=16)
+    script = tmp_path / "eval.py"
+    script.write_text(
+        "import json, sys\n"
+        "json.dump({'decision': 'noop', 'reason': 'still-open'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    _register_script(
+        queue,
+        str(script),
+        repo="example/repo-blob",
+        evaluator_ref="review-loop-blob",
+        reviewer_loop={"stale_after_days": 7},
+    )
+    last_commit_at = 1_000_000.0
+    monkeypatch.setattr(
+        "agent_dispatch.reviewer_loops.time.time",
+        lambda: last_commit_at + (8 * 86400.0),
+    )
+    task_id = _submitted_task(
+        queue,
+        "review repo-blob",
+        repo="example/repo-blob",
+        require_verification=True,
+        evaluator_ref="review-loop-blob",
+        payload_inline=json.dumps(
+            {
+                "reviewer_loop": {"last_commit_at": last_commit_at},
+                "padding": "x" * 200,
+            }
+        ),
+    )
+    task = queue.get(task_id)
+    assert task is not None and task.payload_inline is None and task.payload_ref is not None
+
+    report = evaluate_submitted_task(queue, task_id, trigger="submitted")
+
+    assert report["applied"][0]["decision"] == "abandon"
+    assert queue.get(task_id).status == Status.ABANDONED
+
+
 def test_future_scheduled_verification_uses_idle_interval_not_retry_interval(tmp_path):
     queue = TaskQueue(tmp_path / "tasks.db")
     task = queue.create(

@@ -202,6 +202,7 @@ def evaluate_submitted_task(
         )
 
     task_payload = asdict(task)
+    task_payload["payload_inline"] = queue.read_payload(task)
     task_payload["event_notes"] = _event_notes(queue, task_id)
     event = {"type": "task.submitted", "task": task_payload}
     try:

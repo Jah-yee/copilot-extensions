@@ -28,7 +28,6 @@ task's own current owner once the monitor is due.
 from __future__ import annotations
 
 import math
-
 from collections.abc import Iterator
 
 from .monitors import DEFAULT_SUSPEND_COOLDOWN_SECONDS, MonitorKind, suspend_monitor_columns
@@ -41,11 +40,11 @@ from .queue_common import (
     _task_transition_spec,
 )
 from .queue_records import Status, TaskError
-from .registrations import RegistrationKind
 from .reviewer_loops import (
-    EvaluatorError,
+    active_reviewer_loop_lifecycle_configs,
     reviewer_loop_deadline,
-    reviewer_loop_lifecycle_config,
+    reviewer_loop_lifecycle_for_task,
+    reviewer_loop_runtime_scope,
 )
 
 
@@ -216,23 +215,13 @@ class QueueSuspendMixin:
     def reconcile_reviewer_deadlines(self, *, now: float | None = None) -> int:
         """Wake suspended reviewer tasks once their stale deadline elapses."""
         ts = self._now(now)
-        evaluator_configs: dict[tuple[str | None, str], float] = {}
-        for record in self.list_registrations(
-            kind=RegistrationKind.EVALUATOR,
-            include_paused=False,
-        ):
-            spec = record.spec or {}
-            evaluator_ref = spec.get("evaluator_ref")
-            if not isinstance(evaluator_ref, str) or not evaluator_ref:
-                continue
-            try:
-                config = reviewer_loop_lifecycle_config(spec)
-            except EvaluatorError:
-                continue
-            if config is None or config.stale_after_days is None:
-                continue
-            evaluator_configs[(spec.get("repo"), evaluator_ref)] = config.stale_after_days
-        if not evaluator_configs:
+        current_machine, current_env = reviewer_loop_runtime_scope()
+        registrations = active_reviewer_loop_lifecycle_configs(
+            self,
+            current_machine=current_machine,
+            current_env=current_env,
+        )
+        if not registrations:
             return 0
         resumed = 0
         for task in self._iter_suspended_reviewer_candidates():
@@ -243,12 +232,21 @@ class QueueSuspendMixin:
                 or task.wake_status in {"pending", "delivering"}
             ):
                 continue
-            stale_after_days = evaluator_configs.get((task.repo, task.evaluator_ref))
-            if stale_after_days is None:
+            config = reviewer_loop_lifecycle_for_task(
+                registrations,
+                repo=task.repo,
+                evaluator_ref=task.evaluator_ref,
+            )
+            if config is None or config.stale_after_days is None:
                 continue
             deadline = reviewer_loop_deadline(
-                {"task": {"payload_inline": task.payload_inline, "payload_ref": task.payload_ref}},
-                stale_after_days=stale_after_days,
+                {
+                    "task": {
+                        "payload_inline": self.read_payload(task),
+                        "payload_ref": task.payload_ref,
+                    }
+                },
+                stale_after_days=config.stale_after_days,
             )
             if deadline is None or not math.isfinite(deadline) or deadline > ts:
                 continue

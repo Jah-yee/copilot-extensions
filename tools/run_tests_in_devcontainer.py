@@ -71,10 +71,13 @@ WORKSPACE_VOLUME_SIZE = "4g"
 # artifacts the test run inside the container does not need and should not
 # reproduce. Belt-and-suspenders only -- `_tracked_paths` already excludes
 # anything gitignored (including `.test-venvs`, which is git-ignored per
-# `TESTING.md`).
+# `TESTING.md`). `.devcontainer` is deliberately NOT excluded: excluding
+# it while rebuilding the index from the full `HEAD` tree (which still
+# lists it) made every in-container checkout appear dirty (`git status`
+# reporting it as "deleted"); the host CLI's own per-run config is
+# already a separate temporary copy (`_per_instance_config`) regardless.
 EXCLUDED_TOP_LEVEL = {
     ".test-venvs",
-    ".devcontainer",
     "node_modules",
     "__pycache__",
 }
@@ -441,10 +444,7 @@ def _changed_mode_active(passthrough: list[str]) -> bool:
             skip_next = False
             continue
         # A single-token `--flag=value` form never consumes a SEPARATE
-        # following token, so it needs no canonicalization here -- it
-        # either already is (or isn't) recognized by the plain
-        # `.startswith("-")` check below, and either way can't
-        # misclassify a later arg as a positional.
+        # following token, so no canonicalization is needed here.
         canonical = _canonicalize_flag(arg) if "=" not in arg else arg
         if canonical == "--all":
             has_all = True

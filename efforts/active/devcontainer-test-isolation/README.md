@@ -1532,3 +1532,33 @@ a fresh Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6
 skipped) confirms the common case still works. Docker cleanup and host
 `git status --short` reconfirmed clean of anything beyond this round's
 own diff.
+
+### 2026-10-03 — Review round 15 (sixteenth pass): 1 finding addressed (stop excluding tracked .devcontainer files)
+A sixteenth review pass of the same round confirmed the fsmonitor-hook
+fix resolved (a transient CI network flake fetching `uv`'s own version
+manifest, confirmed unrelated and fixed by a single job rerun), and
+raised one more previously-missed finding. MEDIUM: `EXCLUDED_TOP_LEVEL`
+excluded the tracked `.devcontainer` directory from the snapshot's tar,
+but `_materialized_git_dir`'s index is rebuilt from the FULL `HEAD` tree
+(which still lists `.devcontainer/devcontainer.json`) -- so every
+in-container checkout reported it as "deleted" (`git status` dirty) even
+on a byte-identical, unmodified checkout, and any repo test/tool that
+inspects that tracked file couldn't find it either. Fixed by removing
+`.devcontainer` from the exclusion set entirely -- the host CLI's own
+per-run devcontainer config is already a wholly separate temporary copy
+(`_per_instance_config`), so including the tracked file in the snapshot
+changes nothing about which config the host actually uses to bring the
+container up.
+
+Re-validated end-to-end: the full unit test suite (87 tests, with the
+corresponding `_tracked_paths` test updated to expect
+`.devcontainer/devcontainer.json` kept rather than filtered) passes;
+`check-module-size.py --changed-since origin/dev` passes (right at the
+1000-line cap again after another condensing pass); a fresh Docker-backed
+end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms the
+common case still works; and a dedicated `--keep` run directly confirmed,
+via `docker exec`, that `.devcontainer/devcontainer.json` is now present
+inside the container and `git status --short` reports only this round's
+own genuine in-progress changes, never a false "deleted" entry. Docker
+cleanup and host `git status --short` reconfirmed clean of anything
+beyond this round's own diff.

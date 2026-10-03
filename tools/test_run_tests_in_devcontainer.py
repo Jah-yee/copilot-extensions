@@ -93,7 +93,10 @@ def test_tracked_paths_defaults_to_cached_only_and_filters_excluded_prefixes() -
     )
     with mock.patch.object(wrapper.subprocess, "run", return_value=fake_result) as run:
         paths = wrapper._tracked_paths(include_untracked=False)
-    assert paths == ["TESTING.md", "tools/x.py"]
+    # `.devcontainer` is deliberately NOT excluded -- excluding it while
+    # rebuilding the index from the full HEAD tree (which still lists it)
+    # would make every in-container checkout appear dirty.
+    assert paths == ["TESTING.md", ".devcontainer/devcontainer.json", "tools/x.py"]
     args, kwargs = run.call_args
     assert args[0] == ["git", "-C", str(wrapper.REPO), "ls-files", "-z", "--cached"]
     # Must use the scrubbed environment, not the ambient one.

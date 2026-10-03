@@ -100,9 +100,18 @@ distribution unit.
 
 - [x] **Tool built (2026-10-02); pipeline wiring still open.**
       `tools/build_python_artifacts.py` builds a plugin's own wheel plus
-      every vendored `libs/<lib>` wheel it needs (reusing
-      `uv_editable_ref`'s existing enumeration, recursively, and its
-      `uv_editable_problems` acceptance check), and writes a manifest
+      every vendored `libs/<lib>` wheel it needs, discovering both the
+      dev-branch live `editable = true` canonical-reference form and an
+      ordinary in-tree vendored copy, recursively. The originally requested
+      top-level plugin's own escaping references are validated as a whole
+      via `uv_editable_ref.uv_editable_problems`; every reference
+      discovered while recursing into an already-found vendored lib (an
+      escaping `editable = true` entry, or a non-editable in-tree one) is
+      instead validated per-entry with this tool's own structural
+      validators, since a vendored lib can legitimately cross-reference a
+      sibling vendored lib without `editable = true` -- a pattern
+      `uv_editable_problems` was never designed to accept at the
+      whole-consumer level. It writes a manifest
       recording the payload hash (a working-tree content hash — not `git
       HEAD`, since promotion's scratch tree is mutated by version bumps and
       materialization before the build runs), the wheel filenames' own
@@ -246,8 +255,7 @@ answer against the actual repository/CI configuration:
   predictable asset filenames (one per platform/arch/ABI, plus one per
   vendored lib wheel), requiring no separate discovery service and matching
   a pattern this codebase already trusts.
-- **Wheel-tag semantic compatibility (new, 2026-10-02):** identified during
-  `tools/build_python_artifacts.py` review. An artifact set's
+- **Wheel-tag semantic compatibility:** an artifact set's
   python/abi/platform tag reconciliation
   (`build_python_artifacts.overall_identity_tags`) currently treats any two
   differing, non-universal tags in the same slot as a hard conflict
@@ -566,6 +574,23 @@ win grows with build complexity.
   reference must appear in that same consumer's own in-tree-discovered
   set, or the build now fails closed naming the exact unaccounted-for
   reference. 60 unit tests now; re-verified both plugins build correctly.
+- A tenth review round confirmed that fix and found one more real,
+  narrower issue plus 3 documentation-process/style corrections:
+  `_read_sources_table` called `.get()` on `[tool]` and `[tool.uv]` before
+  checking their own types, so a structurally valid-but-malformed TOML
+  document (e.g. `tool = []`) raised an uncaught `AttributeError` instead
+  of the documented `ArtifactBuildError` -- especially reachable while
+  recursively inspecting a vendored lib, where the top-level
+  `uv_editable_problems` guard never runs; fixed by validating each
+  intermediate table explicitly, with 2 new regression cases. The 3
+  style findings (review-round chronology embedded in non-Journal design
+  documentation and in a test comment, per `CONTRIBUTING.md`'s "describe
+  current state, not review history" rule) are corrected directly in this
+  same diff -- this Phase 2 checklist item and the Wheel-tag semantic
+  compatibility Open Design Question entry now describe only the enduring
+  technical state, and the egg-info test comment states the invariant
+  without naming a review round. 62 unit tests now; re-verified both
+  plugins build correctly.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

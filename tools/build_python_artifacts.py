@@ -102,7 +102,13 @@ def _read_sources_table(consumer_dir: Path) -> dict:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ArtifactBuildError(f"{pyproject}: could not read/parse: {exc}") from exc
-    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    tool = data.get("tool", {})
+    if not isinstance(tool, dict):
+        raise ArtifactBuildError(f"{pyproject}: [tool] is not a table")
+    uv_table = tool.get("uv", {})
+    if not isinstance(uv_table, dict):
+        raise ArtifactBuildError(f"{pyproject}: [tool.uv] is not a table")
+    sources = uv_table.get("sources", {})
     if not isinstance(sources, dict):
         raise ArtifactBuildError(f"{pyproject}: [tool.uv.sources] is not a table")
     return sources

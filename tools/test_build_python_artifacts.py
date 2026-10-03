@@ -280,6 +280,34 @@ def test_resolve_vendored_libs_no_sources_is_empty(fake_repo: Path):
     assert bpa.resolve_vendored_libs(plugin_dir) == []
 
 
+def test_read_sources_table_rejects_malformed_tool_table(tmp_path: Path):
+    # Invariant: every intermediate table ([tool], [tool.uv]) must be
+    # validated before `.get()` is called on it -- a structurally valid
+    # TOML document whose `tool` key is not itself a table (e.g. an array)
+    # must raise the documented ArtifactBuildError, not an uncaught
+    # AttributeError, especially since no top-level guard runs while
+    # recursively inspecting a vendored lib.
+    d = tmp_path / "demo"
+    d.mkdir()
+    (d / "pyproject.toml").write_text(
+        'tool = []\n\n[project]\nname = "demo"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.find_in_tree_lib_sources(d)
+
+
+def test_read_sources_table_rejects_malformed_uv_table(tmp_path: Path):
+    d = tmp_path / "demo"
+    d.mkdir()
+    (d / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n\n[tool]\nuv = []\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(bpa.ArtifactBuildError):
+        bpa.find_in_tree_lib_sources(d)
+
+
 def test_resolve_vendored_libs_unsafe_name_raises(fake_repo: Path):
     plugin_dir = fake_repo / "plugins" / "demo"
     # A `path` whose final component is ".." resolves outside the consumer
@@ -490,13 +518,11 @@ def test_find_in_tree_lib_sources_rejects_cross_plugin_escape(fake_repo: Path):
 def test_resolve_vendored_libs_cross_plugin_escape_raises_not_silently_omitted(
     fake_repo: Path,
 ):
-    # Regression: the PREVIOUS fix (rejecting this from
-    # find_in_tree_lib_sources) just made resolve_vendored_libs silently
-    # DROP the reference instead of raising -- `escaping_refs`'s own
-    # `continue` for non-editable entries assumed find_in_tree_lib_sources
-    # would always pick it up, which is false here. The artifact build
-    # must fail closed, matching what `materialize_nested_uv_editable_refs`
-    # would do with this same reference, not silently omit the dependency.
+    # Invariant: a non-editable, escaping reference that doesn't resolve
+    # to an allowed in-tree vendored-lib location must fail the build
+    # closed, matching what `materialize_nested_uv_editable_refs` would do
+    # with this same reference -- never silently omit the dependency from
+    # the artifact set.
     other_plugin_dir = fake_repo / "plugins" / "other"
     _seed_in_tree_lib(other_plugin_dir, "widget")
     plugin_dir = fake_repo / "plugins" / "demo"
@@ -850,10 +876,9 @@ def test_build_plugin_artifacts_payload_hash_excludes_build_residue(
 
     assert manifest["payload_hash"] == expected_hash
 
-    # Regression (round 2 of this same finding): residue left behind by
-    # THIS invocation must not change the NEXT invocation's "pre-build"
-    # hash either -- the egg-info directory is still on disk when
-    # build_plugin_artifacts runs a second time.
+    # Invariant: residue left behind by THIS invocation must not change
+    # the NEXT invocation's "pre-build" hash either -- the egg-info
+    # directory is still on disk when build_plugin_artifacts runs again.
     manifest2 = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
     assert manifest2["payload_hash"] == expected_hash
 

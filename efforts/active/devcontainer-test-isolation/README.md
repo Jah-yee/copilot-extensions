@@ -985,3 +985,61 @@ run the warning function directly, then `--no-assume-unchanged` to
 revert) confirms the new warning fires by name for the flagged path and
 that the flag doesn't persist after revert.
 
+
+### 2026-10-03 — Review round 15 (continued): 4 findings addressed (lazy-fetch/replace-ref hardening, root-owned checkout, structural CI coverage, stale comment)
+A follow-up review of the same round confirmed the two fixes above
+(resolved) and raised four more findings, three of them HIGH/MEDIUM and
+genuine. HIGH: `_scrubbed_git_env` removed an inherited
+`GIT_NO_REPLACE_OBJECTS` (via the general repository-context removal set)
+rather than unconditionally forcing both it and `GIT_NO_LAZY_FETCH` to
+`1` -- so a partial clone's `git bundle create` could lazily fetch missing
+objects INTO the host repository, and a locally configured replacement
+ref could silently substitute different history into the bundle, exactly
+the two protections `tools/agent_bridge_contract_git.py`'s own hardened
+environment already applies. Fixed by setting both unconditionally after
+the removal pass, matching that precedent. MEDIUM: `_populate_workspace`
+extracted the repository snapshot as root with `--no-same-owner`, leaving
+`.git` (and everything else) root-owned while tests execute as the
+non-root `vscode` user -- modern Git refuses to operate inside a working
+tree it discovers has "dubious ownership," and since
+`run-plugin-tests.py` treats a failed `git diff` as an empty target set
+rather than an error, every git invocation inside the container (not just
+an explicit `--changed` run, but the DEFAULT no-`--all`/no-plugin-name
+case too) would silently degrade to "no plugin suites to run" instead of
+surfacing the real problem -- confirmed live by execing into a kept-alive
+container and reproducing the exact `fatal: detected dubious ownership`
+error. Fixed two ways: (1) extraction itself now runs AS `vscode`, not
+root (after a one-off root `chmod 0777` opens the empty volume's write
+permissions, since a fresh volume's mountpoint is root-owned and nothing
+inside the container can ever `chown` it -- `--cap-drop=ALL` drops
+`CAP_CHOWN` too), making every extracted file natively `vscode`-owned
+with no chown step needed or possible; (2) since the volume's own
+mountpoint ENTRY still can't be chowned regardless, `.devcontainer/
+devcontainer.json` now also grants that exact path a `git`
+`safe.directory` exemption via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+`GIT_CONFIG_VALUE_0` `containerEnv` entries -- the one sanctioned way
+around the ownership check that doesn't require a repo-local (and
+therefore untrusted-input-controllable) config file. MEDIUM: the CI suite
+mocks Docker/devcontainer entirely, so removing a runtime invariant
+(`--cap-drop=ALL`, read-only root, a resource ceiling, the pinned `uv`
+bootstrap) from `.devcontainer/devcontainer.json` would stay green --
+added four fast, Docker-free structural tests that parse the JSONC config
+directly and assert the no-Docker-socket/no-`--privileged`, volume-not-
+bind, hardening-flags/tmpfs, and pinned-uv-bootstrap invariants. LOW: a
+`.devcontainer/devcontainer.json` comment narrated the superseded
+`curl ... | sh` implementation instead of describing the current
+invariant timelessly -- reworded.
+
+Re-validated end-to-end: the full unit test suite (59 tests, including 4
+new structural devcontainer-config tests, 1 new `safe.directory`-exemption
+test, and updated `_populate_workspace` tests for the new
+root-chmod-then-vscode-extraction call shape) passes; a fresh
+Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6 skipped)
+confirms the common case still works; and a kept-alive container
+(`--keep`) was directly `exec`'d into as `vscode` to confirm `git status`/
+`git log` now succeed with no dubious-ownership error (first reproduced
+failing without the `safe.directory` exemption, then confirmed passing
+with it). Docker cleanup (`docker ps -a`, `docker volume ls`) and host
+`git status --short` were reconfirmed clean of anything beyond this
+round's own diff after every validation pass, including the orphaned
+`--keep` containers/volumes from the debugging process itself.

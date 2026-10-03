@@ -46,6 +46,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 DEVCONTAINER_CONFIG = REPO / ".devcontainer" / "devcontainer.json"
 CONTAINER_WORKSPACE = "/workspaces/copilot-extensions"
+#: Must match ``.devcontainer/devcontainer.json``'s ``remoteUser``/
+#: ``containerUser`` -- the non-root user tests actually run as.
+REMOTE_USER = "vscode"
 
 # Must match the literal volume name baked into ``.devcontainer/
 # devcontainer.json``'s ``workspaceMount`` -- ``_per_instance_config``
@@ -118,7 +121,22 @@ def _scrubbed_git_env() -> dict[str, str]:
     violating this wrapper's own read-only-host guarantee and contending
     with any concurrent `git` process the caller is running -- the same
     safeguard `tools/agent_bridge_contract_git.py` already applies for the
-    same reason."""
+    same reason.
+
+    Also unconditionally forces ``GIT_NO_LAZY_FETCH=1`` and
+    ``GIT_NO_REPLACE_OBJECTS=1`` (matching
+    `tools/agent_bridge_contract_git.py`'s own hardened environment): in a
+    partial clone, resolving ``HEAD``/the diff base for ``git bundle
+    create`` could otherwise lazily fetch missing objects INTO the host
+    repository -- a host mutation this wrapper exists to prevent -- and a
+    locally configured replacement ref could silently substitute different
+    history into the bundle than what ``HEAD``/``--base`` actually name.
+    Removing an inherited ``GIT_NO_REPLACE_OBJECTS`` (the prior behavior,
+    since it was only in the removal set above) would have RE-ENABLED
+    replacement objects if the caller's own environment had disabled them;
+    forcing both to ``1`` here closes that gap regardless of what the
+    caller's environment does or doesn't set.
+    """
     env = os.environ.copy()
     for name in list(env):
         upper = name.upper()
@@ -130,6 +148,8 @@ def _scrubbed_git_env() -> dict[str, str]:
             env.pop(name, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     return env
 
 
@@ -614,16 +634,46 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
     container's workspace VOLUME (never a host bind -- see
     ``.devcontainer/devcontainer.json``'s workspace-storage-model comment).
 
-    Extraction runs as the container's root user with ``--no-same-owner``:
-    the runtime posture drops every Linux capability (``--cap-drop=ALL``),
-    so even root cannot ``chown`` extracted files to the HOST checkout's
-    original (and here, meaningless) uid/gid -- ``--no-same-owner`` avoids
-    that chown attempt entirely by leaving new files owned by the extracting
-    process (root) instead. The follow-up ``chmod`` grants the non-root
-    ``vscode`` remote user (who actually runs the test suite) write access
-    without needing a capability-gated ``chown``/``chgrp`` -- root may
-    always ``chmod`` files it owns, no capability required.
+    A freshly created Docker volume is root-owned, so the non-root
+    ``vscode`` remote user (who actually runs the test suite) can't write
+    into it yet -- a one-off root ``chmod`` opens up the empty volume root
+    first (permission bits only; root remains the directory's OWNER, which
+    is why the later chmod below is scoped to the directory's CONTENTS,
+    not the root entry itself -- `chmod` requires file ownership, not just
+    write access, and `vscode` never owns a directory entry it didn't
+    create). Extraction itself then runs AS ``vscode``, not root: every
+    extracted file is owned by the user that ran ``tar``, so this makes
+    the checkout (including ``.git``) natively ``vscode``-owned with no
+    chown step needed (and none would be possible anyway -- the runtime
+    posture drops every Linux capability via ``--cap-drop=ALL``, so even
+    root inside the container cannot ``chown``). Despite that, the
+    directory ENTRY at ``CONTAINER_WORKSPACE`` itself (the volume's
+    mountpoint, as opposed to anything extracted into it) stays
+    root-owned for the container's entire lifetime -- nothing can ever
+    chown it. Modern Git's "detected dubious ownership" check inspects
+    the ownership of the WORKING TREE ROOT, not just ``.git``, so that one
+    always-root-owned directory entry would still make every git
+    invocation `run-plugin-tests.py` makes (e.g. its own changed-file
+    diffing) fail -- and since that script treats a failed `git diff` as
+    an EMPTY target set rather than an error, it would misleadingly report
+    "no plugin suites to run" instead of the real problem. That residual
+    gap is closed separately, not here: ``.devcontainer/devcontainer.json``
+    exempts this exact path from the ownership check via
+    ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_0``/``GIT_CONFIG_VALUE_0``
+    ``containerEnv`` entries (the one sanctioned way around the check that
+    doesn't require a repo-local, and therefore untrusted-input-
+    controllable, config file).
     """
+    chmod_root = subprocess.run(
+        ["docker", "exec", "-u", "root", container_id,
+         "chmod", "0777", CONTAINER_WORKSPACE],
+        capture_output=True, text=True, timeout=60,
+    )
+    if chmod_root.returncode != 0:
+        raise SystemExit(
+            f"failed to open up the empty container workspace volume: "
+            f"{chmod_root.stderr.strip()}"
+        )
     with tempfile.NamedTemporaryFile(
         prefix="devcontainer-test-isolation-snapshot-", suffix=".tar",
     ) as tar_file:
@@ -631,8 +681,8 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
         tar_file.seek(0)
         res = subprocess.run(
             [
-                "docker", "exec", "-i", "-u", "root", container_id,
-                "tar", "--no-same-owner", "-xf", "-", "-C", CONTAINER_WORKSPACE,
+                "docker", "exec", "-i", "-u", REMOTE_USER, container_id,
+                "tar", "-xf", "-", "-C", CONTAINER_WORKSPACE,
             ],
             stdin=tar_file,
             capture_output=True,
@@ -643,8 +693,9 @@ def _populate_workspace(container_id: str, passthrough: list[str], *, include_un
             f"failed to populate container workspace: {res.stderr.decode(errors='replace').strip()}"
         )
     chmod = subprocess.run(
-        ["docker", "exec", "-u", "root", container_id,
-         "chmod", "-R", "a+rwX", CONTAINER_WORKSPACE],
+        ["docker", "exec", "-u", REMOTE_USER, container_id,
+         "find", CONTAINER_WORKSPACE, "-mindepth", "1", "-exec",
+         "chmod", "u+rwX", "{}", "+"],
         capture_output=True, text=True, timeout=120,
     )
     if chmod.returncode != 0:

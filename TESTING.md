@@ -244,6 +244,34 @@ silently report "No plugin suites to run." instead of the real problem. An
 explicit plugin name or `--all` run is unaffected, since neither ever
 consults `--base` at all.
 
+Every git subprocess the wrapper runs on the HOST (bundling, cloning,
+reading the dirty/hidden-flag warnings, etc.) forces
+`GIT_NO_LAZY_FETCH=1` and `GIT_NO_REPLACE_OBJECTS=1` in addition to the
+repository-selection scrubbing and `GIT_OPTIONAL_LOCKS=0` described above
+-- without them, resolving `HEAD`/the diff base in a partial clone could
+lazily fetch missing objects INTO the host repository (a host mutation
+this wrapper exists to prevent), and a locally configured replacement ref
+could silently substitute different history into the snapshot than what
+`HEAD`/`--base` actually name.
+
+Inside the container, `uv` is bootstrapped via a pinned-version,
+SHA-256-verified direct download of its release tarball (not a bare
+`curl ... | sh` pipeline) -- the installed `uv` persists and runs again on
+every later `devcontainer exec` with the checkout snapshot already
+present and outbound networking reachable, so an unpinned/unverified
+installer would have everything it needed to defeat the isolation
+boundary. The devcontainer spec also grants the workspace path a `git`
+`safe.directory` exemption (via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/
+`GIT_CONFIG_VALUE_0` `containerEnv` entries): the workspace volume's own
+mountpoint is always root-owned (nothing inside the container can ever
+`chown` it, since `--cap-drop=ALL` drops `CAP_CHOWN` too), and modern Git
+refuses to operate inside a working tree it discovers is owned by a
+different user -- without the exemption, every git invocation
+`run-plugin-tests.py` makes (including its own changed-file diffing)
+would fail, and since that script treats a failed `git diff` as an empty
+target set rather than an error, it would silently report "no plugin
+suites to run" instead of the real problem.
+
 
 ## Local Windows SSH proxy regression
 

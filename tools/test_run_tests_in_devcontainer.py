@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import os
+import re
 import subprocess as real_subprocess
 import sys
 import tarfile
@@ -633,37 +635,63 @@ def test_populate_workspace_streams_tar_file_as_stdin_then_chmod(monkeypatch) ->
         dest.write_bytes(b"not-empty")
 
     monkeypatch.setattr(wrapper, "_write_tar_of_repo", fake_write_tar)
+    chmod_root_result = mock.Mock(returncode=0, stderr="")
     tar_result = mock.Mock(returncode=0, stderr=b"")
     chmod_result = mock.Mock(returncode=0, stderr="")
     with mock.patch.object(wrapper.subprocess, "run",
-                            side_effect=[tar_result, chmod_result]) as run:
+                            side_effect=[chmod_root_result, tar_result, chmod_result]) as run:
         wrapper._populate_workspace("container-9", ["--changed"], include_untracked=True)
-    assert run.call_count == 2
+    assert run.call_count == 3
     assert len(written_paths) == 1
     assert written_passthrough == [["--changed"]]
     assert written_include_untracked == [True]
 
-    tar_call = run.call_args_list[0]
+    chmod_root_call = run.call_args_list[0]
+    chmod_root_args = chmod_root_call.args[0]
+    assert chmod_root_args[:4] == ["docker", "exec", "-u", "root"]
+    assert "chmod" in chmod_root_args
+    assert wrapper.CONTAINER_WORKSPACE in chmod_root_args
+
+    tar_call = run.call_args_list[1]
     tar_args = tar_call.args[0]
-    assert tar_args[:5] == ["docker", "exec", "-i", "-u", "root"]
+    assert tar_args[:5] == ["docker", "exec", "-i", "-u", wrapper.REMOTE_USER]
     assert "container-9" in tar_args
     assert "tar" in tar_args
-    assert "--no-same-owner" in tar_args
+    # Extraction runs AS the non-root remote user, not root -- every
+    # extracted file is then natively owned by that user with no chown
+    # step needed (and none would be possible: `--no-same-owner` is no
+    # longer necessary or present once extraction itself isn't root).
+    assert "--no-same-owner" not in tar_args
     # Streamed via `stdin=`, never buffered as an `input=` bytes payload.
     assert "stdin" in tar_call.kwargs
     assert "input" not in tar_call.kwargs
 
-    chmod_args = run.call_args_list[1].args[0]
-    assert chmod_args[:4] == ["docker", "exec", "-u", "root"]
+    chmod_args = run.call_args_list[2].args[0]
+    assert chmod_args[:4] == ["docker", "exec", "-u", wrapper.REMOTE_USER]
     assert "chmod" in chmod_args
     assert wrapper.CONTAINER_WORKSPACE in chmod_args
+
+
+def test_populate_workspace_raises_when_opening_up_the_empty_volume_fails(monkeypatch) -> None:
+    monkeypatch.setattr(wrapper, "_write_tar_of_repo",
+                         lambda dest, passthrough, *, include_untracked: dest.write_bytes(b""))
+    chmod_root_result = mock.Mock(returncode=1, stderr="chmod: operation not permitted")
+    with mock.patch.object(wrapper.subprocess, "run", return_value=chmod_root_result):
+        try:
+            wrapper._populate_workspace("container-9", [], include_untracked=False)
+        except SystemExit as exc:
+            assert "operation not permitted" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
 
 
 def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> None:
     monkeypatch.setattr(wrapper, "_write_tar_of_repo",
                          lambda dest, passthrough, *, include_untracked: dest.write_bytes(b""))
+    chmod_root_result = mock.Mock(returncode=0, stderr="")
     tar_result = mock.Mock(returncode=1, stderr=b"tar: permission denied")
-    with mock.patch.object(wrapper.subprocess, "run", return_value=tar_result):
+    with mock.patch.object(wrapper.subprocess, "run",
+                            side_effect=[chmod_root_result, tar_result]):
         try:
             wrapper._populate_workspace("container-9", [], include_untracked=False)
         except SystemExit as exc:
@@ -675,9 +703,11 @@ def test_populate_workspace_raises_when_tar_extraction_fails(monkeypatch) -> Non
 def test_populate_workspace_raises_when_chmod_fails(monkeypatch) -> None:
     monkeypatch.setattr(wrapper, "_write_tar_of_repo",
                          lambda dest, passthrough, *, include_untracked: dest.write_bytes(b""))
+    chmod_root_result = mock.Mock(returncode=0, stderr="")
     tar_result = mock.Mock(returncode=0, stderr=b"")
     chmod_result = mock.Mock(returncode=1, stderr="chmod: operation not permitted")
-    with mock.patch.object(wrapper.subprocess, "run", side_effect=[tar_result, chmod_result]):
+    with mock.patch.object(wrapper.subprocess, "run",
+                            side_effect=[chmod_root_result, tar_result, chmod_result]):
         try:
             wrapper._populate_workspace("container-9", [], include_untracked=False)
         except SystemExit as exc:
@@ -999,3 +1029,91 @@ def test_main_cleans_up_orphan_when_create_bounded_volume_itself_fails(monkeypat
     else:
         raise AssertionError("expected the original SystemExit to propagate")
     assert len(cleanup_calls) == 1
+
+
+def _load_devcontainer_config() -> dict:
+    # `.devcontainer/devcontainer.json` is JSONC (it carries extensive
+    # `//` explanatory comments) -- strip full-line and trailing `//`
+    # comments before parsing, mirroring the same crude-but-sufficient
+    # approach used to hand-validate this file during development.
+    text = wrapper.DEVCONTAINER_CONFIG.read_text()
+    cleaned = re.sub(r"(?m)^\s*//.*$", "", text)
+    cleaned = re.sub(r'(?<!:)//[^"\n]*$', "", cleaned, flags=re.MULTILINE)
+    return json.loads(cleaned)
+
+
+def test_devcontainer_config_never_mounts_a_docker_socket() -> None:
+    # A mounted Docker socket is a full host-escape vector -- this spec's
+    # entire point is a HARDENED isolation boundary, so this invariant
+    # must never silently regress even though nothing here exercises
+    # Docker itself.
+    config = _load_devcontainer_config()
+    run_args = config["runArgs"]
+    assert not any("docker.sock" in str(arg) for arg in run_args)
+    assert not any(str(arg).startswith("--privileged") for arg in run_args)
+    assert "mounts" not in config or not any(
+        "docker.sock" in str(m) for m in config["mounts"]
+    )
+
+
+def test_devcontainer_config_workspace_is_a_volume_not_a_host_bind() -> None:
+    # The whole point of the workspace-storage-model fix (Phase 1, item 1)
+    # is that the host checkout is never bind-mounted -- a regression back
+    # to a host bind would silently reopen the original host-mutation gap
+    # this effort exists to close.
+    config = _load_devcontainer_config()
+    assert "type=volume" in config["workspaceMount"]
+    assert "type=bind" not in config["workspaceMount"]
+
+
+def test_devcontainer_config_declares_the_runtime_hardening_invariants() -> None:
+    # Fast structural coverage for the runtime-posture invariants
+    # documented at length in the config's own comments: dropping these
+    # flags (or the resource ceilings) would leave the suite green under
+    # mocked Docker/devcontainer CI while silently reopening the exact
+    # host-escape and resource-exhaustion risks Phase 1 closed.
+    config = _load_devcontainer_config()
+    run_args = [str(arg) for arg in config["runArgs"]]
+    for required in (
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--read-only",
+        "--memory=12g",
+        "--memory-swap=12g",
+        "--cpus=4",
+        "--pids-limit=512",
+    ):
+        assert required in run_args, f"missing required runArg: {required!r}"
+    tmpfs_mounts = [
+        run_args[i + 1] for i, arg in enumerate(run_args) if arg == "--tmpfs"
+    ]
+    assert any(m.startswith("/home/vscode:") for m in tmpfs_mounts)
+    assert any(m.startswith("/tmp:") for m in tmpfs_mounts)
+    assert any(m.startswith("/run:") for m in tmpfs_mounts)
+
+
+def test_devcontainer_config_bootstraps_uv_via_a_pinned_verified_download() -> None:
+    # Closes the supply-chain gap a bare `curl ... | sh` pipeline would
+    # reopen: the bootstrap must pin an exact `uv` version and verify the
+    # downloaded archive's SHA-256 before ever executing anything from it.
+    config = _load_devcontainer_config()
+    on_create = config["onCreateCommand"]
+    assert "UV_VERSION=" in on_create
+    assert "sha256sum" in on_create
+    assert "| sh" not in on_create
+    assert "astral.sh/uv/install.sh" not in on_create
+
+
+def test_devcontainer_config_exempts_the_workspace_from_dubious_ownership_checks() -> None:
+    # The workspace volume's own top-level mountpoint is always root-owned
+    # (Docker creates it that way, and `--cap-drop=ALL` means nothing can
+    # ever `chown` it) even though `_populate_workspace` extracts its
+    # CONTENTS as the non-root `vscode` user. Modern Git's own ownership
+    # check inspects the working-tree ROOT, not just `.git`, so without
+    # this exemption every git invocation inside the container -- including
+    # `run-plugin-tests.py`'s own changed-file diffing -- would fail.
+    config = _load_devcontainer_config()
+    env = config["containerEnv"]
+    assert env.get("GIT_CONFIG_KEY_0") == "safe.directory"
+    assert env.get("GIT_CONFIG_VALUE_0") == wrapper.CONTAINER_WORKSPACE
+    assert env.get("GIT_CONFIG_COUNT") == "1"

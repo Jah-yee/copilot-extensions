@@ -199,7 +199,8 @@ def _timestamp(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else None
     if not isinstance(value, str) or not value:
         return None
     try:

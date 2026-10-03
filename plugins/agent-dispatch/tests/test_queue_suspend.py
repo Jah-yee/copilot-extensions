@@ -11,6 +11,7 @@ default cooldown monitor a bare ``suspend()`` applies, and
 
 from __future__ import annotations
 
+import json
 import typing
 
 import pytest
@@ -18,6 +19,7 @@ import pytest
 from agent_dispatch.monitors import MonitorKind
 from agent_dispatch.queue import Status, TaskQueue
 from agent_dispatch.queue_suspend import QueueSuspendMixin
+from tests._helpers import TEST_REPO
 
 
 @pytest.mark.guard
@@ -137,3 +139,62 @@ def test_reconcile_cooldowns_ignores_a_task_no_longer_suspended(tmp_path):
 
     assert resumed == 0
     assert q.get(task.id).status == Status.ABANDONED
+
+
+def test_reconcile_reviewer_deadlines_skips_malformed_evaluator_config(tmp_path):
+    q = TaskQueue(str(tmp_path / "q.sqlite3"))
+    q.register_registration(
+        "evaluator",
+        {"repo": TEST_REPO, "evaluator_ref": "good", "evaluator_spec": {}},
+    )
+    with q._connect() as conn:
+        conn.execute(
+            "INSERT INTO registrations (id, kind, spec, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'active', 0, 0)",
+            (
+                "bad-reviewer-loop",
+                "evaluator",
+                json.dumps(
+                    {
+                        "repo": TEST_REPO,
+                        "evaluator_ref": "bad",
+                        "evaluator_spec": {},
+                        "reviewer_loop": {"stale_after_days": "NaN"},
+                    }
+                ),
+            ),
+        )
+
+    assert q.reconcile_reviewer_deadlines(now=1_000_000.0) == 0
+
+
+def test_iter_suspended_reviewer_candidates_paginates_past_the_first_batch(tmp_path):
+    q = TaskQueue(str(tmp_path / "q.sqlite3"))
+    q.register_registration(
+        "evaluator",
+        {
+            "repo": TEST_REPO,
+            "evaluator_ref": "review-loop",
+            "evaluator_spec": {},
+            "reviewer_loop": {"stale_after_days": 7},
+        },
+    )
+    now = 1_000_000.0
+    stale_payload = json.dumps({"reviewer_loop": {"last_commit_at": now - (8 * 86400.0)}})
+    for index in range(3):
+        task = q.create(
+            f"review {index}",
+            repo=TEST_REPO,
+            require_verification=True,
+            evaluator_ref="review-loop",
+            payload_inline=stale_payload,
+        )
+        worker = f"worker-{index}"
+        q.claim_one(worker, task_id=task.id, repo=TEST_REPO)
+        q.start(task.id, worker, owner_session_id=f"session-{index}")
+        q.suspend(task.id, worker, reason="waiting", cooldown_seconds=None, now=now)
+
+    tasks = list(q._iter_suspended_reviewer_candidates(batch_size=2))
+
+    assert len(tasks) == 3
+    assert {task.title for task in tasks} == {"review 0", "review 1", "review 2"}

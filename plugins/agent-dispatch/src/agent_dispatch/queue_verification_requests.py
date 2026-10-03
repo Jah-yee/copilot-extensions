@@ -128,6 +128,16 @@ class QueueVerificationRequestsMixin:
             ).fetchone()
         return row is not None
 
+    def next_pending_verification_not_before(self) -> float | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(not_before) AS next_due FROM verification_requests"
+                " WHERE status = 'pending'"
+            ).fetchone()
+        if row is None or row["next_due"] is None:
+            return None
+        return float(row["next_due"])
+
     def recover_inflight_verification_requests(
         self,
         *,

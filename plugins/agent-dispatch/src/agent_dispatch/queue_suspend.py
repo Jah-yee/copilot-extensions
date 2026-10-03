@@ -29,17 +29,24 @@ from __future__ import annotations
 
 import math
 
+from collections.abc import Iterator
+
 from .monitors import DEFAULT_SUSPEND_COOLDOWN_SECONDS, MonitorKind, suspend_monitor_columns
 from .queue_common import (
     PROGRESS_SUMMARY_MAX,
     Task,
+    _TASK_BULK_SELECT,
     _check_expected_status,
     _clip,
     _task_transition_spec,
 )
 from .queue_records import Status, TaskError
 from .registrations import RegistrationKind
-from .reviewer_loops import reviewer_loop_deadline, reviewer_loop_lifecycle_config
+from .reviewer_loops import (
+    EvaluatorError,
+    reviewer_loop_deadline,
+    reviewer_loop_lifecycle_config,
+)
 
 
 class QueueSuspendMixin:
@@ -218,14 +225,17 @@ class QueueSuspendMixin:
             evaluator_ref = spec.get("evaluator_ref")
             if not isinstance(evaluator_ref, str) or not evaluator_ref:
                 continue
-            config = reviewer_loop_lifecycle_config(spec)
+            try:
+                config = reviewer_loop_lifecycle_config(spec)
+            except EvaluatorError:
+                continue
             if config is None or config.stale_after_days is None:
                 continue
             evaluator_configs[(spec.get("repo"), evaluator_ref)] = config.stale_after_days
         if not evaluator_configs:
             return 0
         resumed = 0
-        for task in self.list(status=Status.SUSPENDED, limit=5000):
+        for task in self._iter_suspended_reviewer_candidates():
             if (
                 not task.owner
                 or not task.evaluator_ref
@@ -274,3 +284,33 @@ class QueueSuspendMixin:
                 continue
             resumed += 1
         return resumed
+
+    def _iter_suspended_reviewer_candidates(
+        self, *, batch_size: int = 500
+    ) -> Iterator[Task]:
+        cursor: tuple[float, str] | None = None
+        with self._connect() as conn:
+            while True:
+                params: list[object] = [Status.SUSPENDED, batch_size]
+                cursor_clause = ""
+                if cursor is not None:
+                    params = [Status.SUSPENDED, cursor[0], cursor[0], cursor[1], batch_size]
+                    cursor_clause = (
+                        " AND (created_at < ? OR (created_at = ? AND id < ?))"
+                    )
+                rows = conn.execute(
+                    f"SELECT {_TASK_BULK_SELECT} FROM tasks"
+                    " WHERE status = ? AND require_verification = 1"
+                    " AND evaluator_ref IS NOT NULL"
+                    f"{cursor_clause}"
+                    " ORDER BY created_at DESC, id DESC LIMIT ?",
+                    params,
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    yield Task._from_row(row)
+                tail = rows[-1]
+                cursor = (float(tail["created_at"]), str(tail["id"]))
+                if len(rows) < batch_size:
+                    break

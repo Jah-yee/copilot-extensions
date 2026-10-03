@@ -16,8 +16,18 @@ log = logging.getLogger(__name__)
 WakeActive = Callable[[], bool]
 
 
-def _next_wait_interval(*, has_pending: bool, retry_interval: float, idle_interval: float) -> float:
-    return retry_interval if has_pending else idle_interval
+def _scheduled_wait_interval(
+    *,
+    now: float,
+    next_not_before: float | None,
+    retry_interval: float,
+    idle_interval: float,
+) -> float:
+    if next_not_before is None:
+        return idle_interval
+    if next_not_before <= now:
+        return retry_interval
+    return min(idle_interval, max(retry_interval, next_not_before - now))
 
 
 async def drain_verification_requests(
@@ -97,10 +107,14 @@ async def drain_verification_requests(
             lease_seconds=delivery_lease,
         )
         if request is None:
-            has_pending = await asyncio.to_thread(queue.has_pending_verification_requests)
+            now_value = await asyncio.to_thread(queue._now, None)
+            next_not_before = await asyncio.to_thread(
+                queue.next_pending_verification_not_before
+            )
             await _wait(
-                _next_wait_interval(
-                    has_pending=has_pending,
+                _scheduled_wait_interval(
+                    now=now_value,
+                    next_not_before=next_not_before,
                     retry_interval=interval,
                     idle_interval=idle_interval,
                 )

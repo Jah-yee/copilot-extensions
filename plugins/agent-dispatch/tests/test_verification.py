@@ -14,7 +14,10 @@ from agent_dispatch.github_provider_adapter import PRObservation
 from agent_dispatch.pr_observation_store import PRObservationStore
 from agent_dispatch.queue import Status, TaskError
 from agent_dispatch.verification import evaluate_submitted_task
-from agent_dispatch.verification_drain import drain_verification_requests
+from agent_dispatch.verification_drain import (
+    _scheduled_wait_interval,
+    drain_verification_requests,
+)
 from agent_dispatch.provider_state_machine import ApprovalStatus, Mergeability, Revision
 from tests._helpers import TEST_REPO
 from tests._helpers import RepoDefaultingQueue as TaskQueue
@@ -443,6 +446,34 @@ def test_reviewer_loop_can_derive_last_commit_at_from_provider_observation_store
 
     assert report["applied"][0]["decision"] == "abandon"
     assert queue.get(task_id).status == Status.ABANDONED
+
+
+def test_future_scheduled_verification_uses_idle_interval_not_retry_interval(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    task = queue.create(
+        "retry later",
+        require_verification=True,
+        evaluator_ref="review-loop",
+    )
+    with queue._connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (Status.SUBMITTED, 1_000.0, task.id),
+        )
+    queue.schedule_submitted_verification(
+        task.id,
+        trigger="reviewer-loop-stale-deadline",
+        not_before=10_000.0,
+        now=1_000.0,
+    )
+
+    assert queue.next_pending_verification_not_before() == 10_000.0
+    assert _scheduled_wait_interval(
+        now=1_000.0,
+        next_not_before=10_000.0,
+        retry_interval=0.25,
+        idle_interval=5.0,
+    ) == 5.0
 
 
 @pytest.mark.parametrize(

@@ -246,6 +246,24 @@ answer against the actual repository/CI configuration:
   predictable asset filenames (one per platform/arch/ABI, plus one per
   vendored lib wheel), requiring no separate discovery service and matching
   a pattern this codebase already trusts.
+- **Wheel-tag semantic compatibility (new, 2026-10-02):** identified during
+  `tools/build_python_artifacts.py` review. An artifact set's
+  python/abi/platform tag reconciliation
+  (`build_python_artifacts.overall_identity_tags`) currently treats any two
+  differing, non-universal tags in the same slot as a hard conflict
+  (strict string equality or fail closed) -- deliberately conservative, but
+  not semantically correct: e.g. an `abi3`-tagged wheel is genuinely
+  compatible with any `cp3x`-tagged wheel for a newer interpreter (CPython's
+  stable ABI), and manylinux platform tags have their own compatibility
+  hierarchy, neither of which this reconciliation understands. **Not yet a
+  real problem**: every plugin/lib in this repo is pure-Python
+  (`py3-none-any`) today (confirmed by the Build hermeticity survey above),
+  so this never fires in practice. Resolving it concretely (a real PEP
+  425/600-aware compatibility resolver, or an explicit target-tag-set
+  validation approach) is deferred to whichever future phase first needs to
+  build a platform-specific artifact -- not solved speculatively here, per
+  this effort's own established pattern of naming real gaps rather than
+  pre-solving unneeded generality.
 
 ## Validation Plan
 
@@ -423,6 +441,21 @@ win grows with build complexity.
   no other repository documentation describes it, and `TESTING.md` does
   not enumerate individual `tools/test_*.py` files, so it remains accurate
   without changes.
+- A fourth review round found 1 more real issue and reiterated 1 carried-
+  over, non-blocking one: `*.egg-info`'s directory name varies per package
+  (unlike the fixed names already ignored), so a build's residue left
+  behind from one invocation was still being hashed as part of the NEXT
+  invocation's "pre-build" tree -- fixed by ignoring any directory
+  component ending in `.egg-info` (mirroring `uv_editable_ref._file_hashes`'s
+  own identical exclusion), with a repeated-invocation regression test.
+  The carried-over "validate wheel tags semantically, not by string
+  equality" finding is real but out of proportion to this slice: resolving
+  it needs genuine PEP 425/600 compatibility-class logic (`abi3` forward
+  compatibility, manylinux platform-tag hierarchies), and no plugin/lib in
+  this repo ships anything but a pure-Python wheel today. Recorded as a
+  new, named Open Design Question above rather than solved speculatively,
+  matching this effort's own established pattern for genuinely deferred
+  work.
 - **Not yet done** (explicitly out of scope for this slice, named in the
   Phase 2 checklist): wiring this into the real `promote_release.py`
   pipeline; a per-promotion-run shared build-toolchain lock (this slice

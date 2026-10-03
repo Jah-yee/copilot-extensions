@@ -313,6 +313,25 @@ def test_directory_content_hash_ignores_pycache_and_build_dirs(tmp_path: Path):
     assert before == after
 
 
+def test_directory_content_hash_ignores_egg_info_across_repeated_calls(
+    tmp_path: Path,
+):
+    # Regression: *.egg-info has a per-package-varying name (unlike the
+    # fixed names in _PAYLOAD_IGNORE_DIR_NAMES), and a build backend can
+    # leave one behind inside the source tree. Without ignoring it by
+    # suffix, a SECOND invocation's "pre-build" hash would differ from the
+    # first just because the first build's residue is still on disk --
+    # even though no real source changed.
+    d = tmp_path / "pkg"
+    d.mkdir()
+    (d / "a.py").write_text("x = 1\n", encoding="utf-8")
+    before = bpa.directory_content_hash(d)
+    (d / "demo.egg-info").mkdir()
+    (d / "demo.egg-info" / "PKG-INFO").write_text("generated", encoding="utf-8")
+    after = bpa.directory_content_hash(d)
+    assert before == after
+
+
 def test_directory_content_hash_reflects_uncommitted_working_tree_mutation(
     tmp_path: Path,
 ):
@@ -487,6 +506,13 @@ def test_build_plugin_artifacts_payload_hash_excludes_build_residue(
     manifest = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
 
     assert manifest["payload_hash"] == expected_hash
+
+    # Regression (round 2 of this same finding): residue left behind by
+    # THIS invocation must not change the NEXT invocation's "pre-build"
+    # hash either -- the egg-info directory is still on disk when
+    # build_plugin_artifacts runs a second time.
+    manifest2 = bpa.build_plugin_artifacts("demo", out_dir=out_dir)
+    assert manifest2["payload_hash"] == expected_hash
 
 
 def test_build_plugin_artifacts_artifact_id_changes_with_wheel_bytes(

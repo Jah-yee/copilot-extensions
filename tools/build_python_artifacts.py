@@ -122,7 +122,7 @@ def resolve_vendored_libs(consumer_dir: Path) -> list[tuple[str, Path]]:
 
 
 _PAYLOAD_IGNORE_DIR_NAMES = {
-    ".git", "__pycache__", ".pytest_cache", "build", "dist",
+    ".git", ".venv", "__pycache__", ".pytest_cache", "build", "dist",
     ".mypy_cache", ".ruff_cache",
 }
 _PAYLOAD_IGNORE_SUFFIXES = (".pyc", ".pyo")
@@ -163,6 +163,17 @@ def directory_content_hash(d: Path) -> str:
             continue
         rel_parts = p.relative_to(d).parts
         if any(part in _PAYLOAD_IGNORE_DIR_NAMES for part in rel_parts[:-1]):
+            continue
+        if any(part.endswith(".egg-info") for part in rel_parts):
+            # A build backend (setuptools' build_meta in particular) can
+            # leave a `*.egg-info` directory inside the source tree even
+            # for an isolated wheel build -- unlike `_PAYLOAD_IGNORE_DIR_NAMES`'
+            # fixed names, its own directory name varies per-package (e.g.
+            # `demo.egg-info`), so it must be matched by suffix, not exact
+            # name. Without this, a build left behind from one invocation
+            # changes the NEXT invocation's "pre-build" payload hash for
+            # otherwise-unchanged source (mirrors `uv_editable_ref._file_hashes`'s
+            # own identical exclusion).
             continue
         if p.suffix in _PAYLOAD_IGNORE_SUFFIXES:
             continue

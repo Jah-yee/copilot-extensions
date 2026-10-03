@@ -36,6 +36,7 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -846,7 +847,32 @@ def _cleanup_orphan(instance_label: str, volume_name: str) -> None:
         print(f"warning: orphan-cleanup failed to remove volume {volume_name}: {exc}", file=sys.stderr)
 
 
+class _TerminationRequested(BaseException):
+    """Raised from the SIGTERM handler installed in ``main`` so the
+    wrapper's own try/finally cleanup runs instead of the process dying
+    silently. The default SIGTERM action terminates a Python process
+    IMMEDIATELY, bypassing every ``finally`` block (including container
+    and volume teardown) -- an outer timeout, CI cancellation, or service
+    stop would otherwise leave both leaked, with no way for a LATER
+    invocation to find and remove them (``_cleanup_orphan`` only ever
+    searches by the new random instance label each fresh run gets, never
+    a prior run's). Deliberately a ``BaseException`` subclass (matching
+    ``KeyboardInterrupt``'s own hierarchy placement), so the existing
+    ``except BaseException`` teardown/orphan-cleanup paths below already
+    handle it with no further changes needed there."""
+
+
+def _raise_on_sigterm(signum: int, frame: object) -> None:
+    raise _TerminationRequested(f"received signal {signum}")
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Converts a SIGTERM into a normal raised exception so this
+    # function's own try/finally cleanup runs -- see
+    # `_TerminationRequested`'s docstring. SIGINT needs no equivalent
+    # handler: Python already raises `KeyboardInterrupt` for it by
+    # default, which the same `except BaseException` paths already catch.
+    signal.signal(signal.SIGTERM, _raise_on_sigterm)
     ap = argparse.ArgumentParser(
         description=(
             "Run tools/run-plugin-tests.py inside the test-isolation devcontainer."

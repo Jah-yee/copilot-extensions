@@ -71,7 +71,7 @@
   // fixed, checked invariants, not optional tuning) -- without them, a
   // test could exhaust host RAM/CPU or fork-bomb outside of (or even
   // before) `tools/run-plugin-tests.py`'s OWN inner per-sub-suite bounds
-  // ever get a chance to act. `--memory=12g` is sized for the COMBINED
+  // ever get a chance to act. `--memory=14g` is sized for the COMBINED
   // inner budgets, not just one of them: that runner's own
   // `--max-memory-mb` (4096 MiB resident) and `--max-temp-mb` (2048 MiB,
   // tmpfs-backed and therefore ALSO charged to this same memory cgroup)
@@ -80,26 +80,33 @@
   // tmpfs-backed `$HOME`/`/tmp`/`/run` mounts below, or the tmpfs-backed
   // workspace volume (`_create_bounded_volume`, also charged to this same
   // cgroup) -- a smaller ceiling could OOM-kill a perfectly valid,
-  // within-budget suite. `/tmp`'s own `size=3072m` specifically must stay
-  // above that same runner's own advertised `--max-temp-mb` default (2048
-  // MiB) for the same reason -- a smaller outer `/tmp` ceiling would let a
-  // legitimate, within-budget inner suite hit `ENOSPC` on the OUTER
-  // boundary before the inner runner's own guard ever gets a chance to
-  // enforce its own limit. (A tmpfs `size=` is only a ceiling on actual
-  // bytes written, not a reservation, so none of this headroom inflates
-  // the container's real memory footprint in the common case -- the
-  // overall `--memory` cgroup limit above remains the real backstop
-  // regardless of any single mount's nominal cap.)
+  // within-budget suite. `/tmp`'s own `size=6144m` specifically must stay
+  // comfortably above the SUM of that same runner's own advertised
+  // `--max-temp-mb` default (2048 MiB) AND `UV_CACHE_DIR` (pointed at
+  // `/tmp/uv-cache` below, since it shares this one mount) -- that
+  // runner's own sandbox containment only measures its OWN temp usage,
+  // never the uv cache sitting alongside it on the same tmpfs, so a
+  // heavier dependency install (especially under `--all`) growing the
+  // cache past roughly 1 GiB could hit `ENOSPC` on the OUTER `/tmp`
+  // boundary even while the inner runner still reports comfortably
+  // within its own advertised budget. Sized generously (to ~4 GiB of
+  // headroom above the inner 2048 MiB figure) rather than exactly, since
+  // the uv cache's real footprint isn't bounded by any similarly fixed
+  // budget this wrapper can read and enforce precisely. (A tmpfs `size=`
+  // is only a ceiling on actual bytes written, not a reservation, so none
+  // of this headroom inflates the container's real memory footprint in
+  // the common case -- the overall `--memory` cgroup limit above remains
+  // the real backstop regardless of any single mount's nominal cap.)
   "runArgs": [
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
     "--read-only",
-    "--memory=12g",
-    "--memory-swap=12g",
+    "--memory=14g",
+    "--memory-swap=14g",
     "--cpus=4",
     "--pids-limit=512",
     "--tmpfs", "/home/vscode:rw,nosuid,nodev,exec,mode=1777,size=256m",
-    "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=3072m",
+    "--tmpfs", "/tmp:rw,nosuid,nodev,exec,size=6144m",
     "--tmpfs", "/run:rw,nosuid,nodev,mode=1777,size=64m"
   ],
 

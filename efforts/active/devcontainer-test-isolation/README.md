@@ -1080,3 +1080,46 @@ end-to-end run (`ai-attribution`, 98 passed / 6 skipped) confirms the
 common case still works; Docker cleanup (`docker ps -a`, `docker volume
 ls`) and host `git status --short` reconfirmed clean of anything beyond
 this round's own diff.
+
+### 2026-10-03 — Review round 15 (final pass): 2 findings addressed (SIGTERM-safe teardown, uv-cache/tmp headroom)
+A fourth review pass of the same round confirmed the prior two fixes
+(resolved) and raised two more. HIGH: the default Unix `SIGTERM` action
+terminates a Python process immediately, bypassing every `finally` block
+-- so an outer timeout, CI cancellation, or service stop mid-run would
+leak both the container and its uniquely named volume, with no way for a
+LATER invocation to find and remove them (`_cleanup_orphan` only ever
+searches by the new random instance label a fresh run gets, never a prior
+run's). Fixed by installing a `SIGTERM` handler (`_raise_on_sigterm`) at
+the top of `main` that raises a dedicated `_TerminationRequested`
+(`BaseException` subclass, matching `KeyboardInterrupt`'s own hierarchy
+placement) instead -- the existing `except BaseException`
+teardown/orphan-cleanup paths handle it with no further changes needed.
+`SIGINT` needed no equivalent handler: Python already raises
+`KeyboardInterrupt` for it by default. MEDIUM (surfaced against
+round-13's own `/tmp`/`UV_CACHE_DIR` choices, in code otherwise unchanged
+this round): the inner `run-plugin-tests.py`'s own sandbox containment
+measures only ITS OWN temp usage, never the `uv` dependency cache sharing
+the same `/tmp` tmpfs mount -- a heavier dependency install (especially
+under `--all`) growing that cache past roughly 1 GiB could hit `ENOSPC`
+on the OUTER `/tmp` boundary even while the inner runner still reports
+comfortably within its own advertised 2048 MiB budget. Fixed by raising
+`/tmp`'s tmpfs size from 3072m to 6144m (~4 GiB of headroom above that
+inner figure, since the cache's real footprint isn't bounded by any
+similarly fixed budget this wrapper can read and enforce precisely), and
+`--memory`/`--memory-swap` from 12g to 14g to preserve comfortable
+cgroup headroom above the new worst-case estimate.
+
+Re-validated end-to-end: the full unit test suite (66 tests, including a
+new `_raise_on_sigterm` test and a new `main`-installs-the-handler test,
+plus updated resource-ceiling assertions in the structural devcontainer-
+config test) passes; a fresh Docker-backed end-to-end run
+(`ai-attribution`, 98 passed / 6 skipped) confirms the common case still
+works; and the SIGTERM fix itself was validated LIVE, not just via
+mocked unit tests -- a real run was started in the background, sent a
+real `SIGTERM` mid-test (both with and without `--keep`, to separately
+confirm the signal-to-exception conversion and the full teardown path it
+now unblocks), and confirmed via `docker ps -a`/`docker volume ls` that
+teardown ran to completion (no leftover container or volume) in the
+non-`--keep` case, while `--keep` correctly continued to preserve both
+for debugging. Docker cleanup and host `git status --short` reconfirmed
+clean of anything beyond this round's own diff after every pass.

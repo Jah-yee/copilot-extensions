@@ -899,6 +899,52 @@ def test_cleanup_orphan_never_raises_when_every_subprocess_call_itself_raises(ca
     assert "warning" in capsys.readouterr().err.lower()
 
 
+def test_raise_on_sigterm_raises_termination_requested() -> None:
+    import signal as signal_module
+
+    try:
+        wrapper._raise_on_sigterm(signal_module.SIGTERM, None)
+    except wrapper._TerminationRequested as exc:
+        assert "SIGTERM" in str(exc) or str(int(signal_module.SIGTERM)) in str(exc)
+    else:
+        raise AssertionError("expected _TerminationRequested")
+
+
+def test_main_installs_a_sigterm_handler(monkeypatch) -> None:
+    # The default SIGTERM action terminates the process immediately,
+    # bypassing every `finally` block (container/volume teardown
+    # included) -- `main` must convert it into a normal raised exception
+    # instead, so an outer timeout or CI cancellation can't leak a
+    # container/volume with no later run able to find it.
+    config_path = None
+
+    def fake_per_instance_config(label: str):
+        nonlocal config_path
+        import tempfile as _tempfile
+        d = _tempfile.mkdtemp()
+        config_path = Path(d) / "devcontainer.json"
+        config_path.write_text("{}")
+        return config_path, "fake-volume"
+
+    monkeypatch.setattr(wrapper, "_per_instance_config", fake_per_instance_config)
+    monkeypatch.setattr(wrapper, "_create_bounded_volume", lambda volume_name: None)
+    monkeypatch.setattr(wrapper, "_bring_up", lambda instance_label, config_path: "container-1")
+    monkeypatch.setattr(wrapper, "_populate_workspace",
+                         lambda container_id, passthrough, *, include_untracked: None)
+    monkeypatch.setattr(wrapper, "_run_tests",
+                         lambda container_id, config_path, passthrough: 0)
+    monkeypatch.setattr(wrapper, "_tear_down", lambda container_id, volume_name: None)
+
+    signal_calls: list[tuple] = []
+    with mock.patch.object(wrapper.signal, "signal",
+                            side_effect=lambda *a: signal_calls.append(a)) as signal_mock:
+        wrapper.main([])
+    assert signal_mock.call_count == 1
+    registered_signum, registered_handler = signal_calls[0]
+    assert registered_signum == wrapper.signal.SIGTERM
+    assert registered_handler is wrapper._raise_on_sigterm
+
+
 def test_main_strips_double_dash_separator_anywhere_in_passthrough(monkeypatch) -> None:
     calls: list[list[str]] = []
 
@@ -1148,8 +1194,8 @@ def test_devcontainer_config_declares_the_runtime_hardening_invariants() -> None
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--read-only",
-        "--memory=12g",
-        "--memory-swap=12g",
+        "--memory=14g",
+        "--memory-swap=14g",
         "--cpus=4",
         "--pids-limit=512",
     ):

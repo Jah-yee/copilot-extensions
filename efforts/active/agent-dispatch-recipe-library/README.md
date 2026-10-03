@@ -374,8 +374,10 @@ below — read it before starting any Phase 3 work).
       check, and priority assignment; evaluator (via the verification-gate
       mechanism) confirms the issue carries the required triage label/marker
       schema and effort assignment.
-- [x] Use Phase 2's GitHub/ADO/Gitea backlog-provider adapters for its
-      filterable issue-list emitter; no recipe-specific listing code.
+- [x] Use Phase 2's existing provider-neutral backlog emitter surface --
+      GitHub + Azure DevOps adapters today, and the same generic hook the
+      deferred Gitea adapter will eventually plug into -- with no
+      recipe-specific listing code.
 - [x] Tests: end-to-end against a fixture issue, GitHub adapter first;
       confirm the evaluator's schema/marker check.
 

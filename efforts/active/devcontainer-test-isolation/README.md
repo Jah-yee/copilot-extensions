@@ -784,3 +784,18 @@ coverage for all three fixes) passes, a fresh Docker-backed end-to-end run
 don't starve a real test run, and a live `docker inspect` confirms the
 exact limit values took effect.
 
+### 2026-10-03 — Review round 9: 1 finding addressed (EOL base image)
+Automated review raised one new item: the base image,
+`mcr.microsoft.com/devcontainers/python:1-3.12-bullseye`, is Debian 11
+Bullseye, whose Debian LTS ended 2026-08-31 -- it no longer receives public
+Debian security updates, undercutting the hardened posture this spec exists
+to provide. Fixed by switching to the supported
+`mcr.microsoft.com/devcontainers/python:1-3.12-bookworm` (Debian 12) variant.
+Re-validated the full real-container posture against the new image, not
+just the image tag change in isolation: `docker inspect` confirms
+`ReadonlyRootfs: true`, `CapDrop: ["ALL"]`, `no-new-privileges`, no
+`Binds`, and the same `Memory`/`MemorySwap`/`NanoCpus`/`PidsLimit` values
+as before all still hold on Bookworm, `cat /etc/os-release` confirms
+`VERSION="12 (bookworm)"`, and a real plugin suite (`ai-attribution`, 98
+passed / 6 skipped) still runs to completion end-to-end.
+

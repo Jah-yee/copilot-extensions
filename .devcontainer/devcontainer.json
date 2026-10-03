@@ -14,7 +14,7 @@
   // containment paths `TESTING.md` describes via its own windows-latest
   // runner -- see Phase 0's scope decision).
   "name": "copilot-extensions-test-isolation",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bullseye",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
 
   // Workspace storage model (Phase 1, item 1): a naive devcontainer binds
   // the host checkout read-write by default, so a file written from inside

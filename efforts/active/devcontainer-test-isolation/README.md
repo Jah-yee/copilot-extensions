@@ -246,13 +246,25 @@ verbatim ask.
       as originally stated -- confirmed unaffected by this finding, since
       it concerns opt-in-vs-structural enforcement, not the boundary's
       technical strength.
-- [ ] Decide whether the spec targets Linux only (matching this repo's CI
+- [x] Decide whether the spec targets Linux only (matching this repo's CI
       runners) or must also cover the Windows-specific containment paths
       `TESTING.md` describes (`COPILOT_EXTENSIONS_TEST_CONTAINED`,
       registry-key diffing, Job-breakaway suppression) -- a Linux-only
       devcontainer cannot exercise those paths at all, which may be an
       acceptable scope boundary or may leave a real gap, depending on the
-      answer to the first two bullets.
+      answer to the first two bullets. **Decided 2026-10-03 (agent-
+      recommended, open to revision at Phase 1's own review): Linux-only
+      scope.** Reasoning: Docker Dev Containers are overwhelmingly a Linux-
+      container technology in practice (Windows containers exist but are
+      rarely used for this tooling and add substantial complexity for
+      minimal benefit here); this repo's CI already runs a dedicated
+      `windows-latest` test-runner job exercising exactly the Windows-
+      specific paths `TESTING.md` describes, so those paths already have
+      real coverage independent of this effort. A Linux-only devcontainer
+      spec therefore narrows this effort's own scope to the Linux test-
+      execution path without leaving the Windows paths uncovered overall --
+      it simply doesn't duplicate coverage that already exists elsewhere.
+      This closes Phase 0.
 
 ### Phase 1 — Spec design
 - [ ] Design the workspace storage model to actually close the gap Phase 0
@@ -262,11 +274,20 @@ verbatim ask.
       adversarial test mutate the real host checkout, which is a regression
       versus the existing `run-plugin-tests.py` containment, not an
       improvement).
-- [ ] _Further items pending the remaining Phase 0 findings (Linux-only vs.
-      cross-platform scope decision)._
+- [ ] Design the runtime-posture hardening the naive baseline lacked: drop
+      all Linux capabilities (add back only what the test suite genuinely
+      needs), enforce `no-new-privileges`, decide on Docker-socket exclusion
+      (default -- no feature should add it back without a deliberate,
+      documented reason), and scope networking to what tests actually
+      require rather than leaving the default bridge's full outbound reach.
+- [ ] Decide how this devcontainer spec is invoked for Linux test execution
+      specifically -- a new `tools/run-plugin-tests.py` mode, a separate
+      wrapper script, or direct `devcontainer exec` -- and how it relates to
+      (without duplicating) the existing turn-key runner's own containment
+      for contributors who aren't using the devcontainer.
 
 ### Phase 2 — Wire into CI / contributor flow
-- [ ] _Pending Phase 0/1._
+- [ ] _Pending Phase 1._
 
 ## Validation Plan
 
@@ -328,3 +349,16 @@ checklist item's conclusion accordingly: a real OS-level boundary is
 achievable and would close a genuine gap, but only if Phase 1 deliberately
 designs for it -- the naive baseline does not provide it "for free." Still
 open: the Linux-only vs. cross-platform scope decision.
+
+### 2026-10-03 — Phase 0 closed; Phase 1 scoped
+Decided (agent-recommended, open to revision at Phase 1's own review
+gate): Linux-only scope, since this repo's CI already runs a dedicated
+Windows test-runner job covering `TESTING.md`'s Windows-specific containment
+paths independently of this effort. All three Phase 0 checklist items are
+now done. Expanded Phase 1 into three concrete design items derived directly
+from Phase 0's findings: the workspace storage model (container-local/
+overlay, not a plain RW host bind), runtime-posture hardening (capability
+drop, `no-new-privileges`, Docker-socket exclusion, scoped networking), and
+how the spec is actually invoked for Linux test execution without
+duplicating `run-plugin-tests.py`'s existing containment for contributors
+not using it.

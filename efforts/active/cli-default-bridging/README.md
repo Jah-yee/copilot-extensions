@@ -403,3 +403,218 @@ container + Dev Box, and only the local-machine design/unit-test layer is
 covered so far. Phase 2 (driver-exclusivity) and Phase 3 (escalation ladder)
 remain explicitly open and are named as such in the plugin's own README
 rather than silently assumed solved.
+
+### 2026-10-02 (cont'd) — Fleet-hygiene hardening (operator-requested)
+
+Operator flagged a real gap before this lands further: the design so far
+proved correctness for *one* session, not for a **fleet** of parallel
+sessions on the same machine (agent-dispatch workers, several worktrees,
+several CodeSpaces/containers). Added `extensions/agent-remote-driver/registry.mjs`
+and `bin/list-sessions.mjs`:
+
+- Collisions were already structurally impossible (session-id-named
+  descriptors, OS-assigned ephemeral ports) — the real risk was
+  **accumulation**: a crashed session never runs its own cleanup, orphaning
+  its descriptor. Fixed with self-healing reaping: every new session sweeps
+  the shared discovery directory at its own startup — no dedicated reaper
+  daemon.
+- Bare pid-liveness isn't trustworthy alone (pid reuse after a crash) — added
+  a heartbeat (`updatedAt`, refreshed every 30s). `isStale` reaps on EITHER
+  signal alone (a dead pid, OR a live pid whose heartbeat has gone stale) —
+  not "both required," which would under-reap a hung process with a dead
+  heartbeat. A true cross-platform birth-time check (mirroring
+  `agent-codespaces`' Connection Owner `owner_identity` pattern) is named as
+  a follow-up, not yet built.
+- A snapshot-then-act TOCTOU (the owning session can refresh its heartbeat
+  between a sweep's staleness snapshot and its delete) is closed by
+  `reapIfStillStale`: re-read and re-validate staleness immediately before
+  unlinking, never act on the original snapshot alone. Similarly, the
+  heartbeat's own on-disk rewrite is now atomic (temp file + rename, see
+  `discovery.mjs`'s `writeDescriptorAtomic`) so a concurrent reader never
+  observes a half-written descriptor mid-heartbeat. Caught in PR #5036's own
+  review round, fixed in the same PR.
+- A `SIGINT`/`SIGTERM` handler that only unlinks and returns leaves Node's
+  default termination suppressed (a registered listener disables it) — the
+  process stays alive with the heartbeat timer still armed, which would
+  simply recreate the descriptor the handler just removed. Fixed to match
+  `context-handoff`'s established pattern: remove the listener, then
+  re-raise the identical signal so the OS's default disposition actually
+  terminates the process. Also caught in PR #5036's review.
+- `bin/list-sessions.mjs` is the one aggregation entry point: sweep + list +
+  bounded-concurrency (max 8 in-flight) `/health` confirmation in a single
+  pass, so a fleet controller never re-implements its own per-session
+  scan/probe loop (the actual "process-bombing"/connection-storm risk at
+  fleet scale).
+- `driver-server.mjs` now caps concurrent `/events` subscribers
+  (`MAX_SSE_CLIENTS = 16`, `503` past the cap) and `extension.mjs`'s own
+  `listen()` is retried a bounded 3 times on a bind race before degrading
+  silently — never an unbounded retry loop. A crash
+  (`uncaughtException`/`unhandledRejection`) now runs descriptor cleanup
+  before exiting.
+
+20 new `node --test` cases (36 total for the plugin, all passing), covering
+real spawned-and-exited child processes for pid-liveness, a real
+`http.Server` for the SSE connection cap, and filesystem-backed sweep/reap
+scenarios including a 25-session synthetic fleet. README's *Fleet hygiene*
+section documents the design and the explicit limitation (pid-reuse edge
+case) rather than claiming it fully closed.
+
+### 2026-10-03 — Second review round: closing the TOCTOU for real, plus three more fixes
+
+PR #5036's Copilot review round caught that the first-pass TOCTOU fix
+(re-read-then-unlink) still had its own narrower race: the owner's heartbeat
+rename could land between the re-read and the unlink. Closed properly with
+an atomic claim: `reapIfStillStale` now does `renameSync(path, claimPath)`
+first (atomic on both POSIX and Windows — whichever write wins the instant
+wins outright, with no window where a concurrent writer and the reaper can
+act on the same path), revalidates staleness against the claimed copy
+(immune to further races since nothing else references `claimPath`), and
+either deletes it or renames it back if the owner's write actually won.
+
+Three more real findings, all fixed:
+- `writeDescriptorAtomic` leaked its temp file (which carries the bearer
+  token) on a failed rename — now cleaned up in all cases, with the
+  original error still surfaced.
+- A legacy-descriptor compatibility gap: a future rolling update where an
+  already-running OLDER session was never taught to write `updatedAt` would
+  have its still-alive descriptor reaped purely for predating a protocol
+  change. `isStale` now treats a descriptor with NO `updatedAt` key at all
+  (not just one present-but-garbage) as pid-liveness-only. Cannot occur
+  today (every descriptor this version writes always carries the field) —
+  pure forward compatibility, not a current bug.
+- `reapIfStillStale`'s unlink-failure reporting was wrong: any unlink error
+  (including a genuine permission/I/O failure) was reported as
+  `removed: true`. Now only ENOENT (already gone) counts as a successful
+  reap; other failures are reported honestly.
+
+Also extracted the SDK-free process lifecycle (bounded listen-retry,
+signal-cleanup-then-reraise, the heartbeat/flush interval timer) out of the
+SDK-coupled `extension.mjs` into `lifecycle.mjs` — the review's direct ask
+("add coverage... extracting this lifecycle would allow deterministic
+tests without loading joinSession()"). 13 new tests exercise it with fully
+injected dependencies (a fake process-like object for signals, a fake
+timer scheduler) — no real OS signals or real waiting required.
+
+Running test count, for the record (the PR's own description previously
+mis-stated this round's delta — corrected there too): 36 after the initial
+fleet-hygiene commit → 48 after the first review-fix commit (atomic write +
+TOCTOU-v1 + signal fix + their tests, +12) → 61 after this round (+13,
+TOCTOU-v2 via atomic-claim, legacy-descriptor compatibility, unlink-failure
+reporting, the `lifecycle.mjs` extraction and its tests). Comments that
+referenced "PR #5036" directly were reworded to stay timeless per review
+feedback; the PR's own description now carries the required Documentation
+impact statement.
+
+### 2026-10-03 (cont'd) — Third review round: backpressure bound + two more hardening fixes
+
+- **SSE backpressure.** `MAX_SSE_CLIENTS` bounds client *count* but not
+  memory on its own — a single slow/non-reading client still lets Node
+  queue every forwarded event in its response buffer indefinitely. Added
+  `MAX_SSE_BUFFERED_BYTES` (2MB): a client whose buffered backlog exceeds it
+  is disconnected outright rather than allowed to keep growing.
+- **`writeDescriptorAtomic` write-failure cleanup.** The prior fix only
+  cleaned up the temp file when the *rename* failed; `writeFileSync` itself
+  can fail (ENOSPC/EIO) after already creating or partially writing the
+  file. Both paths now share one cleanup-then-rethrow block.
+- **`listDescriptorFiles` silently treated any `readdirSync` failure as an
+  empty fleet** — including EACCES/EIO, a genuine "the registry is
+  inaccessible" failure distinct from ENOENT's "no fleet yet." Now
+  propagates anything other than ENOENT; `bin/list-sessions.mjs` catches
+  that specifically and exits 1 with a clear message instead of falsely
+  reporting zero sessions.
+
+3 new `node --test` cases this round (64 total for the plugin, all
+passing).
+
+### 2026-10-03 (cont'd) — Fourth review round: a real "failed reap exposes stale as live" bug, plus sidecar sweeping
+
+Two more findings, both genuine:
+
+- **`reapIfStillStale` exposed a known-stale descriptor as live on a failed
+  claim.** When the atomic claim-rename itself failed for a reason other
+  than ENOENT (a permission/I/O error), the code fell back to returning the
+  original pre-claim snapshot — which had already been judged stale. That
+  snapshot then flowed into `sweepStale`'s `kept` list, so `listLive()` and
+  `bin/list-sessions.mjs` would report (and probe) a definitely-dead
+  endpoint as if it were real. Fixed: a failed claim (other than ENOENT) now
+  returns `descriptor: null` — reported nowhere, neither removed nor live,
+  an honest "could not act on this entry" rather than a false positive.
+- **Orphaned write/claim sidecars were never swept at all.** Neither a
+  `.tmp` file (an interrupted `writeDescriptorAtomic`) nor a `.reap-claim.*`
+  file (an interrupted `reapIfStillStale`) is a bare `.json` descriptor, so
+  the main sweep loop never looked at them — a crash at exactly the wrong
+  instant would leave one of these credential-bearing files on disk
+  forever. Added `sweepOrphanedSidecars`, now folded into every `sweepStale`
+  call: removes a sidecar once its owning pid is confirmed dead, leaves it
+  alone while the owner is still alive (may genuinely be mid-operation).
+
+7 new `node --test` cases this round (71 total for the plugin, all
+passing), including making `reapIfStillStale`'s rename function injectable
+specifically so the failed-claim branch is deterministically testable
+cross-platform, without relying on inconsistent POSIX/Windows permission
+APIs.
+
+**Explicitly accepted, not chased further:** the review's repeated
+"heartbeat lifecycle lacks automated test coverage" finding. The *generic*
+retry/signal/timer mechanics are now fully tested in `lifecycle.mjs`
+(round 2's extraction) — what remains untested is the specific wiring
+inside `extension.mjs` itself (e.g., "does the heartbeat tick actually call
+`writeDescriptor` with the current port/token"), which is entangled with
+that module's top-level `await joinSession(...)` side effect on import.
+Fully isolating it would mean restructuring `extension.mjs` into an
+importable `main()` that doesn't execute on module load — a larger change
+than this PR's scope, and not proportionate for a plugin that is
+`defaultEnabled: false` and has not yet been run against a single real
+`copilot` session (that gap is already named, separately, as this effort's
+next slice). Tracked here rather than re-attempted a fourth time.
+
+### 2026-10-03 (cont'd) — Fifth review round: sidecar reaping used the wrong PID
+
+A genuine bug in round 4's own fix: `sweepOrphanedSidecars` checked the
+sidecar's JSON **content** pid for liveness, but a `.reap-claim.*` sidecar's
+content is the CLAIMED (already-judged-stale) target session's own
+descriptor — its pid is *expected* to be dead. Checking that content pid
+made every live, currently-reaping claimant's own in-flight claim file look
+"owned by a dead pid" and get deleted out from under it mid-operation.
+Separately, a genuinely mid-write `.tmp` file (unparseable content) was
+being treated identically to an orphan regardless of whether its writer was
+alive. Fixed: `sweepOrphanedSidecars` now parses the OWNER pid directly from
+the filename (`SIDECAR_RE`'s capture groups) for both sidecar shapes, never
+from content — a `.tmp`'s filename pid already happened to match its writer
+by construction, but a `.reap-claim.*`'s filename pid (the claimant) and
+content pid (the claimed target) are deliberately different, and only the
+filename one is the correct liveness signal either way.
+
+Also fixed in this round: the SSE-backlog regression test's read loop had
+no bound of its own — a real regression (server stops disconnecting
+over-backlogged clients) would have hung the test process instead of
+failing it; raced each read against a 2s deadline. Removed "(Nth review
+round)" wording from changefile comments (durable release metadata should
+describe the technical change, not the review process). Clarified the
+README's dead-entry-persistence wording: a dead entry's physical removal
+genuinely waits for a sweep to run; seeing one persist with no sweep
+triggered in between is expected, not evidence of a bug on its own.
+
+5 new `node --test` cases this round (73 total for the plugin, all
+passing), explicitly covering the filename-vs-content pid mismatch for both
+sidecar shapes.
+
+### 2026-10-03 (cont'd) — Sixth review round: the same failed-reap bug, one step later
+
+One more real instance of the class of bug fixed in round 4: that fix
+covered a failed CLAIM (the rename to `claimPath`), but the subsequent
+DELETE of the claimed file could also fail (permission/I/O) while still
+returning the already-confirmed-stale `claimed` descriptor — exposing it as
+live for the exact same reason, just one step later in the same function.
+Fixed identically: a failed unlink (anything but ENOENT) now returns
+`descriptor: null`, never the stale descriptor. Made `unlinkFn` injectable
+(alongside the existing `renameFn`) so this branch is deterministically
+testable too.
+
+1 new `node --test` case this round (74 total for the plugin, all passing).
+
+**Status at this point:** six review rounds, every genuinely new and
+actionable finding fixed with real code + tests; remaining open threads are
+either the explicitly-accepted `extension.mjs`-wiring test-coverage gap
+(documented above) or stale thread-tracking against already-updated
+PR-description/doc-impact/test-count content. Proceeding to merge.

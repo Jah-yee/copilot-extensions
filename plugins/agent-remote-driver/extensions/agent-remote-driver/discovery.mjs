@@ -9,6 +9,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { writeFileSync, renameSync, chmodSync, unlinkSync } from "node:fs";
 
 // Discovery root: a per-machine (not per-repo) directory, matching the
 // vision's "user-global, not per-repo/per-worktree" install requirement.
@@ -30,11 +31,16 @@ export function generateToken() {
 // The discovery descriptor's shape -- intentionally minimal. `driverVersion`
 // lets a future wire-protocol revision of this same extension distinguish
 // itself from an older sibling's descriptor without guessing from shape.
-export function buildDescriptor({ sessionId, pid, port, token, cwd, startedAt, driverVersion }) {
+// `updatedAt` is a heartbeat: extension.mjs refreshes it periodically while
+// the session is alive, so registry.mjs's staleness check has a second
+// signal beyond raw pid liveness (needed because a dead pid can be reused by
+// an unrelated later process -- see registry.mjs's isStale).
+export function buildDescriptor({ sessionId, pid, port, token, cwd, startedAt, updatedAt, driverVersion }) {
   if (!sessionId) throw new Error("buildDescriptor: sessionId is required");
   if (!Number.isInteger(pid) || pid <= 0) throw new Error("buildDescriptor: pid must be a positive integer");
   if (!Number.isInteger(port) || port <= 0) throw new Error("buildDescriptor: port must be a positive integer");
   if (!token) throw new Error("buildDescriptor: token is required");
+  const now = new Date().toISOString();
   return {
     version: 1,
     driverVersion: driverVersion || "0.1.0-dev1",
@@ -44,7 +50,8 @@ export function buildDescriptor({ sessionId, pid, port, token, cwd, startedAt, d
     port,
     token,
     cwd: cwd || null,
-    startedAt: startedAt || new Date().toISOString(),
+    startedAt: startedAt || now,
+    updatedAt: updatedAt || now,
   };
 }
 
@@ -60,3 +67,39 @@ export function authorizes(authorizationHeader, expectedToken) {
   if (given.length !== expected.length) return false;
   return timingSafeEqual(given, expected);
 }
+
+// Writes the descriptor atomically: a plain writeFileSync on the LIVE path
+// truncates it in place, so a concurrent reader (another session's startup
+// sweep, bin/list-sessions.mjs) can observe a half-written file mid-write --
+// parse it as unreadable, and treat a genuinely live session as stale.
+// Writing to a same-directory temp file and renaming it over the real path
+// means any concurrent reader only ever observes the complete old or
+// complete new JSON, never a partial write (rename(2) is atomic on POSIX;
+// Node's fs.renameSync uses the equivalent atomic replace on Windows).
+export function writeDescriptorAtomic(path, descriptor) {
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmpPath, JSON.stringify(descriptor, null, 2), { mode: 0o600 });
+    try {
+      chmodSync(tmpPath, 0o600); // belt-and-suspenders where writeFileSync's mode is umask-adjusted
+    } catch {
+      /* best-effort; not fatal on platforms without POSIX perms (e.g. Windows) */
+    }
+    renameSync(tmpPath, path);
+  } catch (e) {
+    // A failed write OR a failed rename must not leave a credential-bearing
+    // temp file behind -- it carries the same bearer token as the real
+    // descriptor, and a write can fail (ENOSPC/EIO) after already creating
+    // or partially writing it, not just at the rename step. Clean up, then
+    // surface the ORIGINAL error (the cleanup attempt's own outcome is
+    // never more important than why the write actually failed).
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* best-effort; the original error is what the caller needs */
+    }
+    throw e;
+  }
+}
+
+

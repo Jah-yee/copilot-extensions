@@ -688,6 +688,17 @@ placement further; permit values are intersected, reject values are combined,
 and an impossible composition is rejected instead of creating a loop with no
 runnable worker.
 
+An optional top-level `stale_after_days` adds a reviewer-lifecycle stale-exit
+policy to the declaration's evaluator registration. When set, submitted
+verification abandons a reviewer task once the target change's last commit is
+older than that many days. The timestamp may come from inline reviewer metadata
+(`payload_inline.reviewer_loop.last_commit_at`) or, for the standard
+GitHub-backed flow, from a `payload_ref` like `github-pr:owner/repo#123`
+resolved through the persisted PR-observation cache. Suspended reviewer tasks
+also use the same deadline to wake a parked hibernation waiter instead of
+remaining dormant forever. The threshold is per declaration; omitting the key
+disables stale-exit checking entirely.
+
 ```bash
 agent-dispatch reviewer-loop setup .copilot-extensions/agent-dispatch/registrar/reviewer-loop.json
 agent-dispatch reviewer-loop inspect .copilot-extensions/agent-dispatch/registrar/reviewer-loop.json

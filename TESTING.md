@@ -146,9 +146,14 @@ anywhere in the remaining arguments) is passed straight through to
 2. Copies a point-in-time snapshot of the host checkout into that volume
    (a `tar` pipe through `docker exec`, excluding `.test-venvs` and other
    host-only artifacts, but including `.git` -- the turn-key runner's own
-   `--changed` mode needs real repository metadata) -- the host checkout is
-   only ever **read**, never mutated, by anything that happens afterward
-   inside the container.
+   `--changed` mode needs real repository metadata). For a normal checkout
+   that's just `.git` as-is; for a linked worktree (this repo's own
+   required flow -- `.git` here is a pointer FILE naming an absolute HOST
+   path, meaningless inside the container) it instead materializes a
+   merged, self-contained copy from the worktree's private metadata plus
+   the shared common dir, so `git` commands work normally inside the
+   container. Either way, the host checkout is only ever **read**, never
+   mutated, by anything that happens afterward inside the container.
 3. Runs `tools/run-plugin-tests.py` inside the container via
    `devcontainer exec` and propagates its exit code.
 4. Tears the container AND its per-invocation volume down afterward (pass

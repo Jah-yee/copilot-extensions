@@ -30,6 +30,7 @@ CLI surface stays intentionally small.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import shutil
@@ -128,14 +129,80 @@ def _bring_up(instance_label: str, config_path: Path) -> str:
     return container_id
 
 
+def _resolve_git_dirs() -> tuple[Path, Path]:
+    """Return ``(git_dir, common_dir)`` as absolute paths for the host
+    checkout. Equal for a normal checkout; different for a linked worktree
+    (this repo's own required flow), where ``git_dir`` is the per-worktree
+    private metadata dir and ``common_dir`` is the main checkout's shared
+    ``.git`` (objects/refs)."""
+    def _rev_parse(flag: str) -> Path:
+        res = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", flag],
+            capture_output=True, text=True, timeout=30,
+        )
+        if res.returncode != 0:
+            raise SystemExit(f"git rev-parse {flag} failed: {res.stderr.strip()}")
+        path = Path(res.stdout.strip())
+        return path if path.is_absolute() else (REPO / path).resolve()
+
+    return _rev_parse("--git-dir"), _rev_parse("--git-common-dir")
+
+
+def _materialized_git_dir(stack: contextlib.ExitStack) -> Path:
+    """Return a path to a self-contained ``.git`` directory to copy into
+    the container.
+
+    For a normal checkout this is just ``REPO/.git`` (no bug there --
+    reviewed and confirmed). For a linked worktree, though, ``.git`` is a
+    plain pointer FILE (``gitdir: <absolute host path>``) whose target is
+    this HOST's own filesystem layout, meaningless inside the container --
+    copying it verbatim would leave `git` inside the container pointing at
+    a path that doesn't exist there, so ``run-plugin-tests.py --changed``'s
+    `git diff`/`git status` calls would silently return nothing. Instead,
+    build a merged, self-contained copy in a temp directory: the shared
+    common dir's objects/refs (excluding its ``worktrees/`` subdir, which
+    holds every OTHER worktree's unrelated private state) overlaid with
+    THIS worktree's own private files (``HEAD``, ``index``, etc.), with the
+    now-unnecessary ``commondir`` pointer removed -- the result behaves like
+    an ordinary, non-worktree repository."""
+    git_dir, common_dir = _resolve_git_dirs()
+    if git_dir == common_dir:
+        return REPO / ".git"
+    tmp_dir = Path(tempfile.mkdtemp(prefix="devcontainer-test-isolation-git-"))
+    stack.callback(shutil.rmtree, tmp_dir, ignore_errors=True)
+    merged = tmp_dir / ".git"
+    shutil.copytree(common_dir, merged, ignore=shutil.ignore_patterns("worktrees"))
+    for item in git_dir.iterdir():
+        dest = merged / item.name
+        if item.is_dir():
+            # MERGE (`dirs_exist_ok=True` overlays onto existing content)
+            # rather than replace -- the per-worktree dir carries its OWN
+            # near-empty `refs`/`logs` subdirectories (for worktree-private
+            # refs like `bisect`), and wholesale-replacing the common dir's
+            # already-copied `refs` with this one would silently wipe every
+            # real branch ref the common dir actually held.
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            if dest.is_dir():
+                shutil.rmtree(dest)
+            shutil.copy2(item, dest)
+    (merged / "commondir").unlink(missing_ok=True)
+    return merged
+
+
 def _tar_of_repo() -> bytes:
     """Build an in-memory tarball of the host checkout, excluding the paths
     in ``EXCLUDED_TOP_LEVEL``. Read-only over the host tree -- never writes
-    anything back to it."""
+    anything back to it (``.git`` is handled via
+    ``_materialized_git_dir``, which only ever READS the host's git
+    metadata to build a separate, temporary, self-contained copy)."""
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
+    with tarfile.open(fileobj=buf, mode="w") as tar, contextlib.ExitStack() as stack:
         for entry in sorted(REPO.iterdir()):
             if entry.name in EXCLUDED_TOP_LEVEL:
+                continue
+            if entry.name == ".git":
+                tar.add(_materialized_git_dir(stack), arcname=".git")
                 continue
             tar.add(entry, arcname=entry.name)
     return buf.getvalue()
@@ -208,6 +275,26 @@ def _tear_down(container_id: str, volume_name: str) -> None:
         raise SystemExit("; ".join(errors))
 
 
+def _cleanup_orphan(instance_label: str, volume_name: str) -> None:
+    """Best-effort cleanup when ``devcontainer up`` itself fails (timeout,
+    a failure during ``onCreateCommand`` after the container already
+    exists, or unparseable output): a container may have been created under
+    this instance's id-label even though ``_bring_up`` never returned an
+    id. Finds and removes it by label, then removes the volume, so a failed
+    startup never leaks either. Failures here are swallowed deliberately --
+    this runs while an already-failing startup error is propagating, and
+    that original error is what should surface, not a secondary cleanup
+    failure."""
+    find = subprocess.run(
+        ["docker", "ps", "-aq", "--filter",
+         f"label=devcontainer-test-isolation.instance={instance_label}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    for container_id in find.stdout.split():
+        subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=60)
+    subprocess.run(["docker", "volume", "rm", volume_name], capture_output=True, timeout=60)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=(
@@ -226,7 +313,11 @@ def main(argv: list[str] | None = None) -> int:
     instance_label = uuid.uuid4().hex[:12]
     config_path, volume_name = _per_instance_config(instance_label)
     try:
-        container_id = _bring_up(instance_label, config_path)
+        try:
+            container_id = _bring_up(instance_label, config_path)
+        except BaseException:
+            _cleanup_orphan(instance_label, volume_name)
+            raise
         try:
             _populate_workspace(container_id)
             return _run_tests(container_id, config_path, passthrough)

@@ -494,35 +494,69 @@ haven't been split into network-enabled/network-disconnected passes --
 recorded as a named Phase 2 candidate and a Validation Plan item, not
 dropped. Phase 2 (CI/contributor-flow wiring) is next.
 
-### 2026-10-03 — Review round 1: 6 findings addressed
-Automated review on the PR (#5058) raised six real findings, all addressed:
-(1) the fixed named workspace volume was reused across every invocation --
-files deleted on the host or artifacts left by a prior run would stay
-visible, and concurrent runs would mutate the same volume -- fixed by
-generating a per-invocation devcontainer config with the volume name made
-unique (`_per_instance_config`), and removing that exact volume (not just
-the container) at teardown; (2) excluding `.git` from the copied snapshot
-silently broke `--changed` mode (`git diff`/`git status` inside the
+### 2026-10-03 — Review rounds 1-2: 9 findings addressed, one caught live mid-fix
+Automated review on the PR (#5058) raised six findings in round 1, all
+addressed: (1) the fixed named workspace volume was reused across every
+invocation -- files deleted on the host or artifacts left by a prior run
+would stay visible, and concurrent runs would mutate the same volume --
+fixed by generating a per-invocation devcontainer config with the volume
+name made unique (`_per_instance_config`), and removing that exact volume
+(not just the container) at teardown; (2) excluding `.git` from the copied
+snapshot silently broke `--changed` mode (`git diff`/`git status` inside the
 container would fail, and their unchecked empty output would produce an
 empty, not erroring, target set) -- fixed by including `.git` in the copy
 instead of trying to resolve changed targets on the host; (3) the
 privileged workspace-population path (`_populate_workspace`) had no
-automated coverage at all -- added three subprocess-mocked tests covering
-the root tar-extraction command, the follow-up chmod, and both commands'
-failure branches; (4) a failed `docker rm -f` at teardown was silently
-discarded, so a failed removal could leave a container (and anything it
-spawned) running while the overall run still reported success -- `_tear_down`
-now checks both the container and volume removal results and raises if
-either fails; (5) the `--` passthrough separator was only stripped when it
-was the very first extra argument, so the documented
-`--all -- -k some_filter` invocation silently dropped the `-k` filter (the
-inner runner's argparse treated it as a positional) -- fixed to strip every
-`--` occurrence from the passthrough list, not just a leading one; (6) one
-test's assertion allowed a regression that drops the final passthrough
-argument to pass anyway (an overly permissive either/or check) -- narrowed
-to assert the complete expected suffix only. All six fixes are
-live-re-validated by the full unit test suite; the real
-Docker-backed end-to-end run was not re-executed for this specific round,
-since the fixes are either additive (new assertions) or narrowly scoped
-(volume/separator/teardown-result handling) relative to the Phase 1
-end-to-end run already recorded above.
+automated coverage -- added subprocess-mocked tests covering the root
+tar-extraction command, the follow-up chmod, and both commands' failure
+branches; (4) a failed `docker rm -f` at teardown was silently discarded --
+`_tear_down` now checks both the container and volume removal results and
+raises if either fails; (5) the `--` passthrough separator was only
+stripped when it was the very first extra argument, so
+`--all -- -k some_filter` silently dropped the `-k` filter -- fixed to strip
+every `--` occurrence, not just a leading one; (6) one test's assertion
+allowed a regression that drops the final passthrough argument to pass
+anyway -- narrowed to assert the complete expected suffix only.
+
+Round 2 (after pushing round 1's fixes) raised three more, including a
+real, HIGH-severity bug the reviewer caught from static analysis that live
+validation then confirmed directly: (7) **in this repo's own required
+linked-worktree flow, `.git` is a pointer FILE** (`gitdir: <absolute host
+path>`), not a self-contained directory -- copying it verbatim (round 1's
+fix for finding #2) left `git` inside the container pointing at a host
+path that doesn't exist there, so `--changed` would have silently gone back
+to running nothing despite `.git` technically being "included." Fixed with
+`_resolve_git_dirs`/`_materialized_git_dir`: for a normal checkout this is
+just `REPO/.git` (confirmed no bug there); for a linked worktree, it builds
+a merged, self-contained copy in a temp dir -- the shared common dir's
+objects/refs overlaid with this worktree's own private `HEAD`/`index`, with
+the stale `commondir` pointer removed. **Live validation during this exact
+fix caught a second bug the first merge attempt introduced**: a worktree's
+private git dir carries its OWN near-empty `refs`/`logs` subdirectories (for
+worktree-private refs), and wholesale-replacing the common dir's
+already-copied `refs` with those (the first implementation's approach)
+silently wiped every real branch ref -- `git rev-parse HEAD` failed with
+"unknown revision" against the merged copy. Fixed by merging (`dirs_exist_ok=True`)
+those specific subdirectories instead of replacing them outright, re-verified
+live: `git rev-parse HEAD`, `git status --short`, and `git diff --name-only
+origin/dev` all now resolve correctly against the materialized copy, and a
+real end-to-end `--changed --base origin/dev` run through the full wrapper
+completed cleanly (correctly reporting "No plugin suites to run" for this
+PR's own non-plugin diff, rather than erroring). (8) teardown behavior
+itself had no DIRECT test (only an indirect one replacing `_tear_down` with
+a lambda) -- added tests invoking `_tear_down` and a new `_cleanup_orphan`
+directly, covering success and both failure branches. (9) a `devcontainer
+up` failure (timeout, a mid-`onCreateCommand` failure, or unparseable
+output) raised before the teardown `finally` was ever entered, leaking a
+partially created container and its unique volume -- added `_cleanup_orphan`
+(found-by-label best-effort removal, swallowing its own failures so the
+original startup error still surfaces) and wired it around `_bring_up` in
+`main()`.
+
+All nine fixes are re-validated: the full unit test suite (23 tests) passes,
+and the real Docker-backed end-to-end run (`ai-attribution`, 98 passed / 6
+skipped) was re-executed from scratch after every fix in this round,
+including the `--changed` mode confirmation above -- not merely re-run once
+at the start, since finding #7's live-validation-while-fixing is exactly
+what caught finding #7's own follow-up bug.
+
